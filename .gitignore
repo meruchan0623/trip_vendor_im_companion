@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-*/
+release/
+host/dist/
+**/bin/
+**/obj/
+.env*
+work/
+*.log
+*.png
+*.jpg
+.claude/settings.local.json

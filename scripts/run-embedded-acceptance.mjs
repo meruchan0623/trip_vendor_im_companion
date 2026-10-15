@@ -1,0 +1,13 @@
+import {spawn} from 'node:child_process';
+import {createWriteStream,mkdirSync} from 'node:fs';
+import {resolve} from 'node:path';
+mkdirSync('work/embedded-acceptance',{recursive:true});
+const log=createWriteStream('work/embedded-acceptance/live-host.log',{flags:'a'});
+const executable=resolve(process.argv[2]??'node_modules/electron/dist/electron.exe');
+const args=process.argv[2]?['--acceptance']:['.','--acceptance'];
+console.log(JSON.stringify({event:'launch_acceptance',executable,args}));
+const child=spawn(executable,args,{windowsHide:true,stdio:['pipe','pipe','pipe']});
+process.stdin.pipe(child.stdin);
+for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{process.stdout.write(chunk);log.write(chunk);});
+child.once('spawn',()=>console.log(JSON.stringify({event:'helper_started',pid:child.pid})));
+child.once('exit',code=>{console.log(JSON.stringify({event:'helper_exited',code}));log.end();process.stdin.unpipe(child.stdin);process.stdin.pause();});

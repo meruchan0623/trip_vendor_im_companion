@@ -1,0 +1,14 @@
+{
+  "status": "optional-followup-not-applied",
+  "originalAsarSha256": "e1bca7d308f3d5b510921733999f3382c0424e5466fb98ea16d7d858fea5290b",
+  "originalMain": { "member": "dist-electron/main/index.js", "sha256": "1f8b31cd0906fd1b16bdb540c3fc1e83e01b4a5d9b3ca029cf489613d0cc635c", "operation": "append scoped require of own main addon; preserve original bytes" },
+  "originalPreload": { "member": "dist-electron/preload/im.js", "sha256": "1c39445b6758530709108e52ec9b9e451885a0e3f7ef5c16655792f7cac4f0fb", "operation": "append bundled IIFE containing electron-only narrow IPC; sandbox preload must not require a custom module" },
+  "localSenderGate": "registered imPlus webContents ID, senderFrame===mainFrame, exact approved file URL, original source hashes and navigation generation",
+  "remoteView": "Electron 27 BrowserView inside original BrowserWindow, constrained to reserved addon strip; no companion BrowserWindow",
+  "remoteWebPreferences": { "sandbox": true, "contextIsolation": true, "nodeIntegration": false, "webSecurity": true, "partition": "persist:tmc-psim-host-v1" },
+  "remoteSenderGate": "dedicated remote webContents ID, senderFrame===mainFrame, HTTPS https://csagent.tsim.tech/desktop-host, navigation/auth generations",
+  "ipcNamespace": "tmc-addon:* / tmc-addon-host:*",
+  "runtimePreloadGate": "contextIsolation must be confirmed at runtime before exposing the addon bridge; if unavailable stay HTML-only",
+  "blocked": ["original IM send APIs", "original generic IPC reuse", "window message null-origin authentication", "star targetOrigin", "credential reads or export", "arbitrary URL/script forwarding", "customer outbound messages"],
+  "requires": ["fresh installed version/hash after current updater settles", "reviewed ASAR transaction and rollback", "deployed tsim_cs desktop-host", "restricted read-only query account acceptance"]
+}

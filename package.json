@@ -1,0 +1,86 @@
+{
+  "name": "travel-merchant-companion",
+  "version": "0.3.2",
+  "private": true,
+  "type": "module",
+  "description": "原客服页面内嵌翻译与订单查询助手",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run typecheck && vite build && node scripts/build-electron.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "electron .",
+    "smoke:shell": "electron . --smoke-test",
+    "package:win": "npm run build:native && npm run build && electron-builder --win portable --x64",
+    "build:browser-bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File native/browser-bridge/build.ps1",
+    "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/windows/build.ps1",
+    "package:mac": "npm run build && electron-builder --mac dir",
+    "build:host": "vite build --config host/vite.config.ts",
+    "build:embedded": "node scripts/build-embedded.mjs",
+    "patch:prepare": "node scripts/patch-client.mjs prepare",
+    "build:runtime": "node scripts/build-electron.mjs",
+    "build:lightweight": "npm run typecheck && tsc -p host-node/tsconfig.json && node scripts/build-lightweight-node.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File native/resident/build.ps1",
+    "package:lightweight": "npm run build:lightweight && node scripts/package-lightweight.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "44.7.2",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "jsdom": "^29.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.4"
+  },
+  "build": {
+    "appId": "tech.tsim.travel-merchant-companion",
+    "productName": "旅游商家助手",
+    "asar": true,
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/main.cjs",
+      "dist-electron/preload.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/windows/bin/publish",
+        "to": "native/windows",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "TravelMerchantCompanion-${version}-win-x64.exe"
+    },
+    "mac": {
+      "target": "dir",
+      "category": "public.app-category.business"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+import { build } from 'esbuild';
+import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+const native=await build({entryPoints:['runtime/native-composer.ts'],bundle:true,platform:'browser',target:'chrome118',format:'iife',minify:true,write:false});
+const nativeSource=native.outputFiles[0].text;
+const runtime=await build({entryPoints:['runtime/runtime-ui.tsx'],bundle:true,platform:'browser',target:'chrome118',format:'iife',minify:true,write:false,define:{'process.env.NODE_ENV':'"production"'}});
+const runtimeSource=runtime.outputFiles[0].text;
+const hash=source=>createHash('sha256').update(source).digest('hex');
+await mkdir('dist-runtime',{recursive:true});
+await writeFile('dist-runtime/runtime-ui.js',runtimeSource);
+await writeFile('dist-runtime/native-composer.js',nativeSource);
+await writeFile('dist-runtime/artifact.json',JSON.stringify({kind:'embedded-companion',customerSend:false,runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)},null,2));
+await build({entryPoints:['electron/main.ts','electron/preload.ts'],bundle:true,platform:'node',target:'node24',format:'cjs',outdir:'dist-electron',outExtension:{'.js':'.cjs'},external:['electron'],define:{__NATIVE_ARTIFACT_SOURCE__:JSON.stringify(nativeSource),__NATIVE_ARTIFACT_SHA256__:JSON.stringify(hash(nativeSource)),__RUNTIME_ARTIFACT_SOURCE__:JSON.stringify(runtimeSource),__RUNTIME_ARTIFACT_SHA256__:JSON.stringify(hash(runtimeSource))}});
+console.log(JSON.stringify({event:'embedded_build_complete',customerSend:false,runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)}));

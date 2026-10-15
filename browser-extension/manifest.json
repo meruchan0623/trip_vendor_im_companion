@@ -1,0 +1,12 @@
+{
+  "manifest_version":3,
+  "name":"TSim 旅游商家助手会话桥",
+  "version":"1.0.0",
+  "description":"在已登录的 TSim 页面内部执行身份核验与翻译；不导出登录令牌，不发送客户消息。",
+  "key":"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArfN8tONaR4zpx6bdnBKoft2/X8JoIP0BtfzBNv/HOuKOXhaAdLnmuQPq0PFm9MJi75zTL45KxdxTlQcHD5FUvXOEASe0c/sByFG8tFLVxHijvjK12id5TXHx/qYyDY6lV6MuVQ1HoOxGQ6ERvILLDfNbzMLndA2KO2wzshOPpmfLkaUeDUo0gTv/vSJKERFU2ivlMfcflPj942vwJikHfl/duByss369ph+W5u13E7vrzQ8DOlZDs6jCph/rOOYeruSt8922egd9r8dWuGwVrugc5IU7gEZvJIwQKVq7BiGyBimopv25lyAet3Pyp+Locn5GmGTWDCYFwrx0Yez0+QIDAQAB",
+  "permissions":["scripting","tabs","nativeMessaging","alarms"],
+  "host_permissions":["https://csagent.tsim.tech/*"],
+  "background":{"service_worker":"background.js"},
+  "action":{"default_title":"连接 TSim 旅游商家助手","default_popup":"status.html"},
+  "content_security_policy":{"extension_pages":"script-src 'self'; object-src 'none'; frame-src https://csagent.tsim.tech"}
+}

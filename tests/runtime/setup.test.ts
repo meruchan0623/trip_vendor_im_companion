@@ -1,0 +1,8 @@
+import{describe,it,expect,vi}from'vitest';
+import{SetupScope}from'../../runtime/setup-scope';
+describe('actual CLI setup cancellation ownership, fake resources only',()=>{
+  it('a late pending connection is disconnected even after cancellation cleanup already resolved',async()=>{const scope=new SetupScope();let complete!:(resource:{disconnect:()=>Promise<void>})=>void;const resource={disconnect:vi.fn(async()=>{})};const acquiring=scope.acquire(new Promise<{disconnect:()=>Promise<void>}>(resolve=>{complete=resolve;}),item=>item.disconnect());await scope.close();complete(resource);await expect(acquiring).rejects.toThrow('USER_CANCELLED');expect(resource.disconnect).toHaveBeenCalledOnce();await scope.close();expect(resource.disconnect).toHaveBeenCalledOnce();});
+  it('cleanup is memoized before synchronous reentry and releases resources in reverse order',async()=>{const scope=new SetupScope(),order:string[]=[];await scope.acquire(Promise.resolve('transport'),async value=>{order.push(value);});await scope.acquire(Promise.resolve('driver'),async value=>{order.push(value);void scope.close();});const first=scope.close(),second=scope.close();expect(first).toBe(second);await first;expect(order).toEqual(['driver','transport']);});
+  it('failed outer detach still closes inner helper connection',async()=>{const scope=new SetupScope(),disconnect=vi.fn(async()=>{});await scope.acquire(Promise.resolve({}),disconnect);await scope.acquire(Promise.resolve({}),async()=>{throw new Error('detach failure');});await expect(scope.close()).rejects.toThrow('HELPER_CLEANUP_FAILED');expect(disconnect).toHaveBeenCalledOnce();});
+});
+
