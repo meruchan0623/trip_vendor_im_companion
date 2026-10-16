@@ -8,7 +8,7 @@ interface Socket {readyState:number;send(data:string):void;close():void;addEvent
 /** Internal product transport, never exposed to the renderer or to a general IPC bridge. */
 export class LoopbackCDPTransport implements EventCDPTransport {
   private serial=0;private closed=false;
-  private pending=new Map<number,{resolve:(value:unknown)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>;sessionId?:string}>();
+  private pending=new Map<number,{resolve:(value:unknown)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>;sessionId?:string;method:string;started:number}>();
   private events=new Set<(event:CDPEvent)=>void>();private disconnects=new Set<()=>void>();
   constructor(private socket:Socket,private timeoutMs=4000){socket.addEventListener('message',this.message);socket.addEventListener('close',this.lost);socket.addEventListener('error',this.lost);}
   private message=(event:{data:unknown})=>{
@@ -18,6 +18,7 @@ export class LoopbackCDPTransport implements EventCDPTransport {
     if(!value||typeof value!=='object'){this.fail();return;}
     if(Number.isSafeInteger(value.id)){
       const request=this.pending.get(value.id);if(!request)return;if(value.sessionId!==request.sessionId){this.fail();return;}this.pending.delete(value.id);clearTimeout(request.timer);
+      const elapsedMs=Date.now()-request.started;if(elapsedMs>=250)console.log(JSON.stringify({event:'cdp-slow-command',method:request.method,elapsedMs}));
       // Do not include upstream exception/error text which may contain business data.
       if(value.error||!('result' in value))request.reject(new Error('CDP_COMMAND_REJECTED'));else request.resolve(value.result);
     }else if(typeof value.method==='string'&&value.params&&typeof value.params==='object'){
@@ -30,7 +31,7 @@ export class LoopbackCDPTransport implements EventCDPTransport {
     if(!METHODS.has(method))return Promise.reject(new Error('FORBIDDEN_CDP_METHOD'));
     if(this.closed||this.socket.readyState!==1)return Promise.reject(new Error('CDP_DISCONNECTED'));
     const id=++this.serial;
-    return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.fail();},this.timeoutMs);this.pending.set(id,{resolve,reject,timer,sessionId});try{this.socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));}catch{this.fail();}});
+    return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{console.log(JSON.stringify({event:'cdp-command-timeout',method,timeoutMs:this.timeoutMs}));this.fail();},this.timeoutMs);this.pending.set(id,{resolve,reject,timer,sessionId,method,started:Date.now()});try{this.socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));}catch{this.fail();}});
   }
   onEvent(listener:(event:CDPEvent)=>void){this.events.add(listener);return()=>this.events.delete(listener);}
   onDisconnect(listener:()=>void){if(this.closed){listener();return()=>{};}this.disconnects.add(listener);return()=>this.disconnects.delete(listener);}
