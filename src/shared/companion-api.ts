@@ -1,5 +1,5 @@
 import type { NativeWindow } from './types';
-import type { PanelTarget } from './workbench';
+import type { OutboundMode, PanelTarget } from './workbench';
 export interface SurfaceRect {x:number;y:number;width:number;height:number}
 export interface MessageSurface {active:boolean;composerRect:SurfaceRect|null;toolbarRect:SurfaceRect|null}
 export interface OrderViewport {width:number;height:number;dpr:number;clientOffset?:{x:number;y:number}}
@@ -11,6 +11,8 @@ export interface StandaloneState {
   phase:'idle'|'reading'|'translating'|'ready'|'stale'|'failed'|'replaced'|'waiting'|'replacing';
   customerLanguage?:string; followCustomerLanguage?:boolean;
   autoTranslate?:boolean; shortcutEnabled?:boolean; translationPaused?:boolean;
+  /** `send`: Enter sends the reviewed translation; `replace`: Enter is left to the vendor and translations only replace the draft. */
+  outboundMode?:OutboundMode; sendPending?:boolean;
   error:string|null; language:PanelTarget; browserOpen:boolean;
   composerSource:'uia'|'verified-editor'|'unavailable';
   orderEntries:OrderEntry[]; orderViewport:OrderViewport|null;
@@ -23,7 +25,7 @@ export interface StandaloneAPI {
   bindWindow(id:string):Promise<void>; unbindWindow():Promise<void>;
   startClient():Promise<void>;
   connectComposer():Promise<void>; readDraft():Promise<void>;
-  setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean}):Promise<void>;
+  setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}):Promise<void>;
   cancelTranslation():Promise<void>; resumeTranslation():Promise<void>;
   translate(target:PanelTarget):Promise<void>; replaceDraft():Promise<void>;
   openLogin():Promise<void>; logout():Promise<void>;

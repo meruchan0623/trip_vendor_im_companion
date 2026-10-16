@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { BrowserProfileSessionService, type BrowserProfileSessionOptions } from './browser-profile-session';
-import { isPanelTarget, sameVerifiedDraft, type PanelTarget, type PanelOrderState, type PsimIdentity, type VerifiedComposerSnapshot } from '../src/shared/workbench';
+import { isOutboundMode, isPanelTarget, sameVerifiedDraft, type OutboundMode, type PanelTarget, type PanelOrderState, type PsimIdentity, type VerifiedComposerSnapshot } from '../src/shared/workbench';
 import type { StandaloneState, OrderEntry } from '../src/shared/companion-api';
 import type {NativeInteraction} from '../runtime/native-composer';
 import type { NativeAdapter, NativeDraftSnapshot, WindowState } from './native-adapter';
@@ -38,13 +38,15 @@ const messages:Record<string,string>={
   BROWSER_CLEANUP_UNCONFIRMED:'订单浮层关闭状态暂未确认，请检查浏览器窗口。',
   BROWSER_PLACEMENT_FAILED:'订单浮层未能显示，请重新点击订单号。',
   BROWSER_SPACE_TOO_SMALL:'订单查询空间不足，请先放大商家窗口，再打开订单。',
+  NATIVE_SEND_FAILED:'未能自动发送，请确认输入框内容后再按 Enter。',
+  SEND_UNAVAILABLE:'当前编辑器不支持自动发送，请切换为替换模式。',
 };
 /** Quiet period after the last edit before an automatic outbound translation request. */
 export const AUTO_TRANSLATE_DELAY_MS=500;
 export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export class CompanionService {
-  private state:StandaloneState={attached:false,targetInstanceId:null,nativeStatus:'starting',auth:'connecting',accountScope:'unknown',draft:null,preview:null,phase:'idle',error:null,language:'en',customerLanguage:'unknown',followCustomerLanguage:true,autoTranslate:true,shortcutEnabled:true,translationPaused:false,browserOpen:false,composerSource:'unavailable',orderEntries:[],orderViewport:null,messageSurface:{active:false,composerRect:null,toolbarRect:null}};
+  private state:StandaloneState={attached:false,targetInstanceId:null,nativeStatus:'starting',auth:'connecting',accountScope:'unknown',draft:null,preview:null,phase:'idle',error:null,language:'en',customerLanguage:'unknown',followCustomerLanguage:true,autoTranslate:true,shortcutEnabled:true,outboundMode:'send',sendPending:false,translationPaused:false,browserOpen:false,composerSource:'unavailable',orderEntries:[],orderViewport:null,messageSurface:{active:false,composerRect:null,toolbarRect:null}};
   private listeners=new Set<(state:StandaloneState)=>void>();
   private psim:SessionPort;
   private sessionStarting:Promise<void>;
@@ -62,7 +64,7 @@ export class CompanionService {
   private orderRequest?:AbortController;
   private clearOrder(){++this.orderGeneration;this.orderRequest?.abort();this.orderRequest=undefined;this.order={identifier:'',status:'idle',error:null,fields:[]};}
   private resetCustomerLanguage(){this.state.customerLanguage='unknown';this.state.followCustomerLanguage=true;this.state.language='en';this.translationIntent++;this.attempted=undefined;this.suppressed=undefined;}
-  private contextChanged(){this.invalidate();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
+  private contextChanged(){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
   private embeddedState(){return embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null);}
   private retireComposer(composer:ExternalComposer){
     if(this.external!==composer||this.closed)return;
@@ -78,15 +80,18 @@ export class CompanionService {
   }
   private interactionRefresh=false;
   private interactionTask?:Promise<void>;
-  private nativeShortcut?:boolean;
-  private syncInteractionOptions(){const external=this.external;if(!external?.setInteractionOptions)return;const shortcutEnabled=this.state.shortcutEnabled!==false;if(shortcutEnabled===this.nativeShortcut)return;this.nativeShortcut=shortcutEnabled;void external.setInteractionOptions({shortcutEnabled}).catch(()=>{if(this.external===external)this.nativeShortcut=undefined;});}
-  private retireInteractions(){this.stopInteraction?.();this.stopInteraction=undefined;this.stopInvalidation?.();this.stopInvalidation=undefined;this.nativeShortcut=undefined;this.interactionRefresh=false;this.interactionTask=undefined;}
+  private nativeOptions?:string;
+  /** Whether an outbound translation is expected for the current draft; otherwise Enter stays with the vendor. */
+  private translationApplies(){return this.state.autoTranslate!==false&&!this.state.translationPaused&&this.state.auth==='ready'&&(this.state.followCustomerLanguage===false||isPanelTarget(this.state.customerLanguage));}
+  private syncInteractionOptions(){const external=this.external;if(!external?.setInteractionOptions)return;const options={shortcutEnabled:this.state.shortcutEnabled!==false,enterSend:this.state.outboundMode==='send'&&this.translationApplies()},key=JSON.stringify(options);if(key===this.nativeOptions)return;this.nativeOptions=key;void external.setInteractionOptions(options).catch(()=>{if(this.external===external)this.nativeOptions=undefined;});}
+  private retireInteractions(){this.stopInteraction?.();this.stopInteraction=undefined;this.stopInvalidation?.();this.stopInvalidation=undefined;this.nativeOptions=undefined;this.interactionRefresh=false;this.interactionTask=undefined;}
   private interaction(event:NativeInteraction,external:ExternalComposer){
     if(this.closed||external!==this.external)return;
     if(event.type==='replace-shortcut'){if(this.state.shortcutEnabled!==false&&this.state.phase==='ready'&&!this.state.translationPaused&&this.state.auth==='ready'&&this.foreground&&this.reviewed?.capture.source==='verified-editor'&&sameVerifiedDraft(this.reviewed.capture.snapshot,event.snapshot))void this.replaceDraft(event.snapshot);return;}
+    if(event.type==='send-shortcut'){void this.sendShortcut(event.snapshot);return;}
     if(event.type!=='draft-changed')return;
     // Revoke immediately, before CDP reads or the 500 ms safety observation can finish.
-    this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.interactionRefresh=true;this.publish();
+    this.clearPendingSend();this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.interactionRefresh=true;this.publish();
     if(this.interactionTask)return;
     const task=(async()=>{while(this.interactionRefresh&&!this.closed&&this.external===external){this.interactionRefresh=false;if(!this.foreground)return;await this.acquireEditor();const epoch=this.epoch,id=this.state.targetInstanceId;try{if(this.closed||external!==this.external)continue;const capture=await this.capture();if(this.closed||external!==this.external||epoch!==this.epoch||id!==this.state.targetInstanceId)continue;this.adopt(capture);this.publish();}catch{/* The fallback observation handles source recovery. */}finally{this.setBusy(false);}}})();
     this.interactionTask=task;void task.finally(()=>{if(this.interactionTask===task)this.interactionTask=undefined;});
@@ -97,6 +102,11 @@ export class CompanionService {
   private verifiedCustomerContext?:string;
   private sessionIdentity?:string;
   private reviewed?:{capture:Captured;identity:PsimIdentity;text:string};
+  /** The draft the user pressed Enter on in send mode, waiting for its translation. */
+  private pendingSend?:VerifiedComposerSnapshot;
+  /** The last draft this service wrote; Enter sends it as is instead of translating it again. */
+  private lastWritten?:VerifiedComposerSnapshot;
+  private clearPendingSend(){this.pendingSend=undefined;this.state.sendPending=false;}
   private epoch=0; private request?:AbortController; private closed=false;
   private busy=false; private foreground=false; private poll?:ReturnType<typeof setInterval>;
   private editorIdle:Promise<void>=Promise.resolve();
@@ -115,20 +125,21 @@ export class CompanionService {
   private customerContext(capture=this.captured){return capture?.source==='verified-editor'?JSON.stringify([this.state.targetInstanceId,capture.snapshot.conversationId,capture.snapshot.platformAccountScope,capture.snapshot.documentGeneration]):this.context(capture);}
   private signature(capture=this.captured){return capture?JSON.stringify([capture.source,capture.snapshot,this.state.language,this.state.accountScope]):'';}
   private stopTimer(){if(this.autoTimer)clearTimeout(this.autoTimer);this.autoTimer=undefined;}
-  private schedule(){
+  private schedule(delay=this.pendingSend?0:AUTO_TRANSLATE_DELAY_MS){
     const capture=this.captured,key=this.signature();
     if(this.state.followCustomerLanguage!==false&&!isPanelTarget(this.state.customerLanguage))return;
     if(this.closed||!this.foreground||!this.state.autoTranslate||this.state.translationPaused||this.state.auth!=='ready'||capture?.source!=='verified-editor'||!capture.snapshot.isPlainText||capture.snapshot.composing||!capture.snapshot.text.trim()||key===this.attempted||key===this.suppressed)return;
     if(this.autoTimer){this.state.phase='waiting';return;}
     this.state.phase='waiting';
-    this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.busy||this.externalConnecting){this.schedule();return;}this.attempted=key;void this.translate(this.state.language,key);},AUTO_TRANSLATE_DELAY_MS);
+    this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.busy||this.externalConnecting){this.schedule(this.pendingSend?25:AUTO_TRANSLATE_DELAY_MS);return;}this.attempted=key;void this.translate(this.state.language,key);},delay);
   }
-  async setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean}){
+  async setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}){
+    if(options.outboundMode!==undefined){if(!isOutboundMode(options.outboundMode))throw new Error('INVALID_OUTBOUND_MODE');if(options.outboundMode!==this.state.outboundMode){this.clearPendingSend();this.state.outboundMode=options.outboundMode;}}
     if(options.shortcutEnabled!==undefined){if(typeof options.shortcutEnabled!=='boolean')throw new Error('INVALID_SHORTCUT_OPTION');this.state.shortcutEnabled=options.shortcutEnabled;}
     if(options.language!==undefined&&!isPanelTarget(options.language))throw new Error('INVALID_LANGUAGE');
     if(options.language!==undefined){this.state.followCustomerLanguage=false;}
     if(options.language!==undefined&&options.language!==this.state.language){this.translationIntent++;this.invalidate();this.state.language=options.language;this.suppressed=undefined;this.attempted=undefined;this.state.error=null;}
-    if(options.autoTranslate!==undefined&&options.autoTranslate!==this.state.autoTranslate){this.translationIntent++;this.invalidate();this.state.autoTranslate=options.autoTranslate;this.attempted=undefined;}
+    if(options.autoTranslate!==undefined&&options.autoTranslate!==this.state.autoTranslate){this.clearPendingSend();this.translationIntent++;this.invalidate();this.state.autoTranslate=options.autoTranslate;this.attempted=undefined;}
     this.schedule();this.publish();
   }
   async reportCustomerLanguage(language:string,conversationKey:string){
@@ -138,7 +149,7 @@ export class CompanionService {
     try{const capture=await this.capture();if(epoch!==this.epoch||this.closed)return;this.adopt(capture);if(conversationKey!==this.context(capture)||customerContext!==undefined&&customerContext!==this.customerContext(capture)){this.publish();return;}if(language==='unknown'&&this.state.customerLanguage!=='unknown'||language===this.state.customerLanguage){this.publish();return;}this.state.customerLanguage=language;if(this.state.followCustomerLanguage!==false){this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;if(isPanelTarget(language))this.state.language=language;this.schedule();}this.publish();}catch(error){if(epoch===this.epoch&&!this.closed)this.fail(error,true);}finally{this.setBusy(false);}
   }
   async followCustomerLanguage(){this.state.followCustomerLanguage=true;this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;if(isPanelTarget(this.state.customerLanguage))this.state.language=this.state.customerLanguage;this.schedule();this.publish();}
-  async cancelTranslation(){this.translationIntent++;this.pausedContext=this.customerContext();this.state.translationPaused=true;this.invalidate();this.state.phase='idle';this.state.error=null;this.publish();}
+  async cancelTranslation(){this.clearPendingSend();this.translationIntent++;this.pausedContext=this.customerContext();this.state.translationPaused=true;this.invalidate();this.state.phase='idle';this.state.error=null;this.publish();}
   async resumeTranslation(){this.translationIntent++;this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;this.invalidate();this.state.phase='idle';this.schedule();this.publish();}
 
   private sessionError:string|null=null;
@@ -184,14 +195,14 @@ export class CompanionService {
   reportBrowserFailure(code:'BROWSER_PLACEMENT_FAILED'|'BROWSER_CLEANUP_UNCONFIRMED'|'BROWSER_SPACE_TOO_SMALL'){this.fail(new Error(code));}
   setWindowState(window:WindowState|null){
     if(this.closed)return;
-    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.resetCustomerLanguage();this.clearOrder();}
+    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();}
     if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectionAbort?.abort();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
   invalidate(){this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
-  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
+  private fail(error:unknown,sourceFailure=false){this.clearPendingSend();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){
@@ -216,7 +227,7 @@ export class CompanionService {
       const customerContext=this.customerContext(capture);
       const context=JSON.stringify([this.context(capture),capture.snapshot.editorIdentity,capture.snapshot.composerId,capture.snapshot.documentGeneration]);
       if(this.verifiedCustomerContext!==undefined&&this.verifiedCustomerContext!==customerContext)this.contextChanged();
-      else if(this.verifiedContext!==undefined&&this.verifiedContext!==context){this.invalidate();this.clearOrder();this.onContextChanged();}
+      else if(this.verifiedContext!==undefined&&this.verifiedContext!==context){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.clearOrder();this.onContextChanged();}
       this.verifiedCustomerContext=customerContext;this.verifiedContext=context;
     }
     const changed=!this.captured||JSON.stringify(this.captured.snapshot)!==JSON.stringify(capture.snapshot)||this.captured.source!==capture.source;
@@ -232,7 +243,7 @@ export class CompanionService {
   private async observe(){
     this.setBusy(true);const epoch=this.epoch,id=this.state.targetInstanceId;
     try{const capture=await this.capture();if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;const recovered=this.sourceFailure&&this.state.phase==='failed'&&this.state.composerSource==='unavailable'&&capture.source==='verified-editor';this.adopt(capture);if(recovered){this.sourceFailure=false;this.state.phase='idle';this.state.error=null;this.schedule();}this.publish();}
-    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.clearOrder();this.onContextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
+    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.clearPendingSend();this.clearOrder();this.onContextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
     finally{this.setBusy(false);}
   }
   /** Background captures must finish before a visible enabled user action acquires the editor. */
@@ -323,30 +334,67 @@ export class CompanionService {
         if(!result.data.translated_text.trim())throw new Error('EMPTY_TRANSLATION');
         this.reviewed={capture,identity,text:result.data.translated_text};this.state.preview=result.data.translated_text;this.state.phase='ready';this.publish();
       }finally{this.setBusy(false);}
+      void this.flushPendingSend();
     }catch(error){if(epoch===this.epoch)this.fail(error);}finally{if(this.request===request)this.request=undefined;}
   }
-  async replaceDraft(shortcutSnapshot?:VerifiedComposerSnapshot){
+  /** Send mode: a plain Enter sends the reviewed translation, waiting for it if the request is still pending. */
+  private async sendShortcut(snapshot:VerifiedComposerSnapshot){
+    if(this.closed||!this.foreground||this.state.outboundMode!=='send'||!snapshot.isPlainText)return;
+    // Translation off, paused or not applicable, or the draft is already our translation: send it unchanged, as the vendor would.
+    if(!this.translationApplies()||this.lastWritten&&sameVerifiedDraft(this.lastWritten,snapshot)){await this.sendAsIs(snapshot);return;}
+    this.pendingSend=snapshot;this.state.sendPending=true;
+    const reviewed=this.reviewed;
+    if(this.state.phase==='ready'&&reviewed?.capture.source==='verified-editor'&&sameVerifiedDraft(reviewed.capture.snapshot,snapshot)){await this.flushPendingSend();return;}
+    // An in-flight request flushes the pending send when it completes.
+    if(this.state.phase!=='translating'){this.stopTimer();this.attempted=undefined;this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';this.schedule();if(!this.autoTimer)this.clearPendingSend();}
+    this.publish();
+  }
+  private async flushPendingSend(){
+    const pending=this.pendingSend,reviewed=this.reviewed;if(!pending||this.state.phase!=='ready')return;
+    this.clearPendingSend();
+    if(!reviewed||reviewed.capture.source!=='verified-editor'||!sameVerifiedDraft(reviewed.capture.snapshot,pending)){this.publish();return;}
+    await this.replaceDraft(pending,'send');
+  }
+  private async sendAsIs(snapshot:VerifiedComposerSnapshot){
+    if(!await this.waitForObservation()||!this.foreground)return;
+    await this.acquireEditor();const epoch=this.epoch;
+    try{
+      const external=this.external;if(!external?.send)throw new Error('SEND_UNAVAILABLE');
+      const current=await this.capture();if(epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(current.source!=='verified-editor'||!sameVerifiedDraft(current.snapshot,snapshot)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
+      if(!current.snapshot.isPlainText)throw new Error('WRITE_UNAVAILABLE');
+      await external.send(current.snapshot,()=>{if(this.closed||!this.foreground||epoch!==this.epoch||this.external!==external||this.state.outboundMode!=='send')throw new Error('DRAFT_CHANGED');});
+      this.lastWritten=undefined;
+    }catch(error){this.fail(error);}finally{this.setBusy(false);}
+  }
+  async replaceDraft(shortcutSnapshot?:VerifiedComposerSnapshot,intent:'replace'|'send'='replace'){
+    const allowed=()=>intent==='send'?this.state.outboundMode==='send':this.state.shortcutEnabled!==false;
     const shortcutReview=shortcutSnapshot?this.reviewed:undefined;
-    if(shortcutSnapshot&&(!shortcutReview||shortcutReview.capture.source!=='verified-editor'||!sameVerifiedDraft(shortcutReview.capture.snapshot,shortcutSnapshot)||this.state.shortcutEnabled===false||this.state.translationPaused||this.state.phase!=='ready'))return;
-    if(!await this.waitForObservation()||this.busy||!this.reviewed||!this.foreground)return;
-    if(shortcutSnapshot&&(this.reviewed!==shortcutReview||this.state.shortcutEnabled===false||this.state.translationPaused||this.state.phase!=='ready'))return;
-    this.setBusy(true);const reviewed=this.reviewed,epoch=this.epoch;this.stopTimer();this.state.error=null;this.state.phase='replacing';this.publish();
+    if(shortcutSnapshot&&(!shortcutReview||shortcutReview.capture.source!=='verified-editor'||!sameVerifiedDraft(shortcutReview.capture.snapshot,shortcutSnapshot)||!allowed()||this.state.translationPaused||this.state.phase!=='ready'))return;
+    if(!await this.waitForObservation()||!this.reviewed||!this.foreground)return;
+    // A user's Enter must not be dropped because a background read holds the editor.
+    if(intent==='send')await this.acquireEditor();else if(this.busy)return;else this.setBusy(true);
+    if(!this.reviewed||!this.foreground||shortcutSnapshot&&(this.reviewed!==shortcutReview||!allowed()||this.state.translationPaused||this.state.phase!=='ready')){this.setBusy(false);return;}
+    const reviewed=this.reviewed,epoch=this.epoch;this.stopTimer();this.state.error=null;this.state.phase='replacing';this.publish();
     try{
       await this.psim.sync();
       const auth=this.psim.identity();if(!auth||auth.authGeneration!==reviewed.identity.authGeneration||auth.accountScope!==reviewed.identity.accountScope)throw new Error('AUTH_CHANGED');
       const current=await this.capture();if(!this.foreground||epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(!same(current,reviewed.capture)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
-      if(current.source==='verified-editor'){await this.external!.replace(current.snapshot,reviewed.text,async()=>{
+      const authorize=async()=>{
         await this.psim.sync();
         const assertCurrent=()=>{const latest=this.psim.identity();
-          if(this.closed||!this.foreground||shortcutSnapshot&&(this.state.shortcutEnabled===false||this.state.translationPaused)||epoch!==this.epoch||this.external?.targetInstanceId!==this.state.targetInstanceId||!latest||latest.authGeneration!==reviewed.identity.authGeneration||latest.accountScope!==reviewed.identity.accountScope)throw new Error('AUTH_CHANGED');
+          if(this.closed||!this.foreground||shortcutSnapshot&&(!allowed()||this.state.translationPaused)||epoch!==this.epoch||this.external?.targetInstanceId!==this.state.targetInstanceId||!latest||latest.authGeneration!==reviewed.identity.authGeneration||latest.accountScope!==reviewed.identity.accountScope)throw new Error('AUTH_CHANGED');
         };
         assertCurrent();return assertCurrent;
-      });}else{if(!current.snapshot.canReplace)throw new Error('WRITE_UNAVAILABLE');await this.native.replaceDraft(current.snapshot,reviewed.text);}
+      };
+      if(current.source==='verified-editor'){if(!current.snapshot.isPlainText)throw new Error('WRITE_UNAVAILABLE');if(intent==='send'&&!this.external!.send)throw new Error('SEND_UNAVAILABLE');await this.external!.replace(current.snapshot,reviewed.text,authorize);}else{if(intent==='send')throw new Error('SEND_UNAVAILABLE');if(!current.snapshot.canReplace)throw new Error('WRITE_UNAVAILABLE');await this.native.replaceDraft(current.snapshot,reviewed.text);}
       const after=await this.capture();if(epoch!==this.epoch||after.snapshot.text!==reviewed.text)throw new Error('DRAFT_READBACK_MISMATCH');
       this.adopt(after,false);
       if(epoch!==this.epoch)throw new Error('DRAFT_CHANGED');
       if(current.source==='verified-editor'&&(after.source!=='verified-editor'||after.snapshot.conversationId!==current.snapshot.conversationId||after.snapshot.scopeGeneration!==current.snapshot.scopeGeneration||after.snapshot.platformAccountScope!==current.snapshot.platformAccountScope||after.snapshot.documentGeneration!==current.snapshot.documentGeneration||after.snapshot.editorIdentity!==current.snapshot.editorIdentity||after.snapshot.composerId!==current.snapshot.composerId))throw new Error('DRAFT_CHANGED');
-      this.suppressed=this.signature(after);this.attempted=this.suppressed;this.reviewed=undefined;this.state.preview=null;this.state.phase='replaced';this.publish();
+      this.lastWritten=after.source==='verified-editor'?after.snapshot:undefined;
+      this.suppressed=this.signature(after);this.attempted=this.suppressed;this.reviewed=undefined;this.state.preview=null;this.state.phase='replaced';
+      if(intent==='send'&&after.source==='verified-editor'){this.publish();await this.external!.send!(after.snapshot,authorize);this.lastWritten=undefined;this.state.phase='idle';}
+      this.publish();
     }catch(error){this.invalidate();this.fail(error);}finally{this.setBusy(false);}
   }
   async queryOrder(identifier:string){
@@ -371,5 +419,5 @@ export class CompanionService {
   }
   async openLogin(){try{await this.psim.openLogin();}catch(error){this.fail(error);}}
   async logout(){try{await this.psim.logout();}catch(error){this.fail(error);}}
-  async dispose(){this.closed=true;this.connectionAbort?.abort();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.psim.dispose();}
+  async dispose(){this.closed=true;this.connectionAbort?.abort();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.psim.dispose();}
 }

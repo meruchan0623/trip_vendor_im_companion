@@ -17,7 +17,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>overlay.open({identifier,identifierType})}):undefined;
   const bound=()=>!!state&&matchesPageConversation(document,state.conversationKey);
   let renderedBound:boolean|undefined;
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false}});};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false},sendPending:false});};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;attempts:number;done:boolean;attempt:number};

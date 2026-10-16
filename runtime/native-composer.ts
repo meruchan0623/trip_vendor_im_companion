@@ -4,8 +4,11 @@ import type {OrderEntry,MessageSurface,OrderViewport,SurfaceRect} from '../src/s
 import {collectTextRuns,findIdentifierMatches,inferIdentifierType,MESSAGE_TEXT_SELECTOR,HEADER_TEXT_SELECTOR,HEADER_ORDER} from './page/identifiers';
 const SELECTOR='.tiptap.ProseMirror.chat-editor[contenteditable="true"]';
 interface PublicEditor {view:{dom:HTMLElement;composing:boolean;focus():void};state:{doc:{content:{size:number}}};isDestroyed:boolean;isEditable:boolean;getJSON():unknown;on(type:string,handler:()=>void):unknown;off(type:string,handler:()=>void):unknown;commands:{setContent(content:unknown,emitUpdate:boolean,parseOptions:{preserveWhitespace:'full'}):boolean;setTextSelection(position:number):boolean}}
-export type NativeInteraction={type:'draft-changed'}|{type:'replace-shortcut';snapshot:VerifiedComposerSnapshot};
+export type NativeInteraction={type:'draft-changed'}|{type:'replace-shortcut';snapshot:VerifiedComposerSnapshot}|{type:'send-shortcut';snapshot:VerifiedComposerSnapshot};
+export interface NativeInteractionOptions {shortcutEnabled:boolean;enterSend:boolean}
 export function isReplaceChord(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'>){return event.key==='Enter'&&event.altKey&&!event.shiftKey&&(event.ctrlKey!==event.metaKey);}
+/** A plain Enter, which the vendor treats as send. Shift+Enter (newline) and modified chords are left alone. */
+export function isSendKey(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'>){return event.key==='Enter'&&!event.altKey&&!event.shiftKey&&!event.ctrlKey&&!event.metaKey;}
 export function isReplaceIntent(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'|'isTrusted'|'repeat'|'isComposing'|'keyCode'>){return isReplaceChord(event)&&event.isTrusted&&!event.repeat&&!event.isComposing&&event.keyCode!==229;}
 export interface NativePoll {snapshot?:VerifiedComposerSnapshot;writeVerified:boolean;reason?:string;orderEntries?:OrderEntry[];orderViewport?:OrderViewport;messageSurface?:MessageSurface;orderFrame?:{rect:SurfaceRect;clientWidth:number;clientHeight:number;clientLeft:number;clientTop:number}}
 const inactiveSurface=():MessageSurface=>({active:false,composerRect:null,toolbarRect:null});
@@ -86,6 +89,7 @@ export function visibleOrderEntries(document:Document):OrderEntry[]{
   return entries;
 }
 const SEND_SELECTOR='.chat_area-button .list-btn_send button.btn_send';
+/** Text-only StarterKit documents may carry presentation marks and nested blocks. */
 function plainDoc(value:unknown):{doc:unknown;text:string}|null{
   let count=0;
   const visit=(node:any,depth:number):string|null=>{
@@ -101,16 +105,16 @@ function plainDoc(value:unknown):{doc:unknown;text:string}|null{
   if((value as any)?.type!=='doc'||!Array.isArray((value as any).content)||(value as any).content.length>1000)return null;
   const text=visit(value,0);return text===null||text.length>20000?null:{doc:value,text};
 }
-/** Fixed main-world adapter for the pinned Tiptap2 build. Only reads and compare-and-swap draft replacement are exposed; no message submission API. */
+/** Fixed main-world adapter for the pinned Tiptap2 build. Exposes reads, compare-and-swap draft replacement, and a compare-and-swap send of the exact verified draft; the send is only reachable after the user's own trusted Enter. */
 export function createNativeComposer(meta:{leaseId:string;documentGeneration:number;bindingName?:string},document:Document=window.document){
   if(!/^[a-z0-9-]{16,100}$/i.test(meta.leaseId)||!Number.isSafeInteger(meta.documentGeneration)||meta.documentGeneration<=0)throw new Error('INVALID_NATIVE_LEASE');
   if(meta.bindingName!==undefined&&!/^tsim_native_[a-f0-9]{32}$/.test(meta.bindingName))throw new Error('INVALID_NATIVE_BINDING');
   let disposed=false,revision=1,scopeGeneration=1,authGeneration=0,editorNumber=0,lastConversation='',editor:PublicEditor|undefined,element:HTMLElement|undefined,composing=false;
   let lastPoll=Date.now();const watchdog=document.defaultView!.setInterval(()=>{if(Date.now()-lastPoll>=6000)dispose();},1000);
-  let ownWrite=false,writeUpdateObserved=false,contentFingerprint='',quoteFingerprint='',shortcutEnabled=false,wakeQueued=false;
+  let ownWrite=false,writeUpdateObserved=false,contentFingerprint='',quoteFingerprint='',shortcutEnabled=false,enterSend=false,wakeQueued=false;
   const pending:NativeInteraction[]=[];
   const wake=meta.bindingName?(document.defaultView as unknown as Record<string,unknown>)[meta.bindingName]:undefined;
-  function enqueue(event:NativeInteraction){if(disposed||ownWrite||typeof wake!=='function')return;if(event.type==='draft-changed'){if(pending.some(item=>item.type==='draft-changed'))return;}else if(pending.some(item=>item.type==='replace-shortcut'))return;pending.push(event);if(wakeQueued)return;wakeQueued=true;queueMicrotask(()=>{wakeQueued=false;if(disposed||!pending.length)return;try{(wake as (payload:string)=>void)('wake');}catch{pending.length=0;}});}
+  function enqueue(event:NativeInteraction){if(disposed||ownWrite||typeof wake!=='function')return;if(pending.some(item=>item.type===event.type))return;pending.push(event);if(wakeQueued)return;wakeQueued=true;queueMicrotask(()=>{wakeQueued=false;if(disposed||!pending.length)return;try{(wake as (payload:string)=>void)('wake');}catch{pending.length=0;}});}
   // The vendor keeps citations beside the editor, not in the Tiptap document.
   const readQuote=()=>[...(element?.closest('.chat_area-input')?.querySelectorAll('.cite-container .cite-text')??[])].map(node=>node.innerHTML).join('\n');
   const syncQuote=()=>{const next=readQuote();if(next!==quoteFingerprint){quoteFingerprint=next;revision++;enqueue({type:'draft-changed'});}};
@@ -118,7 +122,18 @@ export function createNativeComposer(meta:{leaseId:string;documentGeneration:num
   const update=()=>{if(disposed)return;if(ownWrite)writeUpdateObserved=true;const fingerprint=JSON.stringify(editor?.getJSON());if(fingerprint===contentFingerprint)return;contentFingerprint=fingerprint;revision++;enqueue({type:'draft-changed'});};
   const input=(event:Event)=>{if(!event.isTrusted||ownWrite)return;enqueue({type:'draft-changed'});};
   const start=()=>{composing=true;revision++;enqueue({type:'draft-changed'});};const end=()=>{const owner=editor;document.defaultView!.requestAnimationFrame(()=>{if(disposed||editor!==owner)return;composing=false;revision++;enqueue({type:'draft-changed'});});};
-  const keydown=(event:KeyboardEvent)=>{if(disposed||!shortcutEnabled||!event.isTrusted||!isReplaceChord(event))return;try{bind();if(!element||event.target!==element&&!element.contains(event.target as Node)||document.activeElement!==element&&!element.contains(document.activeElement)||!messageSurfaceGeometry(document).active)return;
+  const owned=(event:KeyboardEvent)=>{bind();return !!element&&(event.target===element||element.contains(event.target as Node))&&(document.activeElement===element||element.contains(document.activeElement))&&messageSurfaceGeometry(document).active;};
+  const keydown=(event:KeyboardEvent)=>{if(disposed||!event.isTrusted)return;
+    if(enterSend&&isSendKey(event)){try{
+      // An IME confirmation Enter belongs to the input method, not to send.
+      if(event.isComposing||event.keyCode===229||composing||!owned(event)||editor!.view.composing)return;
+      // Attachments and unsupported documents remain with the vendor. A verified
+      // text draft is intercepted synchronously before the vendor can send it.
+      let current:VerifiedComposerSnapshot;try{current=snapshot();}catch{event.preventDefault();event.stopImmediatePropagation();return;}
+      if(!current.isPlainText)return;
+      event.preventDefault();event.stopImmediatePropagation();if(event.repeat)return;if(!current.composing&&current.text.trim())enqueue({type:'send-shortcut',snapshot:current});
+    }catch{/* Unverified editors never produce send intents. */}return;}
+    if(!shortcutEnabled||!isReplaceChord(event))return;try{if(!owned(event))return;
     // Consume even a repeat or unfinished IME chord so the vendor cannot treat Enter as send.
     event.preventDefault();event.stopImmediatePropagation();if(!isReplaceIntent(event)||composing||editor!.view.composing)return;const current=snapshot();if(!current.composing)enqueue({type:'replace-shortcut',snapshot:current});
   }catch{/* Unverified editors never produce write intents. */}};
@@ -132,8 +147,9 @@ export function createNativeComposer(meta:{leaseId:string;documentGeneration:num
   function dispose(){if(disposed)return;disposed=true;quoteObserver.disconnect();pending.length=0;document.removeEventListener('keydown',keydown,true);document.defaultView!.clearInterval(watchdog);editor?.off('update',update);element?.removeEventListener('input',input);element?.removeEventListener('compositionstart',start);element?.removeEventListener('compositionend',end);editor=undefined;element=undefined;}
   return{
     drainInteractions():NativeInteraction[]{if(disposed)throw new Error('NATIVE_LEASE_ENDED');return pending.splice(0,8);},
-    setInteractionOptions(options:{shortcutEnabled:boolean}){if(disposed||typeof options?.shortcutEnabled!=='boolean')throw new Error('INVALID_INTERACTION_OPTIONS');shortcutEnabled=options.shortcutEnabled;pending.splice(0,pending.length,...pending.filter(event=>event.type!=='replace-shortcut'));},
+    setInteractionOptions(options:NativeInteractionOptions){if(disposed||typeof options?.shortcutEnabled!=='boolean'||typeof options.enterSend!=='boolean')throw new Error('INVALID_INTERACTION_OPTIONS');shortcutEnabled=options.shortcutEnabled;enterSend=options.enterSend;pending.splice(0,pending.length,...pending.filter(event=>event.type==='draft-changed'||event.type==='replace-shortcut'&&shortcutEnabled||event.type==='send-shortcut'&&enterSend));},
     heartbeat(){if(disposed)throw new Error('NATIVE_LEASE_ENDED');lastPoll=Date.now();},
+    // Authentication rotates draft authorization, not the conversation or its language preferences.
     poll(nextAuthGeneration:number):NativePoll{if(disposed)throw new Error('NATIVE_LEASE_ENDED');lastPoll=Date.now();if(!Number.isSafeInteger(nextAuthGeneration)||nextAuthGeneration<0)throw new Error('INVALID_AUTH_GENERATION');if(nextAuthGeneration!==authGeneration){authGeneration=nextAuthGeneration;revision++;}const messageSurface=messageSurfaceGeometry(document),orderViewport={width:document.defaultView!.innerWidth,height:document.defaultView!.innerHeight,dpr:document.defaultView!.devicePixelRatio||1};if(!messageSurface.active)return{writeVerified:false,messageSurface,orderEntries:[],orderViewport,reason:'MESSAGE_PAGE_INACTIVE'};try{return{snapshot:snapshot(),writeVerified:true,messageSurface,orderEntries:[],orderViewport,orderFrame:orderFrameGeometry(document)};}catch(error){return{writeVerified:false,messageSurface:inactiveSurface(),orderEntries:[],orderViewport,reason:error instanceof Error&&/^[A-Z_]+$/.test(error.message)?error.message:'COMPOSER_UNAVAILABLE'};}},
     replaceDraft(expected:VerifiedComposerSnapshot,text:string){const current=snapshot();if(!messageSurfaceGeometry(document).active||!document.hasFocus())throw new Error('DRAFT_COMPARE_AND_SWAP_FAILED');if(typeof text!=='string'||!text.trim()||text.length>20000||!current.isPlainText||current.composing||JSON.stringify(current)!==JSON.stringify(expected))throw new Error('DRAFT_COMPARE_AND_SWAP_FAILED');const doc={type:'doc',content:text.split('\n').map(line=>({type:'paragraph',content:line?[{type:'text',text:line}]:[]}))};const verified=plainDoc(doc);if(!verified||verified.text!==text)throw new Error('DRAFT_COMPARE_AND_SWAP_FAILED');if(typeof editor!.commands.setTextSelection!=='function'||typeof editor!.view.focus!=='function'||!Number.isSafeInteger(editor!.state?.doc?.content?.size))throw new Error('COMPOSER_PUBLIC_API_UNVERIFIED');const expectedQuote=quoteFingerprint;writeUpdateObserved=false;ownWrite=true;try{if(editor!.commands.setContent(doc,true,{preserveWhitespace:'full'})!==true)throw new Error('DRAFT_WRITE_REJECTED');}finally{ownWrite=false;}if(!writeUpdateObserved)throw new Error('DRAFT_UPDATE_NOT_OBSERVED');revision++;const result=snapshot();if(quoteFingerprint!==expectedQuote||result.text!==text||result.conversationId!==current.conversationId||result.scopeGeneration!==current.scopeGeneration||result.editorIdentity!==current.editorIdentity)throw new Error('DRAFT_READBACK_MISMATCH');
       // The pinned Tiptap focus command schedules a frame. Use its public selection
@@ -142,6 +158,10 @@ export function createNativeComposer(meta:{leaseId:string;documentGeneration:num
       if(editor!.commands.setTextSelection(editor!.state.doc.content.size)!==true)throw new Error('DRAFT_FOCUS_REJECTED');
       if(JSON.stringify(snapshot())!==JSON.stringify(result))throw new Error('DRAFT_READBACK_MISMATCH');
       editor!.view.focus();return result;},
+    /** Clicks the vendor send button only for the exact, focused, verified draft the host just read back. */
+    sendDraft(expected:VerifiedComposerSnapshot){const current=snapshot();if(!messageSurfaceGeometry(document).active||!document.hasFocus()||!current.isPlainText||current.composing||!current.text.trim()||JSON.stringify(current)!==JSON.stringify(expected))throw new Error('DRAFT_COMPARE_AND_SWAP_FAILED');
+      const buttons=document.querySelectorAll<HTMLButtonElement>(SEND_SELECTOR);if(buttons.length!==1||!buttons[0].isConnected||buttons[0].getClientRects().length===0||buttons[0].disabled)throw new Error('SEND_BUTTON_UNAVAILABLE');
+      buttons[0].click();return true;},
     dispose,
   };
 }

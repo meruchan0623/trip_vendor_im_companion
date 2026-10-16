@@ -77,7 +77,7 @@ process.on('unhandledRejection',()=>{process.stderr.write('HOST_UNHANDLED_REJECT
 service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('LOGIN_URL_REJECTED');emit('hostOpenLogin',{url});},()=>{},process.argv.includes('--smoke-test')?{enabled:false}:{},true);
 service.onState(()=>publish());resident=new ResidentConnection(native,async()=>{});
 native.start();publish(true);
-emit('hostReady',{runtime:'node',customerSend:false});
+emit('hostReady',{runtime:'node',customerSend:'user-enter'});
 if(process.argv.includes('--memory-metrics')){
   memoryTimer=setInterval(()=>{
     if(quitting)return;

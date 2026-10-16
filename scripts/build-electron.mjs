@@ -22,6 +22,6 @@ const hash=source=>createHash('sha256').update(source).digest('hex');
 await mkdir('dist-runtime',{recursive:true});
 await writeFile('dist-runtime/runtime-ui.js',runtimeSource);
 await writeFile('dist-runtime/native-composer.js',nativeSource);
-await writeFile('dist-runtime/artifact.json',JSON.stringify({kind:'embedded-companion',customerSend:false,runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)},null,2));
+await writeFile('dist-runtime/artifact.json',JSON.stringify({kind:'embedded-companion',customerSend:'user-enter',runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)},null,2));
 await build({entryPoints:['electron/main.ts','electron/preload.ts'],bundle:true,platform:'node',target:'node24',format:'cjs',outdir:'dist-electron',outExtension:{'.js':'.cjs'},external:['electron'],define:{...platformDefine,__NATIVE_ARTIFACT_SOURCE__:JSON.stringify(nativeSource),__NATIVE_ARTIFACT_SHA256__:JSON.stringify(hash(nativeSource)),__RUNTIME_ARTIFACT_SOURCE__:JSON.stringify(runtimeSource),__RUNTIME_ARTIFACT_SHA256__:JSON.stringify(hash(runtimeSource))}});
-console.log(JSON.stringify({event:'embedded_build_complete',runtimePlatform,customerSend:false,runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)}));
+console.log(JSON.stringify({event:'embedded_build_complete',runtimePlatform,customerSend:'user-enter',runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)}));

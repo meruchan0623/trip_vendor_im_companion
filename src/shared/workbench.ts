@@ -32,5 +32,7 @@ export type PanelStatus='unavailable'|'idle'|'translating'|'ready'|'stale'|'fail
 export type PanelAuth='ready'|'needs_login'|'connecting'|'failed';
 export interface PanelOrderState {identifier:string;status:'idle'|'loading'|'ready'|'empty'|'failed';error:string|null;fields:ReadOnlyOrderField[]}
 /** Node -> page state. Text only; no credentials, tokens or editor handles. */
-export interface PanelState {translationPaused?:boolean;order?:PanelOrderState;auth:PanelAuth;conversationKey:string|null;draft:{text:string;composing:boolean}|null;enabled:boolean;target:PanelTarget;followCustomer:{lang:string|null;following:boolean;manualEnabled:boolean};status:PanelStatus;preview:string|null;error:string|null;busy:boolean}
+export interface PanelState {translationPaused?:boolean;order?:PanelOrderState;auth:PanelAuth;conversationKey:string|null;draft:{text:string;composing:boolean}|null;enabled:boolean;target:PanelTarget;followCustomer:{lang:string|null;following:boolean;manualEnabled:boolean};status:PanelStatus;preview:string|null;error:string|null;busy:boolean;outboundMode?:OutboundMode;sendPending?:boolean}
 export type PanelApplyMode='replace';
+export type OutboundMode='send'|'replace';
+export const isOutboundMode=(value:unknown):value is OutboundMode=>value==='send'||value==='replace';

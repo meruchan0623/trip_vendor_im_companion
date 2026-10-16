@@ -9,6 +9,6 @@ const output=await build({entryPoints:['host-node/main.ts'],bundle:true,platform
 if(Object.keys(output.metafile.inputs).some(x=>x.includes('node_modules/electron/'))||Object.values(output.metafile.outputs).some(x=>x.imports.some(i=>i.path==='electron')))throw new Error('ELECTRON_DEPENDENCY_FORBIDDEN');
 await mkdir('dist-lightweight',{recursive:true});
 await writeFile('dist-lightweight/node-metafile.json',JSON.stringify(output.metafile,null,2));
-await writeFile('dist-lightweight/artifact.json',JSON.stringify({kind:'node-native-resident',customerSend:false,electron:false,runtimeSha256:hash(runtime),nativeSha256:hash(native)},null,2));
-console.log(JSON.stringify({event:'lightweight_node_built',electron:false,customerSend:false}));
+await writeFile('dist-lightweight/artifact.json',JSON.stringify({kind:'node-native-resident',customerSend:'user-enter',electron:false,runtimeSha256:hash(runtime),nativeSha256:hash(native)},null,2));
+console.log(JSON.stringify({event:'lightweight_node_built',electron:false,customerSend:'user-enter'}));
 

@@ -42,9 +42,10 @@ describe('embedded companion host',()=>{
   });
   it('revokes a reviewed translation when a same-language report sees a changed draft before the poll',async()=>{const key=states.at(-1)!.conversationKey!;await action('customerLanguage',[{lang:'ja',conversationKey:key}]);await service.translate('ja');expect(service.getState().phase).toBe('ready');snapshot.text='改写';snapshot.revision++;await action('customerLanguage',[{lang:'ja',conversationKey:key}]);expect(service.getState().preview).toBeNull();await action('apply',[{mode:'replace'}]);expect(external.replace).not.toHaveBeenCalled();});
   it('rejects sending, text injection, automatic language follow and unrecognized order metadata',async()=>{
-    for(const [name,args] of [['apply',[{mode:'replace-send'}]],['apply',[{mode:'replace',text:'inject'}]],['setTarget',[{lang:'en',source:'auto'}]],['queryOrder',[{identifier:'123',identifierType:'iccid'}]],['queryOrder',[{identifier:'123\n456'}]],['evaluate',['alert(1)']]] as [string,unknown[]][]){await expect(action(name,args)).rejects.toThrow('INVALID_ACTION');}
+    for(const [name,args] of [['apply',[{mode:'replace-send'}]],['apply',[{mode:'replace',text:'inject'}]],['setTarget',[{lang:'en',source:'auto'}]],['queryOrder',[{identifier:'123',identifierType:'iccid'}]],['queryOrder',[{identifier:'123\n456'}]],['setOutboundMode',['send-now']],['setOutboundMode',[{mode:'send'}]],['evaluate',['alert(1)']]] as [string,unknown[]][]){await expect(action(name,args)).rejects.toThrow('INVALID_ACTION');}
     expect(fake.query).not.toHaveBeenCalled();expect(external.replace).not.toHaveBeenCalled();
   });
+  it('switches the outbound Enter mode through a fixed intent',async()=>{await action('setOutboundMode',['replace']);expect(service.getState().outboundMode).toBe('replace');expect(states.at(-1)!.outboundMode).toBe('replace');await action('setOutboundMode',['send']);expect(service.getState().outboundMode).toBe('send');});
   it('rejects the retired order query intent even with a previously valid string identifier',async()=>{
     await expect(action('queryOrder',[{identifier:'000123'}])).rejects.toThrow('INVALID_ACTION');
     await expect(invokeEmbeddedAction(service,'queryOrder',[{identifier:'000123'}])).rejects.toThrow('INVALID_ACTION');

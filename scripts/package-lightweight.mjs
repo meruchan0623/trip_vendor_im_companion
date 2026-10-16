@@ -10,7 +10,7 @@ await cp('native/resident/bin/publish',root,{recursive:true,filter:source=>!sour
 await cp(process.execPath,join(root,'runtime/node.exe'));
 await cp('dist-lightweight/host/main.cjs',join(root,'host/main.cjs'));
 await cp('dist-lightweight/artifact.json',join(root,'host/artifact.json'));
-await writeFile(join(root,'README.txt'),`旅游商家助手 ${version} 轻量宿主原型\n\n先退出旧版助手，再双击 TravelMerchant.Resident.exe。必须保留 runtime 和 host 文件夹，不要单独移动 EXE。\n本包不包含 Electron，无需另装 Node 或 .NET。托盘双击打开设置；关闭设置窗口继续后台常驻；托盘“退出”停止助手。\n翻译和订单 iframe 位于原客服页面。翻译使用 Edge/Chrome 已登录 TSim 会话；订单网页需要在原客户端内单独登录。\n原客户端未开放本机连接时，先自行退出客户端，再从助手“启动商家客户端”入口启动。助手不修改厂商安装文件。\n替换只更新草稿，最后发送由您手动完成。\n回退：先退出本程序，再启动保存的 0.3.2 Electron 包；两者不能同时运行。\n原型实测与限制见项目 docs/轻量宿主真实验收-2026-10-15.md。\n`,'utf8');
+await writeFile(join(root,'README.txt'),`旅游商家助手 ${version} 轻量宿主原型\n\n先退出旧版助手，再双击 TravelMerchant.Resident.exe。必须保留 runtime 和 host 文件夹，不要单独移动 EXE。\n本包不包含 Electron，无需另装 Node 或 .NET。托盘双击打开设置；关闭设置窗口继续后台常驻；托盘“退出”停止助手。\n翻译和订单 iframe 位于原客服页面。翻译使用 Edge/Chrome 已登录 TSim 会话；订单网页需要在原客户端内单独登录。\n原客户端未开放本机连接时，先自行退出客户端，再从助手“启动商家客户端”入口启动。助手不修改厂商安装文件。\n默认按 Enter 会等待译文、替换并核对草稿后发送；Shift+Enter 换行。可在面板菜单切换为替换模式，替换草稿按钮及 Ctrl+Alt+Enter 仅替换、不发送。\n回退：先退出本程序，再启动保存的 0.3.2 Electron 包；两者不能同时运行。\n原型实测与限制见项目 docs/轻量宿主真实验收-2026-10-15.md。\n`,'utf8');
 const files=[];
 async function scan(directory){for(const name of await readdir(directory)){const path=join(directory,name),info=await stat(path);if(info.isDirectory())await scan(path);else if(name!=='manifest.json')files.push({path:relative(root,path).replaceAll('\\','/'),bytes:info.size,sha256:createHash('sha256').update(await readFile(path)).digest('hex')});}}
 await scan(root);

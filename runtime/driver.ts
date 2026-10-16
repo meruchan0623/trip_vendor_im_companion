@@ -1,6 +1,6 @@
 import {randomUUID,randomBytes} from 'node:crypto';
-import {isPanelTarget} from '../src/shared/workbench';
-import type {NativeInteraction,NativePoll} from './native-composer';
+import {isOutboundMode,isPanelTarget} from '../src/shared/workbench';
+import type {NativeInteraction,NativeInteractionOptions,NativePoll} from './native-composer';
 import type {PanelState,VerifiedComposerSnapshot} from '../src/shared/workbench';
 import {approvedImTargets,chooseActiveImTarget,observeImTarget,sameTargetInventory} from './target-selection';
 import {approvedDocumentURL,assertBuildFingerprint,VERIFIED_RUNTIME_BUILD,type BuildFingerprint} from './identity';
@@ -17,7 +17,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private policy:RuntimeCDPPolicy;private epoch=0;private invalid=false;private scripts=new Map<string,{id:string;context:number}>();private defaultContexts=new Set<number>();private invalidators=new Set<()=>void>();private stopEvent:()=>void;private stopDisconnect:()=>void;
   private captures:ParentCapture[]=[];
   private nativeListeners=new Set<(event:NativeInteraction)=>void>();private nativeDraining=false;private nativeWake=false;
-  private async drainInteractions(){if(this.invalid)return;this.nativeWake=true;if(this.nativeDraining)return;this.nativeDraining=true;try{while(this.nativeWake&&!this.invalid){this.nativeWake=false;const epoch=this.epoch,events=await this.policy.drainNativeInteractions();this.current(epoch);for(const event of events){if(event?.type!=='draft-changed'&&event?.type!=='replace-shortcut')throw new Error('NATIVE_EVENTS_UNVERIFIED');for(const listener of [...this.nativeListeners])listener(event);}}}catch(error){this.invalidate('NATIVE_EVENT_'+reasonOf(error));}finally{this.nativeDraining=false;}}
+  private async drainInteractions(){if(this.invalid)return;this.nativeWake=true;if(this.nativeDraining)return;this.nativeDraining=true;try{while(this.nativeWake&&!this.invalid){this.nativeWake=false;const epoch=this.epoch,events=await this.policy.drainNativeInteractions();this.current(epoch);for(const event of events){if(event?.type!=='draft-changed'&&event?.type!=='replace-shortcut'&&event?.type!=='send-shortcut')throw new Error('NATIVE_EVENTS_UNVERIFIED');for(const listener of [...this.nativeListeners])listener(event);}}}catch(error){this.invalidate('NATIVE_EVENT_'+reasonOf(error));}finally{this.nativeDraining=false;}}
   private companionAction?: (action:string,args:unknown[])=>Promise<void>;
   private bindingName=`tsim_${randomBytes(16).toString('hex')}`;
   private mounted=false;private cleanup?:Promise<void>;
@@ -62,6 +62,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
         case 'customerLanguage':if(args.length!==1||!plain('conversationKey,lang')||typeof arg!.lang!=='string'||!/^(unknown|zh|en|ja|ko|ar|ru|el|th|es|fr|de|pt|it|vi|id|ms)$/.test(arg!.lang)||typeof arg!.conversationKey!=='string'||arg!.conversationKey.length>1024)throw new Error('INVALID_ACTION');break;
         case 'followCustomer':case 'retry':case 'openLogin':case 'cancel':case 'resume':if(args.length)throw new Error('INVALID_ACTION');break;
         case 'apply':if(args.length!==1||!plain('mode')||arg!.mode!=='replace')throw new Error('INVALID_ACTION');break;
+        case 'setOutboundMode':if(args.length!==1||!isOutboundMode(args[0]))throw new Error('INVALID_ACTION');break;
         case 'queryOrder':if(args.length!==1||!plain('identifier')||typeof arg!.identifier!=='string'||arg!.identifier.length<1||arg!.identifier.length>128||/[\u0000-\u001f\u007f-\u009f]/.test(arg!.identifier))throw new Error('INVALID_ACTION');break;
         default:throw new Error('INVALID_ACTION');
       }
@@ -154,7 +155,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     const observed=(poll:NativePoll)=>{const fields={reason:poll.reason??null,messageSurface:poll.messageSurface??null,viewport:poll.orderViewport??null,orderCount:poll.orderEntries?.length??0},signature=JSON.stringify(fields);if(signature!==lastDiagnostic){lastDiagnostic=signature;diag('external-message-surface',fields);}return poll;};
     return {
       onInteraction:(listener:(event:NativeInteraction)=>void)=>{this.current(epoch);this.nativeListeners.add(listener);return()=>{this.nativeListeners.delete(listener);};},
-      setInteractionOptions:async(options:{shortcutEnabled:boolean})=>{this.current(epoch);await this.policy.setNativeInteractionOptions(options);this.current(epoch);},
+      setInteractionOptions:async(options:NativeInteractionOptions)=>{this.current(epoch);await this.policy.setNativeInteractionOptions(options);this.current(epoch);},
       renew:async()=>{this.current(epoch);await this.policy.renewNative();this.current(epoch);},
       read:async(authGeneration:number):Promise<NativePoll>=>{
         this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
@@ -169,6 +170,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
         return observed({...after,orderFrame:undefined,orderEntries:[]});
       },
       replace:async(expected:VerifiedComposerSnapshot,text:string,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>)=>{this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);const nav=await this.policy.readMessageNavigation();this.current(epoch);if(!nav.active)throw new Error('MESSAGE_PAGE_INACTIVE');const current=await this.policy.pollNative(expected.authGeneration) as NativePoll;this.current(epoch);if(!current.messageSurface?.active)throw new Error('MESSAGE_PAGE_INACTIVE');const navAfter=await this.policy.readMessageNavigation();this.current(epoch);if(!navAfter.active)throw new Error('MESSAGE_PAGE_INACTIVE');const finalAuthorize=await authorize();this.current(epoch);await this.verifyActiveTarget();this.current(epoch);const finalNav=await this.policy.readMessageNavigation();this.current(epoch);if(!finalNav.active)throw new Error('MESSAGE_PAGE_INACTIVE');if(typeof finalAuthorize==='function')finalAuthorize();await this.policy.replaceNative(expected,text);this.current(epoch);},
+      send:async(expected:VerifiedComposerSnapshot,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>)=>{this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);const nav=await this.policy.readMessageNavigation();this.current(epoch);if(!nav.active)throw new Error('MESSAGE_PAGE_INACTIVE');const current=await this.policy.pollNative(expected.authGeneration) as NativePoll;this.current(epoch);if(!current.messageSurface?.active)throw new Error('MESSAGE_PAGE_INACTIVE');const navAfter=await this.policy.readMessageNavigation();this.current(epoch);if(!navAfter.active)throw new Error('MESSAGE_PAGE_INACTIVE');const finalAuthorize=await authorize();this.current(epoch);await this.verifyActiveTarget();this.current(epoch);const finalNav=await this.policy.readMessageNavigation();this.current(epoch);if(!finalNav.active)throw new Error('MESSAGE_PAGE_INACTIVE');if(typeof finalAuthorize==='function')finalAuthorize();await this.policy.sendNative(expected);this.current(epoch);},
     };
   }
 }

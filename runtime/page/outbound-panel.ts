@@ -11,6 +11,7 @@ const LANGUAGE_NAMES:Record<string,string>={zh:'中文',en:'英语',ja:'日语',
 type Tone='ok'|'warn'|'bad'|'busy'|'muted';
 const STATUS:Record<PanelState['status'],[string,Tone]|null>={unavailable:['编辑器未就绪','warn'],idle:null,translating:['翻译中','busy'],ready:['译文就绪','ok'],stale:['待更新','busy'],failed:['翻译失败','bad'],needs_login:null};
 export const PANEL_HINT='替换后仍需您在原客户端手动发送';
+export const SEND_HINT='按 Enter 直接发送译文';
 const ORDER_RE=/^[A-Za-z0-9_-]{1,100}$/;
 const CONTAINED=['keydown','keyup','keypress','beforeinput','input','paste','copy','cut','compositionstart','compositionupdate','compositionend','click','mousedown','pointerdown'];
 const ICONS={
@@ -130,8 +131,8 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   languages.append(follow,make('div','separator'),search,grid);
   const query=make('div','pop query'),queryForm=make('form','field'),queryInput=make('input'),queryButton=button('','查询'),queryNote=make('div','note');queryButton.type='submit';query.setAttribute('role','dialog');query.setAttribute('aria-label','查询其他订单');
   queryInput.type='text';queryInput.placeholder='输入订单 ID 或其他标识';queryInput.setAttribute('aria-label','明确输入或选择要查询的标识');queryInput.maxLength=100;queryInput.autocomplete='off';queryForm.append(queryInput,queryButton);query.append(make('h5','','查询其他订单'),queryForm,queryNote);
-  const menu=make('div','pop menu'),pause=button('option'),pauseIcon=make('span'),pauseText=make('span'),disable=button('option');menu.setAttribute('role','menu');pauseIcon.style.display='contents';pause.append(pauseIcon,pauseText);disable.append(icon('power'),'关闭出站翻译');
-  menu.append(pause,disable);
+  const menu=make('div','pop menu'),pause=button('option'),pauseIcon=make('span'),pauseText=make('span'),disable=button('option');menu.setAttribute('role','menu');pauseIcon.style.display='contents';pause.append(pauseIcon,pauseText);disable.append(icon('power'),'关闭出站翻译');const modeLabel=make('div','label','Enter 键行为'),modes=([['send','Enter 直接发送','未出译文时等待译文后发送'],['replace','替换模式','Enter 保持原样，译文需手动替换']] as const).map(([mode,label,detail])=>{const option=button('option mode');option.setAttribute('role','menuitemradio');option.dataset.mode=mode;const text=make('span');text.append(make('span','',label),make('small','',detail));option.append(text);return option;});
+  menu.append(pause,disable,make('div','separator'),modeLabel,...modes);
   const popovers:Record<Popover,[HTMLElement,HTMLButtonElement]>={languages:[languages,lang],query:[query,find],menu:[menu,more]};
   for(const [pop] of Object.values(popovers))pop.hidden=true;
   panel.append(bar,body);shadow.append(style,panel,languages,query,menu);
@@ -169,6 +170,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   login.addEventListener('click',()=>act('openLogin'));
   pause.addEventListener('click',()=>{setOpen(null);act(state.translationPaused?'resume':'cancel');});
   disable.addEventListener('click',()=>{setOpen(null);act('setEnabled',[false]);});
+  for(const option of modes)option.addEventListener('click',()=>{setOpen(null);if(option.dataset.mode!==(state.outboundMode??'send'))act('setOutboundMode',[option.dataset.mode]);});
   resume.addEventListener('click',()=>act('resume'));
   retry.addEventListener('click',()=>{if(!state.translationPaused)act('retry');});
   retryFailed.addEventListener('click',()=>{if(!state.translationPaused)act('retry');});
@@ -210,8 +212,9 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     follow.setAttribute('aria-selected',String(following));followLang.textContent=`当前识别：${customerName}${customer==='zh'?'（无需翻译）':''}`;
     for(const option of options)option.setAttribute('aria-selected',String(!following&&option.dataset.lang===state.target));
     pauseIcon.replaceChildren(icon(paused?'play':'pause'));pauseText.textContent=paused?'恢复翻译':'暂停翻译';pause.disabled=!on||state.auth==='connecting';
+    const mode=state.outboundMode??'send';for(const option of modes)option.setAttribute('aria-checked',String(option.dataset.mode===mode));hint.textContent=mode==='send'?SEND_HINT:PANEL_HINT;
     // Status badge.
-    const status:[string,Tone]|null=notice?[notice,noticeTone]:!on?null:state.auth==='connecting'?['正在连接…','busy']:state.auth==='needs_login'?['需登录','warn']:state.auth==='failed'?['连接失败','bad']:paused?['翻译已暂停','warn']:STATUS[state.status];
+    const status:[string,Tone]|null=notice?[notice,noticeTone]:!on?null:state.auth==='connecting'?['正在连接…','busy']:state.auth==='needs_login'?['需登录','warn']:state.auth==='failed'?['连接失败','bad']:paused?['翻译已暂停','warn']:state.sendPending?['译文生成后自动发送','busy']:STATUS[state.status];
     badge.hidden=!status;badgeText.textContent=status?.[0]??'';badge.dataset.tone=status?.[1]??'muted';badge.title=badgeText.textContent;
     // Card content.
     const text=state.preview??'',stale=!!text&&(state.status==='stale'||state.status==='translating');
