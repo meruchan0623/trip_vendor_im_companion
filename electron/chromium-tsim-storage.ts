@@ -3,7 +3,7 @@ import {join, isAbsolute} from 'node:path';
 
 // Read-only legacy Chromium localStorage LevelDB. No database is opened or copied,
 // and no credential is retained between calls. Unsupported/corrupt/busy stores
-// deliberately return null instead of falling back to obsolete table contents.
+// never fall back to obsolete table contents. Strict callers receive a safe error code.
 const MAX_FILE = 64 * 1024 * 1024;
 const MAX_TOTAL = 256 * 1024 * 1024;
 const MAX_RECORD = 16 * 1024 * 1024;
@@ -302,10 +302,15 @@ async function attempt(directory: string): Promise<string | null> {
 }
 
 /** Main-process internal API. The caller supplies only a discovered Local Storage/leveldb path. */
-export async function readTsimToken(storageDirectory: string): Promise<string | null> {
+export async function readTsimToken(storageDirectory: string, options: {throwOnFailure?: boolean} = {}): Promise<string | null> {
   if (!isAbsolute(storageDirectory)) return null;
   for (let retry = 0; retry < 3; retry++) {
-    try {return await attempt(storageDirectory);} catch { /* No file paths, contents or credentials in diagnostics. */ }
+    try {return await attempt(storageDirectory);} catch (error) {
+      // Permission denial is actionable and must never be reported as a logged-out browser.
+      if (['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException)?.code ?? '')) throw new Error('BROWSER_SESSION_ACCESS_DENIED');
+      // No file paths, contents or credentials in diagnostics.
+    }
   }
+  if (options.throwOnFailure) throw new Error('BROWSER_SESSION_STORAGE_INVALID');
   return null;
 }

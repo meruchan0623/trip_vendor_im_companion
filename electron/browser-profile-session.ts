@@ -1,15 +1,20 @@
 import { access, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { join,posix } from 'node:path';
 import { readTsimToken } from './chromium-tsim-storage';
 import { WORKBENCH_TARGETS, type OutboundBody, type OutboundResponse, type PsimIdentity } from '../src/shared/workbench';
 
 const API='https://csapi.tsim.tech';
+const LOGIN_URL='https://csagent.tsim.tech/login';
 export interface EmbeddedOrderResult {identifier:string;found:boolean;fields:{label:string;value:string}[]}
 export interface BrowserProfile {browserPath:string;userDataDir:string;profileDirectory:string}
+export type BrowserSessionStatus='connecting'|'needs_login'|'ready'|'failed';
 export interface BrowserProfileSessionOptions {
+  onStatus?:(status:BrowserSessionStatus,errorCode?:string)=>void;
   enabled?:boolean;
   openExternal?:(url:string)=>Promise<void>;
-  discoverProfiles?:()=>Promise<BrowserProfile[]>;
+  openProfile?:(profile:BrowserProfile,url:string)=>Promise<void>;
+  discoverProfiles?:(onReadError?:(error:Error)=>void)=>Promise<BrowserProfile[]>;
   readToken?:(storageDirectory:string)=>Promise<string|null>;
   fetcher?:typeof fetch;
   syncIntervalMs?:number;
@@ -22,25 +27,53 @@ const clone=(value:PsimIdentity|null)=>value&&({...value,permissions:[...value.p
 const same=(a:PsimIdentity|null,b:PsimIdentity|null)=>JSON.stringify(a)===JSON.stringify(b);
 const storage=(profile:BrowserProfile)=>join(profile.userDataDir,profile.profileDirectory,'Local Storage','leveldb');
 const profileKey=(profile:BrowserProfile)=>JSON.stringify([profile.browserPath,profile.userDataDir,profile.profileDirectory]);
-const exists=async(path:string)=>{try{await access(path);return true;}catch{return false;}};
+const sessionReadError=(error:unknown):Error=>new Error(['EACCES','EPERM'].includes((error as NodeJS.ErrnoException)?.code??'')?'BROWSER_SESSION_ACCESS_DENIED':'BROWSER_SESSION_STORAGE_INVALID');
+const exists=async(path:string)=>{try{await access(path);return true;}catch(error){if((error as NodeJS.ErrnoException)?.code==='ENOENT')return false;throw sessionReadError(error);}};
+/** Launch the same browser profile whose localStorage will be verified, on both desktop platforms. */
+export async function openBrowserProfile(profile:BrowserProfile,url:string):Promise<void>{
+  if(url!==LOGIN_URL)throw new Error('BROWSER_LOGIN_URL_INVALID');
+  await new Promise<void>((resolve,reject)=>{
+    const child=spawn(profile.browserPath,[`--user-data-dir=${profile.userDataDir}`,`--profile-directory=${profile.profileDirectory}`,url],{shell:false,detached:true,windowsHide:false,stdio:'ignore'});
+    child.once('error',()=>reject(new Error('BROWSER_LOGIN_OPEN_FAILED')));
+    child.once('spawn',()=>{child.unref();resolve();});
+  });
+}
+function browserInstalls(env:NodeJS.ProcessEnv,platform:NodeJS.Platform):{executables:string[];userDataDir:string}[]{
+  if(platform==='darwin'){
+    // macOS paths are POSIX regardless of the host running the tests.
+    const home=env.HOME;if(!home)return [];
+    return [{app:'Microsoft Edge',data:['Microsoft Edge']},{app:'Google Chrome',data:['Google','Chrome']}].map(browser=>({executables:['/Applications',posix.join(home,'Applications')].map(root=>posix.join(root,`${browser.app}.app`,'Contents','MacOS',browser.app)),userDataDir:posix.join(home,'Library','Application Support',...browser.data)}));
+  }
+  const local=env.LOCALAPPDATA;if(!local)return [];
+  return [{parts:['Microsoft','Edge'],exe:['Microsoft','Edge','Application','msedge.exe']},{parts:['Google','Chrome'],exe:['Google','Chrome','Application','chrome.exe']}].map(browser=>({executables:[env['ProgramFiles(x86)'],env.ProgramFiles,local].filter((root):root is string=>!!root).map(root=>join(root,...browser.exe)),userDataDir:join(local,...browser.parts,'User Data')}));
+}
 /** Enumerates profile directories and database metadata only; never opens Cookies or Preferences. */
-export async function discoverBrowserProfiles(env:NodeJS.ProcessEnv=process.env):Promise<BrowserProfile[]>{
-  if(!env.LOCALAPPDATA)return [];
-  const result:BrowserProfile[]=[];
-  for(const browser of [{parts:['Microsoft','Edge'],exe:['Microsoft','Edge','Application','msedge.exe']},{parts:['Google','Chrome'],exe:['Google','Chrome','Application','chrome.exe']}]){
+export async function discoverBrowserProfiles(env:NodeJS.ProcessEnv=process.env,platform:NodeJS.Platform=process.platform,onReadError?:(error:Error)=>void):Promise<BrowserProfile[]>{
+  const result:BrowserProfile[]=[],errors:Error[]=[];
+  const report=(error:unknown)=>{errors.push(error instanceof Error&&error.message.startsWith('BROWSER_SESSION_')?error:sessionReadError(error));};
+  for(const {executables,userDataDir} of browserInstalls(env,platform)){
     let browserPath:string|undefined;
-    for(const root of [env['ProgramFiles(x86)'],env.ProgramFiles,env.LOCALAPPDATA])if(root){const path=join(root,...browser.exe);if(await exists(path)){browserPath=path;break;}}
+    for(const path of executables){try{if(await exists(path)){browserPath=path;break;}}catch(error){report(error);}}
     if(!browserPath)continue;
-    const userDataDir=join(env.LOCALAPPDATA,...browser.parts,'User Data');let directories;
-    try{directories=await readdir(userDataDir,{withFileTypes:true});}catch{continue;}
+    let directories;
+    try{directories=await readdir(userDataDir,{withFileTypes:true});}catch(error){if((error as NodeJS.ErrnoException)?.code!=='ENOENT')report(error);continue;}
     for(const directory of directories.filter(item=>item.isDirectory()&&/^(Default|Profile [1-9]\d*)$/.test(item.name)).sort((a,b)=>a.name==='Default'?-1:b.name==='Default'?1:a.name.localeCompare(b.name))){
-      const profile={browserPath,userDataDir,profileDirectory:directory.name};if(await exists(join(storage(profile),'CURRENT')))result.push(profile);
+      const profile={browserPath,userDataDir,profileDirectory:directory.name};
+      try{if(await exists(join(storage(profile),'CURRENT')))result.push(profile);}catch(error){report(error);}
     }
   }
+  if(onReadError)errors.forEach(onReadError);else if(errors.length)throw errors.find(error=>error.message==='BROWSER_SESSION_ACCESS_DENIED')??errors[0];
   return result;
 }
 /** Reads only the allowlisted browser storage key. Secrets remain in this main-process object. */
 export class BrowserProfileSessionService {
+  private status:BrowserSessionStatus='connecting';
+  private statusError:string|undefined;
+  private setStatus(status:BrowserSessionStatus,errorCode?:string){
+    if(this.status===status&&this.statusError===errorCode)return;
+    this.status=status;this.statusError=errorCode;
+    try{this.options.onStatus?.(status,errorCode);}catch{/* subscriber cannot affect validation */}
+  }
   private current:PsimIdentity|null=null;
   private token:string|null=null;
   private profile:BrowserProfile|null=null;
@@ -49,6 +82,7 @@ export class BrowserProfileSessionService {
   private suspended=false;
   private closed=false;
   private syncing:Promise<void>|null=null;
+  private opening:Promise<void>|null=null;
   private active=new Set<AbortController>();
   private poll:ReturnType<typeof setInterval>|null=null;
   private backgroundPolling:boolean;
@@ -70,11 +104,19 @@ export class BrowserProfileSessionService {
   private publish(){try{this.changed(this.identity());}catch{/* subscriber cannot affect revocation */}}
   private revoke(){this.generation++;const hadIdentity=!!this.current;this.current=null;this.token=null;this.profile=null;for(const controller of this.active)controller.abort();this.active.clear();if(hadIdentity)this.publish();}
   private async tokenAt(profile:BrowserProfile):Promise<string|null>{
-    const value=await (this.options.readToken??readTsimToken)(storage(profile));
+    const value=await (this.options.readToken??((directory:string)=>readTsimToken(directory,{throwOnFailure:true})))(storage(profile));
     if(value===null)return null;
     if(typeof value!=='string'||!value.trim()||value.length>16000)throw new Error('BROWSER_SESSION_STORAGE_INVALID');
     return value;
   }
+  private async checkedTokenAt(profile:BrowserProfile):Promise<string|null>{
+    try{return await this.tokenAt(profile);}catch(error){
+      this.revoke();
+      const code=error instanceof Error&&/^BROWSER_SESSION_[A-Z_]+$/.test(error.message)?error.message:'BROWSER_SESSION_STORAGE_INVALID';
+      this.setStatus('failed',code);throw new Error(code);
+    }
+  }
+  private diskChanged(token:string|null){this.revoke();this.setStatus(token?'connecting':'needs_login');}
   private async request(path:string,body?:OutboundBody|{order_nums:string},signal?:AbortSignal):Promise<any>{
     const url=new URL(path,API);
     const readPath=url.pathname==='/agent/profile'&&!url.search||url.pathname==='/agent/package-query/dataplan-list'&&[...url.searchParams.keys()].join(',')==='query_id'||url.pathname==='/agent/package-query/detail'&&[...url.searchParams.keys()].join(',')==='card_dataplan_id';
@@ -86,7 +128,7 @@ export class BrowserProfileSessionService {
     try{
       const response=await (this.options.fetcher??fetch)(`${API}${path}`,{method:body?'POST':'GET',headers:{Accept:'application/json',Authorization:`Bearer ${token}`,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:combined});
       if(this.closed||this.suspended||generation!==this.generation||token!==this.token)throw new Error('AUTH_CHANGED');
-      if(response.status===401||response.status===423){if(path==='/agent/translate')this.revoke();throw new Error('PSIM_LOGIN_REQUIRED');}
+      if(response.status===401||response.status===423){if(path==='/agent/translate'){this.revoke();this.setStatus('needs_login');}throw new Error('PSIM_LOGIN_REQUIRED');}
       if(response.status===403||response.status===422)throw new Error(path.startsWith('/agent/package-query/')?'ORDER_PERMISSION_REQUIRED':'TRANSLATION_PERMISSION_REQUIRED');
       if(response.status===429)throw new Error('RATE_LIMITED');
       if(!response.ok)throw new Error('SERVICE_UNAVAILABLE');
@@ -107,20 +149,24 @@ export class BrowserProfileSessionService {
   async sync():Promise<void>{
     if(this.options.enabled===false||this.closed||this.suspended)return;
     if(this.syncing)return this.syncing;
+    if(!this.current)this.setStatus('connecting');
     this.syncing=this.synchronize().finally(()=>{this.syncing=null;});return this.syncing;
   }
   private async synchronize():Promise<void>{
     let expectedGeneration=this.generation;
     try{
-      const profiles=await (this.options.discoverProfiles??discoverBrowserProfiles)();
+      const readErrors:Error[]=[];
+      const collect=(error:Error)=>{readErrors.push(error);};
+      const profiles=await (this.options.discoverProfiles?this.options.discoverProfiles(collect):discoverBrowserProfiles(process.env,process.platform,collect));
       if(this.closed||this.suspended||expectedGeneration!==this.generation)return;
       // Only a successfully verified profile establishes a persistent binding.
       // A bound profile failing later must never cause an implicit account switch.
       const bound=this.binding,candidates=bound?profiles.filter(profile=>profileKey(profile)===profileKey(bound)):profiles;
       for(const selected of candidates){
-        const token=await this.tokenAt(selected);
+        let token:string|null;
+        try{token=await this.tokenAt(selected);}catch(error){if(bound)throw error;readErrors.push(error instanceof Error?error:new Error('BROWSER_SESSION_STORAGE_INVALID'));continue;}
         if(this.closed||this.suspended||expectedGeneration!==this.generation)return;
-        if(!token){if(bound){this.revoke();return;}continue;}
+        if(!token)continue;
         if(token!==this.token||!this.profile||profileKey(selected)!==profileKey(this.profile)){
           this.revoke();this.token=token;this.profile={...selected};expectedGeneration=this.generation;
         }
@@ -130,13 +176,14 @@ export class BrowserProfileSessionService {
           const data=response?.data;
           if(response?.success!==true||data?.is_active!==true||!/^[-A-Za-z0-9_]{1,128}$/.test(String(data?.id??''))||!Array.isArray(data.permissions)||data.permissions.length>200||!data.permissions.every((permission:unknown)=>typeof permission==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(permission)))throw new Error('PROFILE_UNVERIFIED');
           // A disk-side logout/rotation during profile validation cannot publish an old session.
-          if(await this.tokenAt(selected)!==token){this.revoke();throw new Error('AUTH_CHANGED');}
+          const checked=await this.checkedTokenAt(selected);
+          if(checked!==token){this.diskChanged(checked);throw new Error('AUTH_CHANGED');}
           if(this.closed||this.suspended||expectedGeneration!==this.generation)return;
           const accountScope=`psim:${data.id}`,permissions=[...new Set<string>(data.permissions)].sort();
           if(this.current&&(this.current.accountScope!==accountScope||JSON.stringify(this.current.permissions)!==JSON.stringify(permissions))){this.revoke();this.token=token;this.profile={...selected};}
           this.binding={...selected};
           const next={accountScope,permissions,authGeneration:this.generation};if(!same(next,this.current)){this.current=next;this.publish();}
-          return;
+          this.setStatus('ready');return;
         }catch(error){
           if(!bound&&!this.closed&&!this.suspended&&expectedGeneration===this.generation&&error instanceof Error&&['PSIM_LOGIN_REQUIRED','PROFILE_UNVERIFIED'].includes(error.message)){
             this.revoke();expectedGeneration=this.generation;continue;
@@ -144,8 +191,9 @@ export class BrowserProfileSessionService {
           throw error;
         }
       }
-      this.revoke();
-    }catch(error){if(expectedGeneration===this.generation&&!this.closed&&!this.suspended)this.revoke();throw error;}
+      if(readErrors.length)throw readErrors.find(error=>error.message==='BROWSER_SESSION_ACCESS_DENIED')??readErrors[0];
+      this.revoke();this.setStatus('needs_login');
+    }catch(error){if(expectedGeneration===this.generation&&!this.closed&&!this.suspended){this.revoke();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.setStatus(code==='PSIM_LOGIN_REQUIRED'?'needs_login':'failed',code==='PSIM_LOGIN_REQUIRED'?undefined:code);}throw error;}
   }
   async translate(body:OutboundBody,expectedIdentity:PsimIdentity,signal:AbortSignal):Promise<OutboundResponse>{
     if(this.options.enabled===false)throw new Error('BROWSER_SESSION_DISABLED');
@@ -156,16 +204,48 @@ export class BrowserProfileSessionService {
     if(!this.current||!same(expectedIdentity,this.current)||!this.profile||!this.token)throw new Error('AUTH_CHANGED');
     const generation=this.generation,token=this.token,profile={...this.profile};
     const result=await this.request('/agent/translate',{...body},signal);
-    let freshToken:string|null;
-    try{freshToken=await this.tokenAt(profile);}catch{this.revoke();throw new Error('AUTH_CHANGED');}
+    const freshToken=await this.checkedTokenAt(profile);
     if(signal.aborted)throw new Error('REQUEST_ABORTED');
-    if(freshToken!==token){this.revoke();throw new Error('AUTH_CHANGED');}
+    if(freshToken!==token){this.diskChanged(freshToken);throw new Error('AUTH_CHANGED');}
     if(generation!==this.generation||!same(expectedIdentity,this.current))throw new Error('AUTH_CHANGED');
     const data=result?.data;
     if(result?.success!==true||typeof data?.translated_text!=='string'||!data.translated_text.trim()||data.translated_text.length>50000||data.draft_request_id!==body.draft_request_id||data.composer_content_version!==body.composer_content_version)throw new Error('OUTBOUND_ECHO_MISMATCH');
     return {success:true,data:{translated_text:data.translated_text,draft_request_id:data.draft_request_id,composer_content_version:data.composer_content_version}};
   }
-  async openLogin():Promise<void>{if(this.options.enabled===false)return;if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');this.suspended=false;this.updatePolling();if(!this.options.openExternal)throw new Error('BROWSER_LOGIN_OPENER_REQUIRED');await this.options.openExternal('https://csagent.tsim.tech/login');void this.sync().catch(()=>{});}
+  async openLogin():Promise<void>{
+    if(this.options.enabled===false)return;if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');
+    if(this.opening)return this.opening;
+    const operation=this.openLoginTarget();this.opening=operation;
+    try{await operation;}finally{if(this.opening===operation)this.opening=null;}
+  }
+  private async openLoginTarget():Promise<void>{
+    const wasSuspended=this.suspended;
+    this.suspended=true;this.updatePolling();this.revoke();
+    const generation=this.generation;
+    const assertCurrent=()=>{if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');if(generation!==this.generation)throw new Error('AUTH_CHANGED');};
+    try{
+      // Finish an old scan before choosing the explicit login target; it must not restore an old binding later.
+      await this.syncing?.catch(()=>{});
+      const profiles=await (this.options.discoverProfiles??discoverBrowserProfiles)();
+      assertCurrent();
+      const selected=profiles.find(profile=>this.binding&&profileKey(profile)===profileKey(this.binding))??profiles[0];
+      if(selected){
+        await (this.options.openProfile??openBrowserProfile)({...selected},LOGIN_URL);
+        assertCurrent();
+        // Only an explicit login may select another profile after the previous one disappears.
+        if(!this.binding||profileKey(selected)!==profileKey(this.binding))this.binding={...selected};
+      }else{
+        if(!this.options.openExternal)throw new Error('BROWSER_LOGIN_OPENER_REQUIRED');
+        await this.options.openExternal(LOGIN_URL);
+      }
+      assertCurrent();
+      this.suspended=false;this.updatePolling();await this.sync();
+    }catch(error){
+      // A failed opener must not permanently disable observation. A later explicit logout still wins.
+      if(!this.closed&&generation===this.generation){this.suspended=wasSuspended;this.updatePolling();this.setStatus('failed',error instanceof Error?error.message:'BROWSER_LOGIN_OPEN_FAILED');}
+      throw error;
+    }
+  }
   /** Explicit lookup only. Projects allowlisted scalar fields; no business-write endpoint or remote UI. */
   async queryOriginalIdentifier(identifier:string,signal:AbortSignal):Promise<EmbeddedOrderResult>{
     if(this.options.enabled===false)throw new Error('BROWSER_SESSION_DISABLED');
@@ -179,8 +259,8 @@ export class BrowserProfileSessionService {
     const check=async()=>{
       if(signal.aborted)throw new Error('REQUEST_ABORTED');
       if(!same(identity,this.current))throw new Error('AUTH_CHANGED');
-      let fresh:string|null;try{fresh=await this.tokenAt(profile);}catch{this.revoke();throw new Error('AUTH_CHANGED');}
-      if(fresh!==token){this.revoke();throw new Error('AUTH_CHANGED');}
+      const fresh=await this.checkedTokenAt(profile);
+      if(fresh!==token){this.diskChanged(fresh);throw new Error('AUTH_CHANGED');}
       if(signal.aborted)throw new Error('REQUEST_ABORTED');
       if(!same(identity,this.current))throw new Error('AUTH_CHANGED');
     };
@@ -205,6 +285,6 @@ export class BrowserProfileSessionService {
     if(listed.result.length>20)fields.push({label:'展示范围',value:`共 ${listed.result.length} 个套餐，当前展示前 20 个`});
     await check();return{identifier,found:listed.result.length>0,fields};
   }
-  async logout():Promise<void>{this.suspended=true;this.updatePolling();this.revoke();this.binding=null;}
+  async logout():Promise<void>{this.suspended=true;this.updatePolling();this.revoke();this.binding=null;this.setStatus('needs_login');}
   dispose(){if(this.closed)return;this.closed=true;this.updatePolling();this.revoke();this.binding=null;}
 }

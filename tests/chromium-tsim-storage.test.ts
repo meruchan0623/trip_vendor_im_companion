@@ -299,3 +299,16 @@ describe('strict scoped Chromium localStorage reader with synthetic profiles', (
     expect(await readTsimToken(dir)).toBeNull();expect(mutations).toBe(3);expect(opens).toBe(9);
   });
 });
+
+describe('storage failure diagnostics',()=>{
+  it('reports permission denial without leaking the protected path',async()=>{
+    const dir=await fs.mkdtemp(join(tmpdir(),'tsim-access-'));dirs.push(dir);await fs.writeFile(join(dir,'CURRENT'),'MANIFEST-000001\n');
+    vi.mocked(fs.open).mockRejectedValue(Object.assign(new Error('sensitive path'),{code:'EPERM'}));
+    await expect(readTsimToken(dir)).rejects.toThrow(/^BROWSER_SESSION_ACCESS_DENIED$/);
+  });
+  it('distinguishes unreadable storage from an absent token for strict session callers',async()=>{
+    const dir=await fs.mkdtemp(join(tmpdir(),'tsim-invalid-'));dirs.push(dir);
+    await expect(readTsimToken(dir,{throwOnFailure:true})).rejects.toThrow('BROWSER_SESSION_STORAGE_INVALID');
+    expect(await readTsimToken(dir)).toBeNull();
+  });
+});
