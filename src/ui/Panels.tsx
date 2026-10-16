@@ -47,7 +47,7 @@ const phases = {
 function ShortcutHint({ state, canReplace }: { state: StandaloneState; canReplace: boolean }) {
   const enabled = state.shortcutEnabled !== false;
   const explanation = !enabled ? "快捷键已关闭" : canReplace ? "在原回复框按下即可替换" : "等待当前草稿的可替换译文";
-  return <p className="shortcut-hint" role="note"><kbd>Ctrl+Alt+Enter</kbd><span>{explanation}；仅替换，不发送</span></p>;
+  return <p className="shortcut-hint" role="note"><kbd>macOS ⌘+⌥+Enter</kbd><kbd>Windows Ctrl+Alt+Enter</kbd><span>{explanation}；仅替换，不发送</span></p>;
 }
 export function ComposerToolbar({
   api,
@@ -74,7 +74,7 @@ export function ComposerToolbar({
   const [copiedText,setCopiedText]=useState<string|null>(null);
   const copied=state.phase==='ready'&&!!preview&&copiedText===preview;
   return (
-    <main className="composer-toolbar" aria-label="回复翻译工具" title={state.shortcutEnabled === false ? "替换快捷键已关闭" : "在原回复框按 Ctrl+Alt+Enter 替换当前有效译文，仅替换不发送"}>
+    <main className="composer-toolbar" aria-label="回复翻译工具" title={state.shortcutEnabled === false ? "替换快捷键已关闭" : "在原回复框按 macOS ⌘+⌥+Enter / Windows Ctrl+Alt+Enter 替换当前有效译文，仅替换不发送"}>
       <section className="composer-expanded" aria-label="译文预览与操作">
         <div className="composer-options">
           <select aria-label="翻译目标语言" id="target-language" value={language} disabled={state.phase==='replacing'} onChange={event=>setLanguage(event.target.value as PanelTarget)}>
@@ -249,7 +249,7 @@ export function SettingsPanel({ api, state, busy, perform }: BaseProps) {
         </label>
         <label className="shortcut-setting">
           <input type="checkbox" checked={state.shortcutEnabled !== false} disabled={!api || state.phase === "replacing"} onChange={event => void perform(() => api.setTranslationOptions({shortcutEnabled:event.target.checked}))} />
-          启用替换快捷键 Ctrl+Alt+Enter
+          启用替换快捷键（macOS ⌘+⌥+Enter / Windows Ctrl+Alt+Enter）
         </label>
         <p className="hint">在原回复框内使用，仅替换当前有效译文，不发送消息。</p>
       </section>

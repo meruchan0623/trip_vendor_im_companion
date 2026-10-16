@@ -4,7 +4,7 @@ import {collectTextRuns,findIdentifierMatches,inferIdentifierType,MESSAGE_TEXT_S
 const SELECTOR='.tiptap.ProseMirror.chat-editor[contenteditable="true"]';
 interface PublicEditor {view:{dom:HTMLElement;composing:boolean;focus():void};state:{doc:{content:{size:number}}};isDestroyed:boolean;isEditable:boolean;getJSON():unknown;on(type:string,handler:()=>void):unknown;off(type:string,handler:()=>void):unknown;commands:{setContent(content:unknown,emitUpdate:boolean,parseOptions:{preserveWhitespace:'full'}):boolean;setTextSelection(position:number):boolean}}
 export type NativeInteraction={type:'draft-changed'}|{type:'replace-shortcut';snapshot:VerifiedComposerSnapshot};
-export function isReplaceChord(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'>){return event.key==='Enter'&&event.ctrlKey&&event.altKey&&!event.shiftKey&&!event.metaKey;}
+export function isReplaceChord(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'>){return event.key==='Enter'&&event.altKey&&!event.shiftKey&&(event.ctrlKey!==event.metaKey);}
 export function isReplaceIntent(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'|'isTrusted'|'repeat'|'isComposing'|'keyCode'>){return isReplaceChord(event)&&event.isTrusted&&!event.repeat&&!event.isComposing&&event.keyCode!==229;}
 export interface NativePoll {snapshot?:VerifiedComposerSnapshot;writeVerified:boolean;reason?:string;orderEntries?:OrderEntry[];orderViewport?:OrderViewport;messageSurface?:MessageSurface;orderFrame?:{rect:SurfaceRect;clientWidth:number;clientHeight:number;clientLeft:number;clientTop:number}}
 const inactiveSurface=():MessageSurface=>({active:false,composerRect:null,toolbarRect:null});
