@@ -5,7 +5,7 @@ import type {NativePoll} from './native-composer';
 type Service=Pick<OwnedAuthClient,'identity'|'onIdentity'|'translate'|'openLogin'>;
 interface ConversationPrefs {autoLang?:string;manualEnabled?:boolean;manualTarget?:PanelTarget}
 interface ReviewedResult {snapshot:VerifiedComposerSnapshot;target:PanelTarget;text:string}
-export const TRANSLATE_DELAY_MS=800;
+export const TRANSLATE_DELAY_MS=500;
 const AUTO_LANG=/^(?:unknown|[a-z]{2}(?:-[A-Z]{2})?)$/;
 const equalAuth=(a:PsimIdentity|null,b:PsimIdentity|null)=>JSON.stringify(a)===JSON.stringify(b);
 const failureText=(error:unknown,fallback:string)=>{const code=error instanceof Error&&/^[A-Z_]{3,64}$/.test(error.message)?error.message:'';return code?`${fallback}（${code}）`:fallback;};

@@ -39,6 +39,8 @@ const messages:Record<string,string>={
   BROWSER_PLACEMENT_FAILED:'订单浮层未能显示，请重新点击订单号。',
   BROWSER_SPACE_TOO_SMALL:'订单查询空间不足，请先放大商家窗口，再打开订单。',
 };
+/** Quiet period after the last edit before an automatic outbound translation request. */
+export const AUTO_TRANSLATE_DELAY_MS=500;
 export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export class CompanionService {
@@ -111,7 +113,7 @@ export class CompanionService {
     if(this.closed||!this.foreground||!this.state.autoTranslate||this.state.translationPaused||this.state.auth!=='ready'||capture?.source!=='verified-editor'||!capture.snapshot.isPlainText||capture.snapshot.composing||!capture.snapshot.text.trim()||key===this.attempted||key===this.suppressed)return;
     if(this.autoTimer){this.state.phase='waiting';return;}
     this.state.phase='waiting';
-    this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.busy||this.externalConnecting){this.schedule();return;}this.attempted=key;void this.translate(this.state.language,key);},1500);
+    this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.busy||this.externalConnecting){this.schedule();return;}this.attempted=key;void this.translate(this.state.language,key);},AUTO_TRANSLATE_DELAY_MS);
   }
   async setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean}){
     if(options.shortcutEnabled!==undefined){if(typeof options.shortcutEnabled!=='boolean')throw new Error('INVALID_SHORTCUT_OPTION');this.state.shortcutEnabled=options.shortcutEnabled;}
