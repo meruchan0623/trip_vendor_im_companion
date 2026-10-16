@@ -1,7 +1,6 @@
 'use strict';
 const path = require('node:path');
 const {fileURLToPath} = require('node:url');
-const {fileURLToPath} = require('node:url');
 /** Give only the local IM view a bounded foreground-speed startup window. */
 function prioritizeImStartup(app) {
   const allowed = new Set([
