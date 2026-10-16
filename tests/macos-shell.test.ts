@@ -38,6 +38,14 @@ function windowsBitmap(){const pixels=Buffer.alloc(20*20*4);for(let y=0;y<20;y++
 afterEach(()=>{Object.defineProperty(process,'platform',platform);delete (process as {resourcesPath?:string}).resourcesPath;vi.unstubAllGlobals();});
 
 describe('macOS tray-resident Electron shell',()=>{
+  it('accepts automatic owner handoff without opening settings',async()=>{
+    await boot('darwin');
+    fake.appEvents.get('second-instance')?.({},['helper','--vendor-owner=42']);await tick();
+    fake.appEvents.get('second-instance')?.({},['helper','--vendor-owner=43']);await tick();
+    expect(fake.windows).toHaveLength(0);expect(fake.app.quit).not.toHaveBeenCalled();
+    fake.appEvents.get('before-quit')?.({preventDefault(){}});await tick();
+    expect(fake.service.dispose).toHaveBeenCalledOnce();
+  });
   it('never opens or reopens settings on activation or repeated launches',async()=>{
     await boot('win32');
     fake.appEvents.get('activate')?.();
@@ -47,7 +55,7 @@ describe('macOS tray-resident Electron shell',()=>{
     invoke(event,'close');
     fake.appEvents.get('activate')?.();
     fake.appEvents.get('second-instance')?.({},['helper']);
-    await tick();
+    fake.appEvents.get('second-instance')?.({},['helper','--vendor-owner=42']);await tick();
     expect(fake.windows.filter(item=>!item.isDestroyed())).toHaveLength(0);
   });
   it('hides the Dock and menu bar icons while starting resident auto-binding',async()=>{

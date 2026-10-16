@@ -10,6 +10,9 @@ import { startExternalClient } from './external-composer';
 import { lockContents, lockLocalSession } from './security';
 import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
 import { ResidentConnection } from './resident-connection';
+import {vendorOwnerPID,watchVendorOwner} from './vendor-owner';
+import {createLaunchPlatform} from '../runtime/platform';
+import {VERIFIED_RUNTIME_BUILD} from '../runtime/build-manifest';
 
 // The only local window is on-demand settings; daily business UI belongs to the verified merchant BrowserView.
 if(process.platform==='win32')app.disableHardwareAcceleration();
@@ -24,6 +27,14 @@ let latest:WindowState|null=null,quitting=false,cleaned=false,panelIntent=0;
 let panelLoad:{window:BrowserWindow;promise:Promise<void>}|undefined;
 let lastPublished='';
 let acceptanceInput:ReadlineInterface|undefined;
+let stopOwnerWatch:(()=>void)|undefined;
+let ownerEpoch=0;
+async function adoptVendorOwner(pid:number):Promise<void>{
+  const epoch=++ownerEpoch,platform=createLaunchPlatform();
+  const stop=await watchVendorOwner(pid,id=>platform.processIdentity(id),VERIFIED_RUNTIME_BUILD.executable,()=>{if(epoch===ownerEpoch)app.quit();});
+  if(quitting||epoch!==ownerEpoch){stop();return;}
+  stopOwnerWatch?.();stopOwnerWatch=stop;
+}
 function listenForAcceptanceQuit():void {
   if(!acceptance)return;
   let requested=false;
@@ -109,10 +120,13 @@ function helperPath():string {
   return app.isPackaged?join(process.resourcesPath,'native/windows/TravelMerchant.WindowHelper.exe'):join(app.getAppPath(),'native/windows/bin/publish/TravelMerchant.WindowHelper.exe');
 }
 async function cleanup():Promise<void> {
+  stopOwnerWatch?.();stopOwnerWatch=undefined;
   if(cleaned)return;cleaned=true;acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();
   try{await service?.dispose();}finally{native?.stop();}
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
+  const ownerPID=vendorOwnerPID(process.argv);
+  if(ownerPID!==undefined)await adoptVendorOwner(ownerPID);
   native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},undefined,undefined,undefined,()=>resident?.notifyTargetAvailable());
   service=new CompanionService(native,url=>shell.openExternal(url),()=>{},smokeMode?{enabled:false}:{},true,(changed,options)=>new PersistentSessionService(changed,options,new SecureSessionStore(join(app.getPath('userData'),'auth','tsim-session.enc'),safeStorage)));service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
@@ -122,7 +136,13 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   if(smokeMode){console.log(JSON.stringify({event:'shell_started',electron:process.versions.electron,localWindows:0,trayAvailable:!!tray,residentMode:residentPlatform,embeddedBusinessUI:true,remoteNavigation:false}));setTimeout(()=>{void cleanup().then(()=>{console.log(JSON.stringify({event:'smoke_complete',remoteNavigation:false,credentialsAccessed:false}));app.exit(0);});},1500);}
 }).catch(error=>{console.error('SHELL_START_FAILED',error instanceof Error?error.message:'unknown');app.exit(1);});
 else app.quit();
-app.on('second-instance',()=>{});
+app.on('second-instance',(_event,args)=>{
+  try{
+    const ownerPID=vendorOwnerPID(args);
+    if(ownerPID!==undefined){void adoptVendorOwner(ownerPID).catch(()=>{console.error('INVALID_VENDOR_OWNER');app.quit();});return;}
+    // Repeated launches are background-only; settings require an explicit tray action.
+  }catch{console.error('INVALID_VENDOR_OWNER');}
+});
 // OS activation (including vendor startup) must never summon the settings panel.
 app.on('window-all-closed',()=>{if(!quitting&&!residentPlatform)app.quit();});
 app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;void cleanup().finally(()=>app.quit());});

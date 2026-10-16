@@ -22,7 +22,9 @@
     "build:lightweight": "npm run typecheck && tsc -p host-node/tsconfig.json && node scripts/build-lightweight-node.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File native/resident/build.ps1",
     "package:lightweight": "npm run build:lightweight && node scripts/package-lightweight.mjs",
     "build:native:mac": "bash native/macos/build.sh",
-    "package:mac:app": "npm run build:native:mac && npm run build && install-electron && electron-builder --mac --arm64"
+    "package:mac:app": "npm run build:native:mac && npm run build && install-electron && electron-builder --mac --arm64",
+    "install:mac": "node scripts/install-macos-companion.mjs install",
+    "rollback:mac": "node scripts/install-macos-companion.mjs rollback"
   },
   "dependencies": {
     "react": "19.3.0",
