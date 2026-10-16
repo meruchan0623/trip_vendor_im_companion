@@ -38,6 +38,25 @@ class FakeWire implements EventCDPTransport{
 }
 describe('actual driver with fake CDP wire, no client connection',()=>{
   const initialState={auth:'needs_login',conversationKey:null,draft:null,enabled:false,target:'en',followCustomer:{lang:null,following:false,manualEnabled:false},status:'unavailable',preview:null,error:null,busy:false} as const;
+  it('skips unchanged panel publications while retaining heartbeats and changed-state delivery',async()=>{
+    const wire=new FakeWire(),driver=await LiveRuntimeDriver.discover(wire,fingerprint,bundle,hash);
+    await driver.verifyCurrentTarget(driver.target);
+    const handle=await driver.mountCompanion(initialState,async()=>{});
+    const count=wire.calls.length;
+    for(let i=0;i<10;i++)await handle.publish({...initialState});
+    expect(wire.calls).toHaveLength(count);
+    await handle.heartbeat(1);expect(wire.calls.length).toBeGreaterThan(count);
+    expect(wire.calls.slice(count).filter(call=>call.method==='Runtime.callFunctionOn')).toHaveLength(1);
+    const changed={...initialState,enabled:true};
+    await handle.publish(changed);
+    expect(wire.calls.some(call=>String(call.params.functionDeclaration).includes('this.updateWorkbench'))).toBe(true);
+    const changedCount=wire.calls.length;
+    await handle.publish({...changed});expect(wire.calls).toHaveLength(changedCount);
+    await handle.publish(initialState);expect(wire.calls.length).toBeGreaterThan(changedCount);
+    wire.heartbeatFail=true;await expect(handle.heartbeat(2)).rejects.toThrow('LEASE_ENDED');
+    await handle.detach();await expect(handle.publish(initialState)).rejects.toThrow('LEASE_ENDED');
+    await driver.disconnect();
+  });
   it('keeps one connection and renews only native metadata while hidden, then mounts automatically on visibility',async()=>{
     const wire=new FakeWire();wire.nativeFactory=true;const driver=await LiveRuntimeDriver.discover(wire,fingerprint,bundle,hash);await driver.verifyCurrentTarget(driver.target);
     await driver.externalComposer('native fixture',createHash('sha256').update('native fixture').digest('hex'));

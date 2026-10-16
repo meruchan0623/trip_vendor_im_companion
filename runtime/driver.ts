@@ -92,10 +92,11 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       }
       this.current(epoch);await this.policy.verifyOwnedFrame();this.current(epoch);
     }catch(error){await this.cleanupUi().catch(()=>{});throw error;}finally{stopBootstrap();}
-    let detached=false;
+    // The service serializes publications. UI heartbeat/update already perform boundary() atomically.
+    let detached=false,lastPublished=JSON.stringify(state);
     return{
-      publish:async(next:PanelState)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyOwnedFrame();this.current(epoch);await this.policy.publishWorkbench(next);this.current(epoch);},
-      heartbeat:async(sequence:number)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyOwnedFrame();this.current(epoch);await this.policy.heartbeat(sequence);this.current(epoch);},
+      publish:async(next:PanelState)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);const signature=JSON.stringify(next);if(signature===lastPublished)return;await this.verifyActiveTarget();this.current(epoch);await this.policy.publishWorkbench(next);this.current(epoch);lastPublished=signature;},
+      heartbeat:async(sequence:number)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.heartbeat(sequence);this.current(epoch);},
       detach:async()=>{if(detached)return;detached=true;await this.cleanupUi();},
     };
   }
