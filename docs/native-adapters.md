@@ -24,9 +24,35 @@ Windows仅候选实际进程路径`Program Files\vbk-electron\旅游商家桌面
 
 ## Mac 构建与门槛
 
-真实Mac/Xcode command-line tools上运行`bash native/macos/build.sh`。CGWindow枚举仅bundle `com.ctrip.vbooking`，id包含pid、launchDate及CGWindowID，坐标是top-left screen points，壳不能当Windows物理像素转换。已具AX权限时用AXObserver监听位置/大小/窗口生命周期，另有250ms回退；不在贴边时默认申请Accessibility或Screen Recording。AX探针不读正文，权限拒绝/撤销明确禁用业务能力。
+`npm run build:native:mac`（即`bash native/macos/build.sh`）需Xcode Command Line Tools：分别以`arm64-apple-macos12`与`x86_64-apple-macos12`编译，lipo合并为universal二进制，再`codesign --force -s -`做ad-hoc签名，输出`native/macos/bin/TravelMerchant.WindowHelper`（gitignore，不入库）。`npm run package:mac:app`把它放入`旅游商家助手.app/Contents/Resources/native/macos/TravelMerchant.WindowHelper`；开发模式从`native/macos/bin/`启动。
 
-本机Windows不能编译/运行Swift/AppKit。Mac真实客户端样本、窗口/DPI/隐藏/全屏、多窗口、AX拒绝/撤销、签名、公证、arm64/x64分发和升级均待分别验收。此源码不是已验证Mac发布物。
+候选窗口仅限CGWindowList中owner bundle为`com.ctrip.vbooking`、layer 0、alpha>0、至少400×300 points的窗口，排除提示框与通知弹窗。顺序：激活应用的窗口优先，其次面积较大者，再按CGWindowList前后次序；壳的自动绑定按此顺序取第一个能绑定的窗口，绑定后直到丢失才换绑。
+
+id为`<pid>:<启动时间epoch毫秒整数>:<CGWindowID>`，与Windows共用壳侧校验`/^\d+:\d+:\d+$/`。启动时间取NSRunningApplication.launchDate，未经LaunchServices启动、缺launchDate时改用内核`p_starttime`。每次状态更新都重新核对pid的bundle、启动时间及窗口归属，PID复用不会静默换绑；不一致即报告`target_lost`。
+
+windowState的bounds为CGWindow top-left screen points（`coordinateSpace:'screen-points-top-left'`），visible取onscreen，minimized为其反值（最小化、隐藏或位于其他Space的窗口仍保持绑定，只有窗口销毁才报告`target_lost`），foreground/groupForeground取应用是否激活，dpi为窗口主要所在显示器的像素/点比×72（Retina为144）。壳不能把这些坐标当Windows物理像素转换。
+
+未绑定时250ms轮询候选；候选由无到有时发送一次`targetAvailable`（空payload），壳据此提前触发自动绑定。它只是提示，`bindWindow`仍重新枚举并核对id。已绑定时250ms轮询窗口状态，另在已有Accessibility权限时用AXObserver监听位置/大小/窗口生命周期；不主动申请Accessibility或Screen Recording。AX探针不读正文，四项业务能力全部false。`setCompanionWindows`为Windows专属，Mac辅助进程不实现，壳只在win32调用。
+
+Electron 壳在 Windows 保留托盘；darwin 使用后台模式，隐藏 Dock（`LSUIElement`）且不创建菜单栏托盘，不自动显示设置窗。助手启动辅助进程并自动绑定。macOS 当前优先直接注入官方 App，由启动器带起并随官方进程退出；旧独立启动诊断链路经 LaunchServices 执行`/usr/bin/open -a /Applications/旅游商家桌面版.app --args --remote-debugging-port=<端口>`，系统权限仍归属原客户端，再按参数恰好含该端口的主进程识别pid。
+
+尚待真实Mac分别验收：窗口跟随、多显示器/DPI、隐藏/全屏、多窗口、AX拒绝/撤销、x64主机分发、厂商升级。辅助程序与`.app`仅ad-hoc签名，未公证。
+
+## 2026-10-16 Mac 早期实测（历史状态）
+
+以下为当天较早构建的记录；后续已增加热更新 ares 1.2.16 支持、先挂载后认证等待、Electron 自有加密登录及界面修复。Chrome/Edge 登录要求只适用于当时的旧认证入口。首次消息页白屏的后续实测仍未通过，完整现状见 [Windows 构建与优化说明](Windows注入包构建说明-2026-10-16.md)。
+
+环境：Apple Silicon、macOS 27.0，旅游商家桌面版1.2.12（x86_64，Electron 27.3.11 / Chrome 118.0.5993.159，ares 1.2.15）。热更新目录`~/Library/Application Support/vbk-electron/dist`为ares 1.2.5，旧于安装包，页面实际从`.app`内`app.asar.unpacked`加载。
+
+- 只读`inspectReadOnly`：指纹四项SHA256与`MACOS_RUNTIME_BUILD`一致，1个主进程、22个客户端进程、0个安装器。
+- 经用户同意以⌘Q等价方式退出客户端后，`launchFromExplicitUserAction`经LaunchServices启动成功（约4.1秒），主进程参数仅`--remote-debugging-port=<端口>`，lsof确认唯一监听`127.0.0.1:<端口>`且归属该主进程；`/json/version`为`Chrome/118.0.5993.159`，imPlus与main页面URL与清单一致。
+- 打包后的`旅游商家助手.app`（arm64，ad-hoc签名`codesign --verify --deep --strict`通过，LSUIElement）：`--smoke-test`输出`shell_started`→`smoke_complete`，退出码0、无残留辅助进程。`--acceptance`下辅助程序自动绑定客户端窗口，CDP附加、HTML/渲染脚本哈希核验、隔离世界与原生编辑器端口安装均通过。
+- 当时消息页没有任何会话（会话列表为空、`.chat_area`不存在），面板找不到输入区锚点，挂载以`OWNED_FRAME_BOUNDARY_FAILED`→`RUNTIME_MOUNT_FAILED`失败并按既有逻辑定时重试，与Windows行为一致。客户端窗口被遮挡时Chromium报告`visibilityState=hidden`，助手进入`runtime-waiting-visible`等待，不报错。
+- 静态核对：注入代码依赖的本地选择器（`.im_detail.inform-con > .chat_area`、`.chat_area-input`、`.tiptap.ProseMirror.chat-editor`、`.chat_list_content li.normal-message-item`、`.menu-item-wrapper.cur .menu-text`、`.customer_info iframe.customer_order-detail`等）在Mac 1.2.15前端资源中均存在；`.im_info_basic_list*`属于vbooking远程订单页，不在本地包内。
+- 本机Chrome/Edge Default配置中没有`csagent.tsim.tech`本地存储，翻译认证为`needs_login`，属预期；需用户自行在浏览器登录。
+- 助手退出后客户端页面无`data-tsim-runtime-lease`、无自有节点、无`tsimRuntimeFactory`残留。全程未发送客户消息、未改写草稿、未修改厂商文件。
+
+未验收：打开会话后的面板显示、中文草稿译文预览、替换/撤销、订单iframe登录与查询、真实IME。需在浏览器登录TSim并有进行中的客户会话后补测。
 
 ## 2026-10-14 Windows实测
 

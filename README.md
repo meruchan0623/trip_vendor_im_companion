@@ -1,6 +1,33 @@
-# 旅游商家内嵌助手 · 0.4.0 轻量宿主原型
+> 2026-10-16 Electron 桌面入口更新：首次“请求登录”后，TSim 会话使用系统安全存储加密保存，启动时自动恢复和校验，不再依赖读取 Edge/Chrome 数据目录。主动退出会清除本机登录态；服务端令牌过期且无法续期时仍需重新登录。订单 iframe 会话独立。详见 [持久登录说明](docs/host-integration.md)。下文旧轻量宿主的浏览器接入说明不适用于这一新入口。
 
-翻译预览、草稿替换和订单查询直接显示在旅游商家桌面版的客服页面中，使用原客户端 Chromium BrowserView。订单面板通过 iframe 显示 TSim_CS 的 `/embed/operator` 页面。后台助手保留托盘及按需打开的连接设置。
+# trip_vendor_im_companion
+
+## macOS 直接注入官方 App
+
+Mac 不再构建 PKG，改为从未修改的官方 DMG 或 App 构建并直接安装注入版本。助手随客户端启动，客户端退出时助手结束。
+
+在 Apple Silicon Mac 的仓库根目录执行：
+
+```bash
+npm ci
+npm run inject:mac -- --official '/path/to/official-apple.dmg'
+# 完全退出客户端后，安装刚构建的版本
+npm run inject:mac -- --install-built
+```
+
+不传 `--official` 时读取 `work/mac-arm64/official-apple.dmg`。也可用 `--official '/path/to/旅游商家桌面版.app'`，必须是未修改的官方原包。构建阶段核验官方签名、版本和文件指纹，输出 `work/mac-inject/旅游商家桌面版.app`；安装目标为 `/Applications/旅游商家桌面版.app`。安装会替换现有 App，请保留官方原包用于恢复；用户数据目录不在替换范围。目标属于其他用户时会要求管理员授权。
+
+当前助手面向 macOS 13 及以上的 Apple Silicon；支持官方 1.2.12，以及内置 ares 1.2.15 或已核验的热更新 ares 1.2.16。直接注入脚本会检查本机用户目录中的热更新版本和页面文件指纹，将选定页面路径同时编译进后台助手与页面运行时；未知热更新版本或文件被修改时停止构建。官方客户端为 Intel 程序，仍需要 Rosetta；助手为 ARM64。注入后使用本机临时签名，未进行 Apple 公证。厂商更新后须重新核验兼容性并重新注入。
+
+安装并核验后运行 `npm run clean:mac`，清除编译目录、PKG 和注入构建副本，保留已安装 App、官方原包、依赖和验收记录。清理后再次安装需重新构建。
+
+Windows 构建与本机验收见 [Windows 注入包构建说明](docs/Windows注入包构建说明-2026-10-16.md)。Windows 产物须在 Windows 上编译。
+
+调试连接仅监听本机。日志位于 `~/Library/Logs/trip_vendor_im_companion/`。
+
+以下为保留的独立助手与 Windows 轻量宿主说明。
+
+翻译预览、草稿替换和订单查询直接显示在旅游商家桌面版的客服页面中，使用原客户端 Chromium BrowserView。订单面板通过 iframe 显示 TSim_CS 的 `/embed/operator` 页面。Windows 后台助手保留托盘及按需打开的连接设置；macOS 助手隐藏 Dock 和菜单栏图标。
 
 0.4.0 原型将后台 Electron 替换为 **Node.js 24 + C# / .NET 原生托盘宿主**，不包含 Electron 或 WebView。页面内嵌功能继续使用原客户端 Chromium。0.3.2 Electron 包保留作为回退版本；性能、真实客户端操作及未完成的验收项目以[轻量宿主真实验收](docs/轻量宿主真实验收-2026-10-15.md)为准，原型发布不代表全部验收通过。
 
@@ -46,13 +73,42 @@ Electron 回退便携包输出：`release/TravelMerchantCompanion-0.3.2-win-x64.
 
 `npm run smoke:shell` 使用隔离配置，只检查托盘和退出清理，不读取登录凭据或访问业务服务。真实客户端验收另行记录，不能由单元测试或壳层冒烟替代。
 
+## macOS 独立助手（保留模式）
+
+macOS 保留 0.3.2 Electron 后台组件（Apple Silicon arm64），用于内嵌构建；当前代码隐藏 Dock 和菜单栏图标，设置窗口也不因启动、激活或重复启动而弹出。0.4.0 轻量宿主（`host-node/`、`native/resident/`）仅支持 Windows。
+
+构建需要 Node.js 24 和 Xcode Command Line Tools（`swiftc`、`lipo`、`codesign`）：
+
+```bash
+npm ci
+npm run package:mac:app
+```
+
+Electron 44 的 npm 包没有安装脚本，`npm ci` 不会下载 Electron 本体。`package:mac:app` 依次构建 macOS 窗口辅助程序（`native/macos/build.sh`）、执行类型检查和生产构建，再用 `install-electron` 按本机平台和架构把 Electron 下载到 `node_modules/electron/dist`（已有同版本同平台时直接跳过，`node_modules` 从 Windows 复制来时会重新下载），最后由 electron-builder 使用其中的 `Electron.app` 输出。首次执行 `npm start` 或 `npx electron` 同样会下载 Electron。输出：
+
+- `release/mac-arm64/旅游商家助手.app`
+- `release/TravelMerchantCompanion-0.3.2-mac-arm64.zip`
+
+使用时优先采用上文“macOS 直接注入官方 App”，正常打开官方客户端即可启动后台助手，退出官方客户端后助手结束。不要再按旧说明寻找菜单栏托盘或从托盘启动客户端。单独构建的助手 App 用于开发与诊断，不能同时与包内助手运行。
+
+手动诊断时，官方客户端需完全退出后，才能用 `open -a "/Applications/旅游商家桌面版.app" --args --remote-debugging-port=<端口>` 启动；端口范围为 1024–65534，仅限回环地址。已运行时 `open -a` 不会重新传入参数。翻译认证使用助手自己的登录页和加密会话，订单 iframe 仍单独登录。
+
+已核对的 Mac 客户端指纹：旅游商家桌面版 1.2.12（CFBundleVersion 1.2.12，ares 1.2.15），页面从 `.app` 内的 `app.asar.unpacked` 加载。SHA256 见 `runtime/build-manifest.ts` 的 `MACOS_RUNTIME_BUILD`。
+
+限制：
+
+- 只做了 ad-hoc 签名，没有 Apple 公证。从 zip 解压的副本首次打开被拦截后，在「系统设置 → 隐私与安全性」中点「仍要打开」（macOS 15 起 Finder 右键「打开」不再绕过 Gatekeeper），或者对解压出的副本执行 `xattr -dr com.apple.quarantine "/Applications/旅游商家助手.app"`。本机构建的 `release/mac-arm64/旅游商家助手.app` 没有隔离属性，可直接打开。
+- 厂商客户端更新后指纹不再匹配，助手会停止连接，需要补充新指纹后重新构建。如果厂商热更新目录 `~/Library/Application Support/vbk-electron/dist` 比安装包新，页面哈希核验同样会失败并停止。
+- 轻量宿主仅支持 Windows。Mac 真实客户端验收另行记录，单元测试不能替代；首次消息页白屏的最新实测仍未通过，详见 Windows 构建说明中的已知问题。
+
 ## 实现边界
 
+- `native/macos/`：0.3.2 macOS 版的窗口辅助程序（Swift），与 Windows 辅助程序共用 stdio JSON 协议 1.0，见[平台薄适配](docs/native-adapters.md)。
 - `native/resident/`：0.4.0 原生托盘、设置、窗口监测及 Node 子进程生命周期；`host-node/`：无 Electron 的业务宿主，通过父子进程私有管道与原生宿主交换固定协议。
 - `electron/main.ts`：保留的 Electron 回退入口；`electron/companion-service.ts`：两种宿主复用的翻译状态及竞态处理。业务源码位于 `electron/` 目录不代表轻量发布包依赖 Electron。
 - `electron/browser-profile-session.ts`：复用本机 TSim 会话、核验翻译认证。历史订单查询 API 及内部状态暂时保留，生产页面桥不再调用该 API，也不向页面发布订单字段。
 - `electron/embedded-host.ts`：固定动作及状态投影；`runtime/driver.ts`：目标身份核验、隔离世界与租约。
-- `runtime/page/*`：原客服页面内的 Shadow DOM 面板；订单入口嵌入 TSim_CS `/embed/operator`，由该页面提供订单界面和登录流程，登录会话与 Chrome / Edge 的翻译会话独立。
+- `runtime/page/*`：原客服页面内的 Shadow DOM 面板；订单入口嵌入 TSim_CS `/embed/operator`，由该页面提供订单界面和登录流程，登录会话与宿主的翻译会话独立（轻量包使用 Chrome / Edge，Electron 包使用自有加密会话）。
 - `runtime/native-composer.ts`：通过已核验的 Tiptap 编辑器公共接口替换，并校验会话、草稿、IME、焦点和写后状态。
 - 厂商资源不匹配、目标不唯一或编辑器条件不满足时停止操作。当前支持的客户端指纹见 `runtime/build-manifest.ts`；不能假设客户端更新后仍兼容。
 - 常规构建将浏览器脚本内联到生产主进程并记录 hash。运行和打包不依赖 `work/` 临时文件。
