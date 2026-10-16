@@ -199,9 +199,10 @@ export class RuntimeCDPPolicy {
     if(factory?.exceptionDetails||typeof factory?.result?.objectId!=='string')throw new Error('RUNTIME_FACTORY_MISSING');
     const result=await this.owned('Runtime.callFunctionOn',{objectId:factory.result.objectId,functionDeclaration:'function(metadata,bridge){return this.mount(metadata,undefined,bridge);}',arguments:[{value:metadata},{value:bridge??null}],objectGroup:this.target.contextNonce,returnByValue:false,awaitPromise:true});
     if(result?.exceptionDetails){
-      // Forward only our fixed code. Never copy arbitrary page exception descriptions or business data.
+      // Forward only fixed owned codes. Never copy arbitrary page exception descriptions or business data.
       const failure=result.exceptionDetails.exception?.description;
-      if(typeof failure==='string'&&/^Error: IM_TARGET_INACTIVE(?:\n|$)/.test(failure))throw new Error('IM_TARGET_INACTIVE');
+      const code=typeof failure==='string'?/^Error: (IM_TARGET_INACTIVE|UNAPPROVED_DOCUMENT|UNAPPROVED_METADATA|UNAPPROVED_RENDERER|UNAPPROVED_LAYOUT_OR_ALREADY_ATTACHED|OWNED_BINDING_MISSING|OWNED_FRAME_BOUNDARY_FAILED)(?:\n|$)/.exec(failure)?.[1]:undefined;
+      if(code)throw new Error(code);
       throw new Error('RUNTIME_MOUNT_FAILED');
     }
     if(typeof result?.result?.objectId!=='string')throw new Error('RUNTIME_MOUNT_FAILED');this.uiObjectId=result.result.objectId;
