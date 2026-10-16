@@ -1,3 +1,4 @@
+import {matchesPageConversation} from './conversation';
 import {customerLanguage} from './language';
 import type {PanelState} from '../../src/shared/workbench';
 import {startOrderObservation,isOwned} from './identifiers';
@@ -5,6 +6,8 @@ import {createOperatorOverlay,operatorFrameURL,OPERATOR_FRAME_ID,TSIM_OPERATOR_O
 import {createOutboundPanel,PANEL_HOST_ID,type OutboundPanel,type PanelBridge} from './outbound-panel';
 export {TSIM_OPERATOR_ORIGIN};
 export const CUSTOMER_SCAN_DEBOUNCE_MS=300;
+export const CUSTOMER_REPORT_RETRY_MS=1000;
+export const CUSTOMER_REPORT_MAX_ATTEMPTS=4;
 export interface PageGeometry {x:number;y:number;width:number;height:number;viewportWidth:number;viewportHeight:number;devicePixelRatio:number}
 export interface PageFeatures {update(state:PanelState):void;boundary():true;geometry():PageGeometry;dispose():void;readonly overlay:OperatorOverlay;readonly panel:OutboundPanel|undefined}
 /** Production workbench: explicit order queries open the original TSim page. */
@@ -12,23 +15,65 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   const view=document.defaultView!;let disposed=false,state=options.state,conversation:string|null|undefined;
   const overlay=createOperatorOverlay(document,{origin:options.origin,prewarmDelayMs:options.prewarmDelayMs});
   const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>overlay.open({identifier,identifierType})}):undefined;
+  const bound=()=>!!state&&matchesPageConversation(document,state.conversationKey);
+  let renderedBound:boolean|undefined;
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false}});};
+  renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
-  let customerTimer:number|undefined,lastCustomerReport='';
-  const scanCustomer=()=>{customerTimer=undefined;if(disposed||document.visibilityState==='hidden'||!state?.conversationKey||!options.bridge)return;const lang=customerLanguage(document),key=state.conversationKey,signature=JSON.stringify([key,lang]);if(signature===lastCustomerReport)return;lastCustomerReport=signature;void options.bridge.invoke('customerLanguage',[{lang,conversationKey:key}]).catch(()=>{if(lastCustomerReport===signature)lastCustomerReport='';});};
-  const scheduleCustomer=()=>{view.clearTimeout(customerTimer);customerTimer=view.setTimeout(scanCustomer,CUSTOMER_SCAN_DEBOUNCE_MS);};
+  type CustomerReport={signature:string;key:string;lang:string;attempts:number;done:boolean;attempt:number};
+  let customerTimer:number|undefined,retryTimer:number|undefined,customerReport:CustomerReport|undefined;
+  const clearRetry=()=>{view.clearTimeout(retryTimer);retryTimer=undefined;};
+  const reflected=(report:CustomerReport)=>report.lang!=='unknown'&&state?.conversationKey===report.key&&state.followCustomer.lang===report.lang;
+  const active=(report:CustomerReport)=>!disposed&&customerReport===report&&state?.conversationKey===report.key&&bound();
+  const retry=(report:CustomerReport)=>{
+    clearRetry();
+    if(!active(report)||report.done||report.attempts>=CUSTOMER_REPORT_MAX_ATTEMPTS)return;
+    retryTimer=view.setTimeout(()=>{retryTimer=undefined;if(active(report)&&document.visibilityState!=='hidden')sendCustomer(report);},CUSTOMER_REPORT_RETRY_MS);
+  };
+  const sendCustomer=(report:CustomerReport)=>{
+    if(!active(report)||document.visibilityState==='hidden')return;
+    if(reflected(report)){report.done=true;clearRetry();return;}
+    report.attempts++;const attempt=++report.attempt;
+    // A missing binding reply also gets a bounded retry. A stale completion
+    // cannot acknowledge or restart the newer attempt/conversation.
+    retry(report);
+    void options.bridge!.invoke('customerLanguage',[{lang:report.lang,conversationKey:report.key}]).then(()=>{
+      if(!active(report)||report.attempt!==attempt)return;
+      // Unknown observations intentionally preserve a known service language,
+      // so their successful acknowledgement is enough; known ones need state.
+      if(report.lang==='unknown'||reflected(report)){report.done=true;clearRetry();}
+    },()=>{if(active(report)&&report.attempt===attempt&&!report.done)retry(report);});
+  };
+  const scanCustomer=()=>{
+    customerTimer=undefined;
+    if(disposed||document.visibilityState==='hidden'||!state?.conversationKey||!options.bridge||!bound())return;
+    const lang=customerLanguage(document),key=state.conversationKey,signature=JSON.stringify([key,lang]);
+    if(customerReport?.signature!==signature){clearRetry();customerReport={signature,key,lang,attempts:0,done:false,attempt:0};}
+    const report=customerReport;
+    if(reflected(report)){report.done=true;clearRetry();return;}
+    if(report.done||report.attempts>=CUSTOMER_REPORT_MAX_ATTEMPTS||retryTimer!==undefined)return;
+    sendCustomer(report);
+  };
+  // A throttle guarantees progress while scrolling/rendering continuously.
+  const scheduleCustomer=()=>{if(customerTimer===undefined&&!disposed)customerTimer=view.setTimeout(scanCustomer,CUSTOMER_SCAN_DEBOUNCE_MS);};
   const orderObservation=panel?startOrderObservation(document,order=>{if(!disposed&&document.visibilityState!=='hidden')panel.setOrder(order);},state?.conversationKey??null):undefined;
   let orderTimer:number|undefined;const syncOrder=()=>{orderTimer=undefined;if(!disposed&&document.visibilityState!=='hidden')orderObservation?.refresh();};
-  const orderObserver=new view.MutationObserver(mutations=>{if(disposed||document.visibilityState==='hidden'||orderTimer!==undefined||mutations.every(m=>{const target=m.target.nodeType===1?m.target as Element:m.target.parentElement;const changed=[...m.addedNodes,...m.removedNodes];return isOwned(target)||changed.length>0&&changed.every(n=>n.nodeType===1&&isOwned(n as Element));}))return;orderTimer=view.setTimeout(syncOrder,150);scheduleCustomer();});
+  const orderObserver=new view.MutationObserver(mutations=>{if(disposed||document.visibilityState==='hidden'||mutations.every(m=>{const target=m.target.nodeType===1?m.target as Element:m.target.parentElement;const changed=[...m.addedNodes,...m.removedNodes];return isOwned(target)||changed.length>0&&changed.every(n=>n.nodeType===1&&isOwned(n as Element));}))return;renderCurrent(true);if(orderTimer===undefined)orderTimer=view.setTimeout(syncOrder,150);scheduleCustomer();});
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','src']});syncOrder();}
   function update(next:PanelState){
-    if(disposed)return;state=next;
+    if(disposed)return;const previousLanguage=state?.followCustomer.lang;state=next;
     // Close the order page on conversation change.
     if(conversation!==undefined&&conversation!==next.conversationKey)overlay.close();
     orderObservation?.setConversationKey(next.conversationKey);
-    if(conversation!==next.conversationKey){conversation=next.conversationKey;lastCustomerReport='';scheduleCustomer();}
-    panel?.render(next);
+    if(conversation!==next.conversationKey){conversation=next.conversationKey;clearRetry();customerReport=undefined;scheduleCustomer();}
+    else if(previousLanguage!==next.followCustomer.lang){
+      if(customerReport&&reflected(customerReport)){customerReport.done=true;clearRetry();}
+      else if(customerReport?.done&&customerReport.lang!=='unknown'){customerReport=undefined;}
+      scheduleCustomer();
+    }
+    renderCurrent();
   }
-  const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;if(document.visibilityState!=='hidden'){syncOrder();scheduleCustomer();}};document.addEventListener('visibilitychange',onVisibility);
+  const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;clearRetry();if(document.visibilityState!=='hidden'){syncOrder();scheduleCustomer();}};document.addEventListener('visibilitychange',onVisibility);
   if(state)update(state);
   return{update,overlay,panel,
     boundary(){
@@ -48,6 +93,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;disposed=true;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
   };
 }
