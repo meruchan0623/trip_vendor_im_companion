@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>出站翻译面板 · 真实组件</title>
+<style>
+body{margin:0;background:#d9dee6;font:13px -apple-system,"PingFang SC",sans-serif;display:flex;gap:16px;padding:16px;height:100vh;box-sizing:border-box}
+.im_detail{flex:1;display:flex;flex-direction:column;background:#fff;border-radius:10px;overflow:hidden}
+.chat_area{flex:1;display:flex;flex-direction:column;background:#eef1f5}
+.chat_area-list{flex:1}
+.input-wrap{background:#fff;overflow:hidden}
+.chat-editor{min-height:84px;padding:8px 16px;outline:none}
+pre{width:280px;margin:0;background:#111827;color:#d1d5db;border-radius:10px;padding:12px;overflow:auto;font-size:11px}
+</style>
+</head>
+<body>
+<div class="im_detail inform-con"><div class="chat_area"><div class="chat_area-list"></div><div class="input-wrap"><div class="chat_area-input"><div class="tiptap ProseMirror chat-editor" contenteditable="true">集合时间是早上8点30分</div></div></div></div></div>
+<pre id="log"></pre>
+<script id="harness">"use strict";
+(() => {
+  // ../../src/shared/workbench.ts
+  var PANEL_TARGETS = ["en", "ja", "ko", "th", "vi", "id", "ms", "es", "fr", "de", "ru", "ar", "zh-TW", "pt", "it"];
+
+  // ../../runtime/page/outbound-panel.ts
+  var PANEL_HOST_ID = "tsim-outbound-panel";
+  var CHAT_AREA_SELECTOR = ".im_detail.inform-con > .chat_area";
+  var INPUT_SELECTOR = ".chat_area-input";
+  var EDITOR_SELECTOR = '.tiptap.ProseMirror.chat-editor[contenteditable="true"]';
+  var REATTACH_DEBOUNCE_MS = 100;
+  var TARGET_LABELS = { en: "English", ja: "\u65E5\u672C\u8A9E", ko: "\uD55C\uAD6D\uC5B4", th: "\u0E44\u0E17\u0E22", vi: "Ti\u1EBFng Vi\u1EC7t", id: "Bahasa Indonesia", ms: "Bahasa Melayu", es: "Espa\xF1ol", fr: "Fran\xE7ais", de: "Deutsch", ru: "\u0420\u0443\u0441\u0441\u043A\u0438\u0439", ar: "\u0627\u0644\u0639\u0631\u0628\u064A\u0629", "zh-TW": "\u7E41\u9AD4\u4E2D\u6587", pt: "Portugu\xEAs", it: "Italiano" };
+  var LANGUAGE_NAMES = { zh: "\u4E2D\u6587", en: "\u82F1\u8BED", ja: "\u65E5\u8BED", ko: "\u97E9\u8BED", th: "\u6CF0\u8BED", ar: "\u963F\u62C9\u4F2F\u8BED", ru: "\u4FC4\u8BED", el: "\u5E0C\u814A\u8BED", vi: "\u8D8A\u5357\u8BED", es: "\u897F\u73ED\u7259\u8BED", fr: "\u6CD5\u8BED", de: "\u5FB7\u8BED", pt: "\u8461\u8404\u7259\u8BED", it: "\u610F\u5927\u5229\u8BED", id: "\u5370\u5C3C\u8BED", ms: "\u9A6C\u6765\u8BED", "zh-TW": "\u7E41\u4F53\u4E2D\u6587" };
+  var STATUS = { unavailable: ["\u7F16\u8F91\u5668\u672A\u5C31\u7EEA", "warn"], idle: null, translating: ["\u7FFB\u8BD1\u4E2D", "busy"], ready: ["\u8BD1\u6587\u5C31\u7EEA", "ok"], stale: ["\u5F85\u66F4\u65B0", "busy"], failed: ["\u7FFB\u8BD1\u5931\u8D25", "bad"], needs_login: null };
+  var PANEL_HINT = "\u66FF\u6362\u540E\u4ECD\u9700\u60A8\u5728\u539F\u5BA2\u6237\u7AEF\u624B\u52A8\u53D1\u9001";
+  var ORDER_RE = /^[A-Za-z0-9_-]{1,100}$/;
+  var CONTAINED = ["keydown", "keyup", "keypress", "beforeinput", "input", "paste", "copy", "cut", "compositionstart", "compositionupdate", "compositionend", "click", "mousedown", "pointerdown"];
+  var ICONS = {
+    chevron: '<path d="m6 9 6 6 6-6"/>',
+    receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>',
+    search: '<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>',
+    more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
+    copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+    retry: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
+    pause: '<path d="M9 6v12M15 6v12"/>',
+    play: '<path d="m8 5 11 7-11 7z"/>',
+    power: '<path d="M12 3v9"/><path d="M6.3 7.3a8 8 0 1 0 11.4 0"/>',
+    lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+    alert: '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>'
+  };
+  var STYLE = `:host{all:initial;display:block;min-width:0;width:100%;box-sizing:border-box;
+--accent:#3a5bd9;--accent-soft:#eef1fd;--ink:#1d2433;--ink-2:#4b5568;--ink-3:#8a93a6;--line:#e3e7ee;--sunken:#f6f7fa;--hover:#eceff4;--ok:#16855a;--warn:#b26a00;--bad:#c2382f;
+font:13px/1.5 -apple-system,BlinkMacSystemFont,'PingFang SC','Segoe UI','Microsoft YaHei',sans-serif;color:var(--ink)}
+*{box-sizing:border-box;font:inherit;min-width:0}
+button{color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer;white-space:nowrap}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+button:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.panel{container-type:inline-size;background:var(--sunken);border-top:1px solid var(--line)}
+.bar{display:flex;align-items:center;gap:6px;height:36px;padding:0 10px 0 12px}
+.switch{width:28px;height:16px;border-radius:9px;background:#cfd5df;position:relative;flex:none;transition:background .15s}
+.switch::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform .15s}
+.switch[aria-checked="true"]{background:var(--accent)}.switch[aria-checked="true"]::after{transform:translateX(12px)}
+.title{font-weight:600;font-size:12.5px;white-space:nowrap;margin-right:2px}.off .title{color:var(--ink-3)}
+.chip{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border-radius:7px;color:var(--ink-2);overflow:hidden}
+.chip:hover:not(:disabled),.icon:hover:not(:disabled),.chip[aria-expanded="true"],.icon[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
+.lang b{color:var(--ink);font-weight:600}.lang .arrow{color:var(--ink-3)}.lang svg{width:12px;height:12px}
+.tag{font-size:10.5px;line-height:16px;padding:0 5px;border-radius:4px;background:var(--accent-soft);color:var(--accent);font-weight:600}.tag.manual{background:#f1f2f5;color:var(--ink-2)}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;max-width:260px}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.badge span{overflow:hidden;text-overflow:ellipsis}
+.badge[data-tone="ok"]{color:var(--ok)}.badge[data-tone="warn"]{color:var(--warn)}.badge[data-tone="bad"]{color:var(--bad)}.badge[data-tone="busy"]::before{animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.25}}
+.spacer{flex:1}
+.icon{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--ink-2);flex:none}
+.find{margin-right:-4px}
+.order .num{font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.body{padding:0 10px 10px}.off .body{display:none}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}.card.ready{border-color:#c9d3f5}
+.stalebar{display:flex;align-items:center;gap:6px;padding:6px 12px 0;font-size:11.5px;color:var(--warn)}
+.stalebar::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1s infinite}
+.preview{padding:9px 12px 4px;min-height:38px;max-height:min(120px,20vh);overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px;line-height:1.55}
+.preview.empty{color:var(--ink-3);font-size:13px}.preview.stale{color:var(--ink-3)}
+.skeleton{padding:12px 12px 6px;display:grid;gap:7px}
+.skeleton i{height:9px;border-radius:5px;background:linear-gradient(90deg,#eef0f4 25%,#f7f8fa 50%,#eef0f4 75%);background-size:200% 100%;animation:shimmer 1.1s linear infinite}
+.skeleton i+i{width:62%}
+@keyframes shimmer{to{background-position:-200% 0}}
+.foot{display:flex;align-items:center;gap:8px;padding:4px 6px 6px 12px;min-height:38px}
+.meta{flex:1;font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.buttons{display:flex;align-items:center;gap:2px;flex:none}
+.ghost{height:28px;padding:0 8px;border-radius:7px;display:inline-flex;align-items:center;gap:5px;color:var(--ink-2);font-size:12.5px}
+.ghost:hover:not(:disabled){background:#f0f2f6;color:var(--ink)}
+.primary{height:28px;padding:0 6px 0 11px;margin-left:4px;border-radius:7px;display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#fff;font-weight:600;font-size:12.5px;box-shadow:0 1px 2px rgba(58,91,217,.35)}
+.primary:hover:not(:disabled){filter:brightness(1.07)}
+kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:0 5px;border-radius:4px;background:rgba(255,255,255,.18)}
+.callout{display:flex;align-items:center;gap:10px;padding:10px 12px;font-size:12.5px;color:var(--ink-2)}
+.callout svg{width:16px;height:16px}.callout p{margin:0;flex:1;overflow-wrap:anywhere}
+.callout[data-tone="info"] svg{color:var(--accent)}.callout[data-tone="warn"] svg{color:var(--warn)}.callout[data-tone="bad"] svg{color:var(--bad)}
+.solid{height:28px;padding:0 12px;border-radius:7px;background:var(--accent);color:#fff;font-weight:600}
+.outline{height:28px;padding:0 12px;border-radius:7px;border:1px solid var(--line);background:#fff;color:var(--ink)}
+.pop{position:fixed;z-index:2147483002;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.16),0 2px 6px rgba(15,23,42,.06);padding:6px;animation:rise .12s ease-out}
+@keyframes rise{from{opacity:0;transform:translateY(4px)}}
+.pop.languages{width:340px}.pop.query{width:300px;padding:10px}.pop.menu{width:180px}
+.pop h5{margin:0 2px 8px;font-size:11px;font-weight:600;color:var(--ink-3)}
+.option{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:7px;text-align:left;white-space:normal}
+.option:hover:not(:disabled){background:#f1f3f7}
+.option[aria-selected="true"]{color:var(--accent);font-weight:600}.option[aria-selected="true"]::after{content:"\u2713";margin-left:auto}
+.option small{color:var(--ink-3);font-weight:400;font-size:11.5px}
+.option.follow{padding:9px 8px}.option.follow span{display:grid;gap:1px}
+.separator{height:1px;background:var(--line);margin:4px 2px}
+.search{display:flex;align-items:center;gap:6px;margin:2px 2px 6px;padding:0 8px;height:32px;border-radius:8px;background:var(--sunken);color:var(--ink-3)}
+.search input{flex:1;border:0;background:none;color:var(--ink);outline:none}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;max-height:220px;overflow:auto}
+.field{display:flex;gap:6px}
+.field input{flex:1;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:8px;outline:none;color:var(--ink);background:#fff}
+.field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.field button{height:32px;padding:0 12px;border-radius:8px;background:var(--ink);color:#fff;font-weight:600}
+.note{font-size:11px;color:var(--ink-3);margin:8px 2px 0}.note.error{color:var(--bad)}
+@container (max-width:560px){.title,.badge span,.ghost span{display:none}.order .num{max-width:72px}}
+@container (max-width:380px){.order .num,.meta,kbd{display:none}.foot{justify-content:flex-end}.lang{padding:0 6px}}
+@media (max-height:650px){.preview{max-height:64px}}
+[hidden]{display:none!important}`;
+  function createOutboundPanel(document2, bridge, initial, hooks = {}) {
+    const unavailableReason = hooks.orderUnavailableReason ?? (!hooks.openOrder ? "\u8BA2\u5355\u67E5\u8BE2\u4E0D\u53EF\u7528\uFF1A\u5C1A\u672A\u8FDE\u63A5 TSim \u5185\u5D4C\u9875\u9762" : void 0);
+    const view = document2.defaultView;
+    let state2 = initial, disposed = false, composing = false, editor, anchor, timer, notice = "", noticeTimer, open = null, orderValue;
+    const host = document2.createElement("div");
+    host.id = PANEL_HOST_ID;
+    host.setAttribute("data-tsim-owned", "1");
+    host.setAttribute("aria-label", "\u51FA\u7AD9\u7FFB\u8BD1");
+    const contain = (event) => event.stopPropagation();
+    CONTAINED.forEach((type) => host.addEventListener(type, contain));
+    const shadow = host.attachShadow({ mode: "open" });
+    const make = (tag, className = "", text = "") => {
+      const node = document2.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    };
+    const button = (className, text = "", title2 = "") => {
+      const node = make("button", className, text);
+      node.type = "button";
+      if (title2) node.title = title2;
+      return node;
+    };
+    const icon = (name) => {
+      const node = make("span");
+      node.style.display = "contents";
+      node.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+      return node;
+    };
+    const style = make("style");
+    style.textContent = STYLE;
+    const panel2 = make("div", "panel");
+    const bar = make("div", "bar"), toggle = button("switch"), title = make("span", "title", "\u51FA\u7AD9\u7FFB\u8BD1");
+    toggle.setAttribute("role", "switch");
+    const lang = button("chip lang"), langText = make("span"), langTag = make("span", "tag");
+    lang.setAttribute("aria-haspopup", "listbox");
+    lang.setAttribute("aria-label", "\u76EE\u6807\u8BED\u8A00");
+    lang.append(langText, langTag, icon("chevron"));
+    const badge = make("span", "badge"), badgeText = make("span");
+    badge.setAttribute("role", "status");
+    badge.append(badgeText);
+    const find = button("icon find", "", "\u67E5\u8BE2\u5176\u4ED6\u8BA2\u5355");
+    find.setAttribute("aria-label", "\u67E5\u8BE2\u5176\u4ED6\u8BA2\u5355");
+    find.setAttribute("aria-haspopup", "dialog");
+    find.append(icon("search"));
+    const order = button("chip order"), orderNumber = make("span", "num");
+    order.hidden = true;
+    const more = button("icon more", "", "\u66F4\u591A");
+    more.setAttribute("aria-label", "\u66F4\u591A");
+    more.setAttribute("aria-haspopup", "menu");
+    more.append(icon("more"));
+    bar.append(toggle, title, lang, badge, make("span", "spacer"), find, order, more);
+    const body = make("div", "body"), card = make("div", "card"), stalebar = make("div", "stalebar", "\u8349\u7A3F\u5DF2\u4FEE\u6539\uFF0C\u7B49\u5F85\u66F4\u65B0\u8BD1\u6587"), preview = make("div", "preview"), skeleton = make("div", "skeleton");
+    preview.setAttribute("aria-live", "polite");
+    skeleton.append(make("i"), make("i"));
+    const callout = make("div", "callout"), calloutIcon = make("span"), calloutText = make("p"), login = button("solid login", "\u767B\u5F55 TSim"), resume = button("outline", "\u6062\u590D\u7FFB\u8BD1"), retryFailed = button("outline", "\u91CD\u8BD5");
+    calloutIcon.style.display = "contents";
+    callout.append(calloutIcon, calloutText, login, resume, retryFailed);
+    const foot = make("div", "foot"), meta = make("span", "meta"), source = make("span"), hint = make("span", "hint", PANEL_HINT), buttons = make("div", "buttons");
+    meta.append(source, hint);
+    const retry = button("ghost", "", "\u91CD\u65B0\u7FFB\u8BD1"), copy = button("ghost", "", "\u590D\u5236\u8BD1\u6587"), replace = button("primary");
+    retry.append(icon("retry"), make("span", "", "\u91CD\u8BD5"));
+    copy.append(icon("copy"), make("span", "", "\u590D\u5236"));
+    retry.setAttribute("aria-label", "\u91CD\u8BD5");
+    copy.setAttribute("aria-label", "\u590D\u5236\u8BD1\u6587");
+    const mac = /Mac|iPhone|iPad|iPod/i.test(view.navigator.platform || view.navigator.userAgent);
+    const shortcut = mac ? "\u2318 + \u2325 + Enter" : "Ctrl + Alt + Enter";
+    replace.append(make("span", "", "\u66FF\u6362\u8349\u7A3F"), make("kbd", "", mac ? "\u2318\u2325\u21B5" : "Ctrl Alt \u21B5"));
+    replace.title = `\u66FF\u6362\u8349\u7A3F\uFF08\u4E0D\u53D1\u9001\uFF09 \xB7 ${shortcut}`;
+    replace.setAttribute("aria-keyshortcuts", mac ? "Meta+Alt+Enter" : "Control+Alt+Enter");
+    buttons.append(retry, copy, replace);
+    foot.append(meta, buttons);
+    card.append(stalebar, preview, skeleton, callout, foot);
+    body.append(card);
+    const languages = make("div", "pop languages"), follow = button("option follow"), followText = make("span"), followLabel = make("span", "", "\u8DDF\u968F\u5BA2\u6237\u8BED\u8A00"), followLang = make("small");
+    languages.setAttribute("role", "listbox");
+    languages.setAttribute("aria-label", "\u76EE\u6807\u8BED\u8A00");
+    follow.setAttribute("role", "option");
+    followText.append(followLabel, followLang);
+    follow.append(followText);
+    const search = make("div", "search"), searchInput = make("input"), grid = make("div", "grid");
+    searchInput.placeholder = "\u641C\u7D22\u8BED\u8A00";
+    searchInput.setAttribute("aria-label", "\u641C\u7D22\u8BED\u8A00");
+    search.append(icon("search"), searchInput);
+    const options = PANEL_TARGETS.map((target) => {
+      const option = button("option");
+      option.setAttribute("role", "option");
+      option.dataset.lang = target;
+      option.append(LANGUAGE_NAMES[target] ?? target, " ", make("small", "", TARGET_LABELS[target]));
+      grid.append(option);
+      return option;
+    });
+    languages.append(follow, make("div", "separator"), search, grid);
+    const query = make("div", "pop query"), queryForm = make("form", "field"), queryInput = make("input"), queryButton = button("", "\u67E5\u8BE2"), queryNote = make("div", "note");
+    queryButton.type = "submit";
+    query.setAttribute("role", "dialog");
+    query.setAttribute("aria-label", "\u67E5\u8BE2\u5176\u4ED6\u8BA2\u5355");
+    queryInput.type = "text";
+    queryInput.placeholder = "\u8F93\u5165\u8BA2\u5355 ID \u6216\u5176\u4ED6\u6807\u8BC6";
+    queryInput.setAttribute("aria-label", "\u660E\u786E\u8F93\u5165\u6216\u9009\u62E9\u8981\u67E5\u8BE2\u7684\u6807\u8BC6");
+    queryInput.maxLength = 100;
+    queryInput.autocomplete = "off";
+    queryForm.append(queryInput, queryButton);
+    query.append(make("h5", "", "\u67E5\u8BE2\u5176\u4ED6\u8BA2\u5355"), queryForm, queryNote);
+    const menu = make("div", "pop menu"), pause = button("option"), pauseIcon = make("span"), pauseText = make("span"), disable = button("option");
+    menu.setAttribute("role", "menu");
+    pauseIcon.style.display = "contents";
+    pause.append(pauseIcon, pauseText);
+    disable.append(icon("power"), "\u5173\u95ED\u51FA\u7AD9\u7FFB\u8BD1");
+    menu.append(pause, disable);
+    const popovers = { languages: [languages, lang], query: [query, find], menu: [menu, more] };
+    for (const [pop] of Object.values(popovers)) pop.hidden = true;
+    panel2.append(bar, body);
+    shadow.append(style, panel2, languages, query, menu);
+    const act = (action, args = []) => {
+      if (disposed) return;
+      void bridge.invoke(action, args).catch(() => {
+        if (!disposed) flash("\u64CD\u4F5C\u672A\u5B8C\u6210\uFF0C\u8BF7\u68C0\u67E5\u8FDE\u63A5\u6216\u91CD\u65B0\u767B\u5F55", "bad");
+      });
+    };
+    const ready = () => !state2.translationPaused && state2.enabled && state2.auth === "ready" && state2.status === "ready" && !!state2.preview && !state2.busy && !state2.draft?.composing && !composing;
+    let noticeTone = "ok";
+    const flash = (text, tone = "ok") => {
+      notice = text;
+      noticeTone = tone;
+      view.clearTimeout(noticeTimer);
+      noticeTimer = view.setTimeout(() => {
+        notice = "";
+        render(state2);
+      }, 1500);
+      render(state2);
+    };
+    async function copyPreview() {
+      const text = state2.preview;
+      if (!text || !ready()) return;
+      try {
+        await view.navigator.clipboard.writeText(text);
+        flash("\u5DF2\u590D\u5236");
+        return;
+      } catch {
+      }
+      const area = make("textarea");
+      area.value = text;
+      area.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+      shadow.append(area);
+      area.select();
+      let ok = false;
+      try {
+        ok = document2.execCommand("copy");
+      } catch {
+        ok = false;
+      }
+      area.remove();
+      flash(ok ? "\u5DF2\u590D\u5236" : "\u590D\u5236\u5931\u8D25", ok ? "ok" : "bad");
+    }
+    function place(pop, trigger) {
+      const rect = trigger.getBoundingClientRect(), bounds = host.getBoundingClientRect(), width = Math.min(pop.offsetWidth || 300, view.innerWidth - 16);
+      const alignRight = rect.left + rect.width / 2 > bounds.left + bounds.width / 2;
+      const left = alignRight ? Math.min(rect.right, view.innerWidth - 8) - width : Math.max(8, rect.left);
+      Object.assign(pop.style, { left: `${Math.max(8, left)}px`, bottom: `${Math.max(8, view.innerHeight - rect.top + 6)}px`, maxWidth: `${view.innerWidth - 16}px` });
+    }
+    function setOpen(next) {
+      if (disposed) return;
+      open = next;
+      for (const [key, [pop, trigger]] of Object.entries(popovers)) {
+        const on = key === next;
+        pop.hidden = !on;
+        trigger.setAttribute("aria-expanded", String(on));
+        if (on) place(pop, trigger);
+      }
+      if (next === "languages") {
+        searchInput.value = "";
+        filterLanguages();
+        searchInput.focus();
+      }
+      if (next === "query") {
+        queryNote.classList.remove("error");
+        queryNote.textContent = unavailableReason ?? (orderValue ? "\u5728 TSim \u8BA2\u5355\u7A97\u53E3\u4E2D\u6253\u5F00\uFF0CEsc \u5173\u95ED" : "\u672A\u8BC6\u522B\u5230\u552F\u4E00\u8BA2\u5355 ID\uFF0C\u53EF\u624B\u52A8\u8F93\u5165\u67E5\u8BE2");
+        queryInput.focus();
+      }
+    }
+    const toggleOpen = (key) => setOpen(open === key ? null : key);
+    function filterLanguages() {
+      const term = searchInput.value.trim().toLowerCase();
+      for (const option of options) {
+        const target = option.dataset.lang;
+        option.hidden = !!term && ![target, TARGET_LABELS[target].toLowerCase(), LANGUAGE_NAMES[target] ?? ""].some((text) => text.includes(term));
+      }
+    }
+    function submitQuery() {
+      const value = queryInput.value.trim();
+      if (!disposed && !unavailableReason && ORDER_RE.test(value)) {
+        setOpen(null);
+        hooks.openOrder?.(value);
+        return;
+      }
+      queryNote.textContent = "\u8BF7\u8F93\u5165\u6216\u9009\u4E2D\u660E\u786E\u7684\u8BA2\u5355\u6807\u8BC6\uFF08\u5B57\u6BCD\u3001\u6570\u5B57\u3001-\u3001_\uFF09";
+      queryNote.classList.add("error");
+    }
+    toggle.addEventListener("click", () => {
+      setOpen(null);
+      act("setEnabled", [!state2.enabled]);
+    });
+    lang.addEventListener("click", () => toggleOpen("languages"));
+    more.addEventListener("click", () => toggleOpen("menu"));
+    find.addEventListener("mousedown", () => {
+      const selection = document2.getSelection()?.toString().trim();
+      if (selection && ORDER_RE.test(selection)) queryInput.value = selection;
+    });
+    find.addEventListener("click", () => toggleOpen("query"));
+    follow.addEventListener("click", () => {
+      setOpen(null);
+      act("followCustomer");
+    });
+    for (const option of options) option.addEventListener("click", () => {
+      setOpen(null);
+      act("setTarget", [{ lang: option.dataset.lang, source: "manual" }]);
+    });
+    searchInput.addEventListener("input", filterLanguages);
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        options.find((option) => !option.hidden)?.click();
+      }
+    });
+    queryForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitQuery();
+    });
+    order.addEventListener("click", () => {
+      if (orderValue && !disposed && !unavailableReason) {
+        setOpen(null);
+        hooks.openOrder?.(orderValue, "order_number");
+      }
+    });
+    login.addEventListener("click", () => act("openLogin"));
+    pause.addEventListener("click", () => {
+      setOpen(null);
+      act(state2.translationPaused ? "resume" : "cancel");
+    });
+    disable.addEventListener("click", () => {
+      setOpen(null);
+      act("setEnabled", [false]);
+    });
+    resume.addEventListener("click", () => act("resume"));
+    retry.addEventListener("click", () => {
+      if (!state2.translationPaused) act("retry");
+    });
+    retryFailed.addEventListener("click", () => {
+      if (!state2.translationPaused) act("retry");
+    });
+    copy.addEventListener("click", () => {
+      void copyPreview();
+    });
+    replace.addEventListener("click", () => {
+      if (ready()) act("apply", [{ mode: "replace" }]);
+    });
+    shadow.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && open) {
+        const [, trigger] = popovers[open];
+        setOpen(null);
+        trigger.focus();
+      }
+    });
+    shadow.addEventListener("pointerdown", (event) => {
+      if (!open) return;
+      const path = event.composedPath();
+      const [pop, trigger] = popovers[open];
+      if (!path.includes(pop) && !path.includes(trigger)) setOpen(null);
+    });
+    const onOutside = (event) => {
+      if (open && !event.composedPath().includes(host)) setOpen(null);
+    };
+    const onResize = () => {
+      if (open) setOpen(null);
+    };
+    document2.addEventListener("pointerdown", onOutside, true);
+    view.addEventListener("resize", onResize);
+    const onCompositionStart = () => {
+      composing = true;
+      render(state2);
+    };
+    const onCompositionEnd = () => {
+      composing = false;
+      render(state2);
+    };
+    function bindEditor(next) {
+      if (next === editor) return;
+      editor?.removeEventListener("compositionstart", onCompositionStart);
+      editor?.removeEventListener("compositionend", onCompositionEnd);
+      editor = next;
+      composing = false;
+      editor?.addEventListener("compositionstart", onCompositionStart);
+      editor?.addEventListener("compositionend", onCompositionEnd);
+    }
+    function setOrder(next) {
+      if (next === orderValue) return;
+      orderValue = next;
+      order.hidden = !next;
+      order.replaceChildren(...next ? [icon("receipt"), orderNumber] : []);
+      orderNumber.textContent = next ?? "";
+      order.title = unavailableReason ?? (next ? `\u5728 TSim \u4E2D\u67E5\u770B\u8BA2\u5355 ${next}` : "");
+      order.setAttribute("aria-label", next ? `\u67E5\u770B\u8BA2\u5355 ${next}` : "");
+      order.disabled = !!unavailableReason;
+    }
+    function attach() {
+      if (disposed || document2.visibilityState === "hidden") return false;
+      const area = document2.querySelector(CHAT_AREA_SELECTOR), input = area?.querySelector(INPUT_SELECTOR);
+      if (!host.isConnected && anchor?.isConnected) return false;
+      if (!area || !input?.parentNode) {
+        if (host.isConnected) host.remove();
+        bindEditor(void 0);
+        return false;
+      }
+      if (host.parentNode !== input.parentNode || host.nextSibling !== input) input.parentNode.insertBefore(host, input);
+      anchor = input;
+      const editors = input.querySelectorAll(EDITOR_SELECTOR);
+      bindEditor(editors.length === 1 ? editors[0] : void 0);
+      return true;
+    }
+    const showCallout = (tone, name, text, action) => {
+      callout.hidden = false;
+      callout.dataset.tone = tone;
+      calloutIcon.replaceChildren(icon(name));
+      calloutText.textContent = text;
+      for (const item of [login, resume, retryFailed]) item.hidden = item !== action;
+    };
+    function render(next) {
+      state2 = next;
+      if (disposed) return;
+      const on = state2.enabled, paused = !!state2.translationPaused;
+      if (!on && open && open !== "query") setOpen(null);
+      panel2.classList.toggle("off", !on);
+      toggle.setAttribute("aria-checked", String(on));
+      toggle.title = on ? "\u5173\u95ED\u51FA\u7AD9\u7FFB\u8BD1" : "\u5F00\u542F\u51FA\u7AD9\u7FFB\u8BD1";
+      toggle.setAttribute("aria-label", toggle.title);
+      lang.hidden = !on;
+      more.hidden = !on;
+      const following = state2.followCustomer.following, customer = state2.followCustomer.lang, customerName = LANGUAGE_NAMES[customer ?? ""] ?? (customer === "unknown" || !customer ? "\u5F85\u8BC6\u522B" : customer);
+      const supported = !!customer && PANEL_TARGETS.includes(customer), targetName = LANGUAGE_NAMES[state2.target] ?? state2.target;
+      langText.replaceChildren();
+      if (following && customer === "zh") langText.append(make("b", "", "\u4E2D\u6587\u5BA2\u6237"));
+      else {
+        const shown = following ? supported ? customerName : "\u5F85\u5B9A" : targetName;
+        langText.append("\u4E2D\u6587 ", make("span", "arrow", "\u2192"), " ", make("b", "", shown));
+      }
+      langTag.textContent = following ? "\u81EA\u52A8" : "\u624B\u52A8";
+      langTag.classList.toggle("manual", !following);
+      lang.title = following ? `\u81EA\u52A8\u8DDF\u968F\u5BA2\u6237\u8BED\u8A00\uFF1A${customerName}` : `\u624B\u52A8\u76EE\u6807\uFF1A${targetName}\uFF1B\u5BA2\u6237\u8BED\u8A00\uFF1A${customerName}`;
+      follow.setAttribute("aria-selected", String(following));
+      followLang.textContent = `\u5F53\u524D\u8BC6\u522B\uFF1A${customerName}${customer === "zh" ? "\uFF08\u65E0\u9700\u7FFB\u8BD1\uFF09" : ""}`;
+      for (const option of options) option.setAttribute("aria-selected", String(!following && option.dataset.lang === state2.target));
+      pauseIcon.replaceChildren(icon(paused ? "play" : "pause"));
+      pauseText.textContent = paused ? "\u6062\u590D\u7FFB\u8BD1" : "\u6682\u505C\u7FFB\u8BD1";
+      pause.disabled = !on || state2.auth === "connecting";
+      const status = notice ? [notice, noticeTone] : !on ? null : state2.auth === "connecting" ? ["\u6B63\u5728\u8FDE\u63A5\u2026", "busy"] : state2.auth === "needs_login" ? ["\u9700\u767B\u5F55", "warn"] : state2.auth === "failed" ? ["\u8FDE\u63A5\u5931\u8D25", "bad"] : paused ? ["\u7FFB\u8BD1\u5DF2\u6682\u505C", "warn"] : STATUS[state2.status];
+      badge.hidden = !status;
+      badgeText.textContent = status?.[0] ?? "";
+      badge.dataset.tone = status?.[1] ?? "muted";
+      badge.title = badgeText.textContent;
+      const text = state2.preview ?? "", stale = !!text && (state2.status === "stale" || state2.status === "translating");
+      callout.hidden = true;
+      preview.hidden = skeleton.hidden = foot.hidden = stalebar.hidden = true;
+      const automaticHint = following && !text ? customer === "zh" ? "\u5BA2\u6237\u4F7F\u7528\u4E2D\u6587\uFF0C\u65E0\u9700\u7FFB\u8BD1\uFF1B\u5982\u9700\u7FFB\u8BD1\uFF0C\u8BF7\u5728\u5DE6\u4E0A\u89D2\u624B\u52A8\u9009\u62E9\u8BED\u8A00" : !customer || customer === "unknown" ? "\u5BA2\u6237\u8BED\u8A00\u5F85\u8BC6\u522B\uFF0C\u8BF7\u7B49\u5F85\u5BA2\u6237\u53D1\u9001\u6D88\u606F\uFF0C\u6216\u624B\u52A8\u9009\u62E9\u76EE\u6807\u8BED\u8A00" : !supported ? `\u5BA2\u6237\u8BED\u8A00\uFF08${customerName}\uFF09\u6682\u4E0D\u652F\u6301\u81EA\u52A8\u7FFB\u8BD1\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u76EE\u6807\u8BED\u8A00` : "" : "";
+      if (state2.auth === "connecting") {
+        skeleton.hidden = foot.hidden = false;
+        source.textContent = "\u6B63\u5728\u8FDE\u63A5 TSim \u767B\u5F55\u670D\u52A1\uFF0C\u8BF7\u7A0D\u5019";
+      } else if (state2.auth === "needs_login") showCallout("info", "lock", "\u8BF7\u5148\u767B\u5F55 TSim\uFF0C\u767B\u5F55\u6210\u529F\u540E\u5C06\u81EA\u52A8\u7FFB\u8BD1\u5F53\u524D\u8349\u7A3F", login);
+      else if (state2.auth === "failed") showCallout("bad", "alert", state2.error || "\u767B\u5F55\u670D\u52A1\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+      else if (paused) showCallout("warn", "pause", "\u7FFB\u8BD1\u5DF2\u6682\u505C\uFF0C\u8349\u7A3F\u4E0D\u4F1A\u53D1\u9001\u5230\u7FFB\u8BD1\u670D\u52A1", resume);
+      else if (automaticHint) showCallout(customer === "zh" ? "info" : "warn", "info", automaticHint);
+      else if (state2.status === "failed") showCallout("bad", "alert", `\u7FFB\u8BD1\u5931\u8D25\uFF1A${state2.error ?? "\u672A\u77E5\u9519\u8BEF"}`, retryFailed);
+      else if (state2.status === "unavailable") showCallout("warn", "alert", "\u672A\u627E\u5230\u53EF\u7528\u7684\u56DE\u590D\u7F16\u8F91\u5668\uFF0C\u8BF7\u70B9\u51FB\u56DE\u590D\u6846\u540E\u91CD\u8BD5");
+      else if (state2.status === "translating" && !text) {
+        skeleton.hidden = foot.hidden = false;
+        source.textContent = `\u6B63\u5728\u7FFB\u8BD1\u4E3A${following ? customerName : targetName}\u2026`;
+      } else {
+        preview.hidden = foot.hidden = false;
+        stalebar.hidden = !stale;
+        preview.textContent = text || "\u8F93\u5165\u4E2D\u6587\u540E\u81EA\u52A8\u751F\u6210\u8BD1\u6587\u9884\u89C8";
+        preview.classList.toggle("empty", !text);
+        preview.classList.toggle("stale", stale);
+        source.textContent = text ? following ? `\u6839\u636E\u5BA2\u6237\u6700\u8FD1\u6D88\u606F\u8BC6\u522B\u4E3A${customerName} \xB7 ` : `\u624B\u52A8\u6307\u5B9A${targetName} \xB7 ` : "";
+      }
+      hint.hidden = !text || stale;
+      const usable = ready();
+      card.classList.toggle("ready", usable);
+      copy.disabled = !usable;
+      replace.disabled = !usable;
+      retry.disabled = retryFailed.disabled = following && !supported || paused || !on || state2.busy || state2.auth !== "ready" || !state2.draft?.text.trim() || state2.status === "translating";
+      find.disabled = !!unavailableReason;
+      find.title = unavailableReason ?? "\u67E5\u8BE2\u5176\u4ED6\u8BA2\u5355";
+      queryInput.disabled = queryButton.disabled = !!unavailableReason;
+    }
+    const schedule = () => {
+      if (disposed || document2.visibilityState === "hidden") return;
+      view.clearTimeout(timer);
+      timer = view.setTimeout(attach, REATTACH_DEBOUNCE_MS);
+    };
+    const observer = new view.MutationObserver((mutations) => {
+      if (mutations.every((mutation) => {
+        const target = mutation.target.nodeType === 1 ? mutation.target : mutation.target.parentElement;
+        const changed = [...mutation.addedNodes, ...mutation.removedNodes];
+        return !!target?.closest('[data-tsim-owned="1"]') || changed.length > 0 && changed.every((node) => node === host);
+      })) return;
+      schedule();
+    });
+    const onVisibility = () => {
+      view.clearTimeout(timer);
+      if (document2.visibilityState === "hidden") setOpen(null);
+      else attach();
+    };
+    document2.addEventListener("visibilitychange", onVisibility);
+    render(state2);
+    attach();
+    if (document2.body) observer.observe(document2.body, { childList: true, subtree: true });
+    return { render, setOrder, attach, host, get anchor() {
+      return anchor;
+    }, get editor() {
+      return editor;
+    }, dispose() {
+      if (disposed) return;
+      setOpen(null);
+      disposed = true;
+      view.clearTimeout(timer);
+      view.clearTimeout(noticeTimer);
+      observer.disconnect();
+      document2.removeEventListener("visibilitychange", onVisibility);
+      document2.removeEventListener("pointerdown", onOutside, true);
+      view.removeEventListener("resize", onResize);
+      bindEditor(void 0);
+      CONTAINED.forEach((type) => host.removeEventListener(type, contain));
+      host.remove();
+    } };
+  }
+
+  // live-harness.ts
+  var state = { auth: "ready", conversationKey: "c1", draft: { text: "\u96C6\u5408\u65F6\u95F4\u662F\u65E9\u4E0A8\u70B930\u5206", composing: false }, enabled: true, target: "en", followCustomer: { lang: "ja", following: true, manualEnabled: false }, status: "ready", preview: "\u96C6\u5408\u6642\u9593\u306F\u671D8\u664230\u5206\u3067\u3059\u3002\u30DB\u30C6\u30EB\u306E\u30ED\u30D3\u30FC\u307E\u3067\u304A\u8FCE\u3048\u306B\u3042\u304C\u308A\u307E\u3059\u3002", error: null, busy: false };
+  var log = document.getElementById("log");
+  var set = (patch) => {
+    state = { ...state, ...patch };
+    panel.render(state);
+  };
+  var panel = createOutboundPanel(document, { async invoke(action, args) {
+    log.textContent = `${action} ${JSON.stringify(args ?? [])}
+` + log.textContent;
+    if (action === "setEnabled") set({ enabled: !!args[0] });
+    if (action === "setTarget") set({ target: args[0].lang, followCustomer: { ...state.followCustomer, following: false } });
+    if (action === "followCustomer") set({ followCustomer: { ...state.followCustomer, following: true } });
+    if (action === "cancel") set({ translationPaused: true });
+    if (action === "resume") set({ translationPaused: false });
+  } }, state, { openOrder: (id, type) => {
+    log.textContent = `openOrder ${id} ${type ?? ""}
+` + log.textContent;
+  } });
+  panel.setOrder("1128834920517");
+  window.setPanel = set;
+})();
+</script>
+</body>
+</html>

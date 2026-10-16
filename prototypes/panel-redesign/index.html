@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>出站翻译面板 · 重设计原型</title>
+<style>
+/* ---------- 模拟的厂商客户端（非设计对象，刻意保持朴素） ---------- */
+:root{--host-bg:#eef1f5;--host-line:#e1e5eb;--host-text:#1f2937;--host-muted:#8a94a3}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:#d9dee6;font:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI","Microsoft YaHei",sans-serif;color:var(--host-text);display:flex;align-items:center;justify-content:center;padding:16px}
+.client{width:min(1240px,100%);height:min(820px,calc(100vh - 32px));background:#fff;border-radius:10px;box-shadow:0 20px 60px rgba(15,23,42,.18);display:grid;grid-template-columns:220px 1fr 260px;overflow:hidden}
+.client.no-side{grid-template-columns:220px 1fr}
+.client.no-side .info{display:none}
+.list{border-right:1px solid var(--host-line);background:#f8f9fb;overflow:auto}
+.list h3{margin:0;padding:14px 14px 8px;font-size:13px;color:var(--host-muted);font-weight:500}
+.conv{display:flex;gap:10px;padding:10px 14px;cursor:pointer;border-left:3px solid transparent}
+.conv.on{background:#fff;border-left-color:#2a6df4}
+.conv .av{width:34px;height:34px;border-radius:50%;flex:none;display:grid;place-items:center;color:#fff;font-weight:600;font-size:12px}
+.conv b{display:block;font-weight:600;font-size:13px}
+.conv span{display:block;color:var(--host-muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.chat{display:flex;flex-direction:column;min-width:0;background:var(--host-bg)}
+.chat-head{height:52px;flex:none;display:flex;align-items:center;padding:0 18px;background:#fff;border-bottom:1px solid var(--host-line);font-weight:600;gap:8px}
+.chat-head small{color:var(--host-muted);font-weight:400}
+.msgs{flex:1;overflow:auto;padding:18px 22px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:70%;display:flex;flex-direction:column;gap:3px}
+.msg .who{font-size:11px;color:var(--host-muted)}
+.msg .bubble{background:#fff;padding:8px 12px;border-radius:4px 12px 12px 12px;box-shadow:0 1px 1px rgba(0,0,0,.04)}
+.msg .tr{font-size:12px;color:var(--host-muted);border-top:1px dashed var(--host-line);margin-top:6px;padding-top:4px}
+.msg.me{align-self:flex-end;align-items:flex-end}
+.msg.me .bubble{background:#d8e7ff;border-radius:12px 4px 12px 12px}
+.composer{flex:none;background:#fff;border-top:1px solid var(--host-line);display:flex;flex-direction:column}
+.composer .tools{display:flex;gap:14px;padding:8px 16px 0;color:var(--host-muted);font-size:16px}
+.editor{min-height:84px;max-height:140px;overflow:auto;padding:8px 16px;outline:none;white-space:pre-wrap}
+.editor:empty::before{content:attr(data-placeholder);color:#b5bcc7}
+.composer .send{display:flex;justify-content:flex-end;align-items:center;gap:10px;padding:0 16px 12px;color:var(--host-muted);font-size:12px}
+.composer .send button{background:#2a6df4;color:#fff;border:0;border-radius:4px;padding:6px 18px;font:inherit;cursor:pointer}
+.info{border-left:1px solid var(--host-line);padding:14px 16px;overflow:auto}
+.info h4{margin:0 0 10px;font-size:13px}
+.info dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px}
+.info dt{color:var(--host-muted)}
+.info dd{margin:0;word-break:break-all}
+.toast{position:fixed;left:50%;top:24px;transform:translateX(-50%) translateY(-20px);background:#111827;color:#fff;padding:8px 14px;border-radius:8px;font-size:12px;opacity:0;transition:.2s;pointer-events:none;z-index:99}
+.toast.on{opacity:1;transform:translateX(-50%)}
+
+/* ---------- 重设计的面板 ---------- */
+.tp{
+  --tp-accent:#3a5bd9;--tp-accent-ink:#fff;--tp-accent-soft:#eef1fd;
+  --tp-ink:#1d2433;--tp-ink-2:#4b5568;--tp-ink-3:#8a93a6;
+  --tp-line:#e3e7ee;--tp-surface:#fff;--tp-sunken:#f6f7fa;
+  --tp-ok:#16855a;--tp-warn:#b26a00;--tp-bad:#c2382f;
+  container-type:inline-size;font:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI","Microsoft YaHei",sans-serif;color:var(--tp-ink);
+  background:var(--tp-sunken);border-top:1px solid var(--tp-line);position:relative
+}
+.tp *{box-sizing:border-box}
+.tp button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+.tp button:focus-visible,.tp input:focus-visible{outline:2px solid var(--tp-accent);outline-offset:2px;border-radius:6px}
+.tp svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* 顶栏 */
+.tp-bar{display:flex;align-items:center;gap:6px;height:36px;padding:0 10px 0 12px}
+.tp-switch{width:28px;height:16px;border-radius:9px;background:#cfd5df;position:relative;transition:background .15s;flex:none}
+.tp-switch::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform .15s}
+.tp-switch[aria-checked=true]{background:var(--tp-accent)}
+.tp-switch[aria-checked=true]::after{transform:translateX(12px)}
+.tp-name{font-weight:600;font-size:12.5px;white-space:nowrap;margin-right:2px}
+.tp[data-off] .tp-name{color:var(--tp-ink-3)}
+.tp-chip{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border-radius:7px;color:var(--tp-ink-2);white-space:nowrap;min-width:0}
+.tp-chip:hover{background:#eceff4}
+.tp-chip[aria-expanded=true]{background:#e6e9f0;color:var(--tp-ink)}
+.tp-lang b{color:var(--tp-ink);font-weight:600}
+.tp-lang .arrow{color:var(--tp-ink-3)}
+.tp-tag{font-size:10.5px;line-height:16px;padding:0 5px;border-radius:4px;background:var(--tp-accent-soft);color:var(--tp-accent);font-weight:600}
+.tp-tag.manual{background:#f1f2f5;color:var(--tp-ink-2)}
+.tp-status{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--tp-ink-3);white-space:nowrap;min-width:0;overflow:hidden}
+.tp-status i{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.tp-status[data-tone=ok]{color:var(--tp-ok)}
+.tp-status[data-tone=warn]{color:var(--tp-warn)}
+.tp-status[data-tone=bad]{color:var(--tp-bad)}
+.tp-status[data-tone=busy] i{animation:tp-pulse 1s infinite}
+@keyframes tp-pulse{50%{opacity:.25}}
+.tp-spacer{flex:1}
+.tp-order{color:var(--tp-ink-2)}
+.tp-find{margin-right:-4px}
+.tp-find[aria-expanded=true]{background:#e6e9f0;color:var(--tp-ink)}
+.tp-order .num{font-variant-numeric:tabular-nums;max-width:120px;overflow:hidden;text-overflow:ellipsis}
+.tp-icon{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--tp-ink-2)}
+.tp-icon:hover{background:#eceff4;color:var(--tp-ink)}
+
+/* 内容区 */
+.tp-body{padding:0 10px 10px}
+.tp[data-off] .tp-body{display:none}
+.tp-card{background:var(--tp-surface);border:1px solid var(--tp-line);border-radius:10px;overflow:hidden;transition:border-color .15s}
+.tp-card[data-tone=ready]{border-color:#c9d3f5}
+.tp-text{padding:9px 12px 4px;min-height:38px;max-height:min(120px,20vh);overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px;line-height:1.55}
+.tp-text.placeholder{color:var(--tp-ink-3);font-size:13px}
+.tp-text.stale{color:var(--tp-ink-3)}
+.tp-foot{display:flex;align-items:center;gap:8px;padding:4px 6px 6px 12px;min-height:38px}
+.tp-meta{flex:1;min-width:0;font-size:11.5px;color:var(--tp-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tp-actions{display:flex;align-items:center;gap:2px;flex:none}
+.tp-ghost{height:28px;padding:0 8px;border-radius:7px;display:inline-flex;align-items:center;gap:5px;color:var(--tp-ink-2);font-size:12.5px}
+.tp-ghost:hover:not(:disabled){background:#f0f2f6;color:var(--tp-ink)}
+.tp-primary{height:28px;padding:0 6px 0 11px;margin-left:4px;border-radius:7px;display:inline-flex;align-items:center;gap:8px;background:var(--tp-accent)!important;color:var(--tp-accent-ink)!important;font-weight:600;font-size:12.5px;box-shadow:0 1px 2px rgba(58,91,217,.35)}
+.tp-primary:hover:not(:disabled){filter:brightness(1.07)}
+.tp-primary kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,monospace;padding:0 5px;border-radius:4px;background:rgba(255,255,255,.18)}
+.tp button:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+
+/* 状态：骨架、提示条 */
+.tp-skel{padding:12px 12px 6px;display:grid;gap:7px}
+.tp-skel span{height:9px;border-radius:5px;background:linear-gradient(90deg,#eef0f4 25%,#f7f8fa 50%,#eef0f4 75%);background-size:200% 100%;animation:tp-shimmer 1.1s linear infinite}
+.tp-skel span:nth-child(2){width:62%}
+@keyframes tp-shimmer{to{background-position:-200% 0}}
+.tp-callout{display:flex;align-items:center;gap:10px;padding:10px 12px;font-size:12.5px;color:var(--tp-ink-2)}
+.tp-callout svg{width:16px;height:16px}
+.tp-callout p{margin:0;flex:1;min-width:0}
+.tp-callout[data-tone=bad]{color:var(--tp-bad)}
+.tp-callout[data-tone=bad] p{color:var(--tp-ink-2)}
+.tp-callout[data-tone=warn] svg{color:var(--tp-warn)}
+.tp-callout[data-tone=info] svg{color:var(--tp-accent)}
+.tp-callout .tp-solid{height:28px;padding:0 12px;border-radius:7px;background:var(--tp-accent);color:#fff;font-weight:600;white-space:nowrap}
+.tp-callout .tp-line-btn{height:28px;padding:0 12px;border-radius:7px;border:1px solid var(--tp-line)!important;background:#fff!important;white-space:nowrap;color:var(--tp-ink)}
+.tp-stalebar{display:flex;align-items:center;gap:6px;padding:6px 12px 0;font-size:11.5px;color:var(--tp-warn)}
+.tp-stalebar i{width:6px;height:6px;border-radius:50%;background:currentColor;animation:tp-pulse 1s infinite}
+
+/* 弹层 */
+.tp-pop{position:absolute;bottom:calc(100% + 6px);z-index:20;background:#fff;border:1px solid var(--tp-line);border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.16),0 2px 6px rgba(15,23,42,.06);padding:6px;animation:tp-in .12s ease-out}
+@keyframes tp-in{from{opacity:0;transform:translateY(4px)}}
+.tp-pop[hidden]{display:none}
+.tp-pop.lang{left:8px;width:min(340px,calc(100% - 16px))}
+.tp-pop.order{right:8px;width:min(300px,calc(100% - 16px));padding:10px}
+.tp-pop h5{margin:6px 8px 4px;font-size:11px;font-weight:600;color:var(--tp-ink-3);letter-spacing:.02em}
+.tp-opt{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:7px;text-align:left}
+.tp-opt:hover,.tp-opt.focus{background:#f1f3f7}
+.tp-opt[aria-selected=true]{color:var(--tp-accent);font-weight:600}
+.tp-opt[aria-selected=true]::after{content:"✓";margin-left:auto}
+.tp-opt small{color:var(--tp-ink-3);font-weight:400}
+.tp-opt.follow{padding:9px 8px;align-items:flex-start}
+.tp-opt.follow .t{display:flex;flex-direction:column;gap:1px}
+.tp-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;max-height:220px;overflow:auto}
+.tp-search{display:flex;align-items:center;gap:6px;margin:2px 2px 6px;padding:0 8px;height:32px;border-radius:8px;background:var(--tp-sunken);color:var(--tp-ink-3)}
+.tp-search input{flex:1;border:0;background:none;font:inherit;color:var(--tp-ink);outline:none;min-width:0}
+.tp-sep{height:1px;background:var(--tp-line);margin:4px 2px}
+.tp-detected{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border-radius:9px;border:1px solid #c9d3f5!important;background:var(--tp-accent-soft)!important;text-align:left;margin-bottom:10px}
+.tp-detected .t{flex:1;min-width:0}
+.tp-detected b{display:block;font-variant-numeric:tabular-nums;color:var(--tp-ink)}
+.tp-detected small{color:var(--tp-ink-3);font-size:11px}
+.tp-detected .go{color:var(--tp-accent);font-weight:600;font-size:12px;white-space:nowrap}
+.tp-field{display:flex;gap:6px}
+.tp-field input{flex:1;min-width:0;height:32px;padding:0 10px;border:1px solid var(--tp-line);border-radius:8px;font:inherit;outline:none}
+.tp-field input:focus{border-color:var(--tp-accent);box-shadow:0 0 0 3px var(--tp-accent-soft)}
+.tp-field button{height:32px;padding:0 12px;border-radius:8px;background:var(--tp-ink)!important;color:#fff!important;font-weight:600}
+.tp-note{font-size:11px;color:var(--tp-ink-3);margin:8px 2px 0}
+.tp-note.err{color:var(--tp-bad)}
+.tp-menu{right:8px;width:180px}
+
+/* 窄宽度 */
+@container (max-width:560px){
+  .tp-status .label{display:none}
+  .tp-name{display:none}
+  .tp-ghost .label{display:none}
+  .tp-order .num{max-width:72px}
+}
+@container (max-width:380px){
+  .tp-order .num{display:none}
+  .tp-meta{display:none}
+  .tp-foot{justify-content:flex-end}
+  .tp-primary kbd{display:none}
+}
+@media (max-height:640px){.tp-text{max-height:64px}}
+
+/* 订单浮窗（模拟 TSim iframe） */
+.op-clip{position:fixed;inset:5vh 5vw;background:#fff;border-radius:12px;box-shadow:0 24px 80px rgba(15,23,42,.35);z-index:50;display:flex;flex-direction:column;overflow:hidden;animation:tp-in .15s}
+.op-head{height:44px;display:flex;align-items:center;gap:10px;padding:0 10px 0 16px;border-bottom:1px solid #e5e7eb;font-weight:600}
+.op-head small{color:#8a93a6;font-weight:400}
+.op-head .x{margin-left:auto;width:30px;height:30px;border-radius:8px;border:0;background:none;cursor:pointer;font-size:18px;color:#6b7280}
+.op-head .x:hover{background:#f1f3f7}
+.op-body{flex:1;display:grid;place-items:center;color:#8a93a6;background:repeating-linear-gradient(45deg,#fafbfc 0 12px,#f4f6f9 12px 24px)}
+.op-veil{position:fixed;inset:0;background:rgba(15,23,42,.18);z-index:49}
+
+/* ---------- 旧版面板（对比用，按现有样式复刻） ---------- */
+.legacy{font:13px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;color:#24334b;border-top:1px solid #dce4ee;background:#f7f9fc;padding:6px 10px}
+.legacy *{box-sizing:border-box;font:inherit}
+.legacy .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.legacy .header{justify-content:space-between}
+.legacy .title{font-weight:650;color:#304569}
+.legacy button,.legacy select,.legacy input{border:1px solid #ccd6e3;border-radius:5px;background:#fff;color:#334761}
+.legacy .toggle{padding:0 9px;min-height:24px;border-radius:12px;background:#315b98;color:#fff;border-color:#315b98}
+.legacy select{height:24px;width:128px;font-size:12px}
+.legacy .preview{margin-top:7px;border:1px solid #dce4ee;border-radius:6px;background:#fff;padding:7px 9px;min-height:32px}
+.legacy .actions{margin-top:7px;justify-content:space-between}
+.legacy button.act{min-height:28px;padding:2px 9px}
+.legacy button.primary{background:#315b98;border-color:#315b98;color:#fff}
+.legacy .hint{color:#77859a;font-size:11px}
+.legacy details{margin-top:6px;border-top:1px solid #e4eaf2;padding-top:5px}
+.legacy summary{color:#62748d;font-size:12px}
+
+/* ---------- 原型控制台 ---------- */
+.lab{position:fixed;right:16px;bottom:16px;width:260px;background:#111827;color:#e5e7eb;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);font-size:12px;z-index:100;overflow:hidden}
+.lab header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;cursor:pointer;font-weight:600}
+.lab header span{color:#9ca3af;font-weight:400}
+.lab .in{padding:0 12px 12px;display:grid;gap:10px}
+.lab.min .in{display:none}
+.lab label{display:grid;gap:4px;color:#9ca3af}
+.lab select{background:#1f2937;color:#f3f4f6;border:1px solid #374151;border-radius:6px;height:28px;padding:0 6px;font:inherit}
+.lab .seg{display:flex;background:#1f2937;border-radius:7px;padding:2px;gap:2px}
+.lab .seg button{flex:1;border:0;background:none;color:#9ca3af;font:inherit;height:24px;border-radius:5px;cursor:pointer}
+.lab .seg button.on{background:#374151;color:#fff}
+.lab .row{display:flex;gap:6px}
+.lab .row button{flex:1;height:28px;border-radius:6px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;font:inherit;cursor:pointer}
+.lab .row button:hover{background:#273244}
+</style>
+</head>
+<body>
+
+<div class="client" id="client">
+  <aside class="list">
+    <h3>进行中 · 3</h3>
+    <div class="conv on" data-conv="ja"><div class="av" style="background:#e86a5d">山</div><div><b>山田 花子</b><span>チェックインの時間について…</span></div></div>
+    <div class="conv" data-conv="en"><div class="av" style="background:#4b9b7a">J</div><div><b>John Carter</b><span>Can I change the pickup point?</span></div></div>
+    <div class="conv" data-conv="zh"><div class="av" style="background:#7b6fd6">李</div><div><b>李明</b><span>请问门票包含接送吗</span></div></div>
+  </aside>
+
+  <section class="chat">
+    <div class="chat-head"><span id="custName">山田 花子</span><small id="custMeta">· 京都一日游</small></div>
+    <div class="msgs" id="msgs"></div>
+    <div class="composer" id="composer">
+      <div id="panelMount"></div>
+      <div class="tools">☺ ▣ ✂ ⎘</div>
+      <div class="editor" id="editor" contenteditable="true" data-placeholder="输入中文草稿，助手会自动生成译文预览"></div>
+      <div class="send"><span>Enter 发送 · Shift+Enter 换行</span><button id="sendBtn">发送</button></div>
+    </div>
+  </section>
+
+  <aside class="info">
+    <h4>用户信息</h4>
+    <dl id="infoDl"></dl>
+  </aside>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="lab" id="lab">
+  <header id="labHead">原型控制台 <span>折叠 ▾</span></header>
+  <div class="in">
+    <label>版本
+      <div class="seg" data-key="version"><button data-v="new" class="on">新设计</button><button data-v="old">旧版</button></div>
+    </label>
+    <label>登录状态
+      <select data-key="auth"><option value="ready">已登录</option><option value="connecting">连接中</option><option value="needs_login">需登录</option><option value="failed">连接失败</option></select>
+    </label>
+    <label>翻译结果
+      <div class="seg" data-key="result"><button data-v="ok" class="on">成功</button><button data-v="fail">失败</button></div>
+    </label>
+    <label>订单识别
+      <div class="seg" data-key="order"><button data-v="one" class="on">一个</button><button data-v="none">无</button><button data-v="many">多个</button></div>
+    </label>
+    <label>聊天区宽度
+      <div class="seg" data-key="width"><button data-v="full" class="on">完整</button><button data-v="narrow">窄</button><button data-v="tiny">极窄</button></div>
+    </label>
+    <div class="row"><button id="fillDraft">填入示例草稿</button><button id="resetDemo">重置</button></div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const mac=/Mac/i.test(navigator.platform);
+const KBD=mac?'⌘⌥↵':'Ctrl Alt ↵';
+
+const LANGS={en:['English','英语'],ja:['日本語','日语'],ko:['한국어','韩语'],th:['ไทย','泰语'],vi:['Tiếng Việt','越南语'],id:['Bahasa Indonesia','印尼语'],ms:['Bahasa Melayu','马来语'],es:['Español','西班牙语'],fr:['Français','法语'],de:['Deutsch','德语'],ru:['Русский','俄语'],ar:['العربية','阿拉伯语'],'zh-TW':['繁體中文','繁体中文'],pt:['Português','葡萄牙语'],it:['Italiano','意大利语']};
+const zhName=l=>l==='zh'?'中文':LANGS[l]?.[1]??'待识别';
+
+const CONVS={
+  ja:{name:'山田 花子',meta:'· 京都一日游',lang:'ja',orders:['1128834920517'],msgs:[
+    {c:1,t:'こんにちは。明日のツアーについて質問があります。',tr:'你好，关于明天的行程有个问题。'},
+    {c:1,t:'集合時間は何時ですか？ホテルまで迎えに来てもらえますか？',tr:'集合时间是几点？可以到酒店接我吗？'},
+    {c:0,t:'お問い合わせありがとうございます。確認いたします。'}]},
+  en:{name:'John Carter',meta:'· Universal Studios 门票',lang:'en',orders:['1128834977001'],msgs:[
+    {c:1,t:'Hi, can I change the pickup point to Namba station?',tr:'你好，可以把接送点改到难波站吗？'}]},
+  zh:{name:'李明',meta:'· 大阪城天守阁',lang:'zh',orders:['1128834911111'],msgs:[
+    {c:1,t:'请问门票包含接送吗？'}]}
+};
+
+/* 模拟翻译 */
+const CANNED={
+  '集合时间是早上8点30分，我们会到酒店大堂接您。':{ja:'集合時間は朝8時30分です。ホテルのロビーまでお迎えにあがります。',en:'The meeting time is 8:30 AM. We will pick you up in the hotel lobby.'},
+  '可以的，我们会帮您修改接送点。':{en:'Sure, we will update the pickup point for you.',ja:'かしこまりました。送迎場所を変更いたします。'}
+};
+function fakeTranslate(text,lang){
+  for(const k in CANNED) if(text.trim()===k&&CANNED[k][lang]) return CANNED[k][lang];
+  return `[${LANGS[lang]?.[0]??lang}] ${text.trim()}`;
+}
+
+const S={version:'new',auth:'ready',result:'ok',order:'one',width:'full',
+  conv:'ja',enabled:true,paused:false,follow:true,manual:'en',
+  status:'idle',preview:null,previewFor:'',error:null,draft:''};
+
+/* -------- 面板 -------- */
+const I={
+  globe:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 3 2.5 15 0 18M12 3c-2.5 3-2.5 15 0 18"/></svg>',
+  chev:'<svg viewBox="0 0 24 24" style="width:12px;height:12px"><path d="m6 9 6 6 6-6"/></svg>',
+  receipt:'<svg viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg>',
+  copy:'<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
+  retry:'<svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>',
+  more:'<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg>',
+  lock:'<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  alert:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+  info:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+  search:'<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/></svg>',
+  pause:'<svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg>',
+  play:'<svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"/></svg>',
+};
+let openPop=null;
+
+function custLang(){return CONVS[S.conv].lang}
+function target(){return S.follow?custLang():S.manual}
+function canTranslate(){const t=target();return S.enabled&&!S.paused&&S.auth==='ready'&&!!LANGS[t]}
+function ready(){return canTranslate()&&S.status==='ready'&&S.preview&&S.previewFor===S.draft.trim()}
+
+function statusView(){
+  if(!S.enabled) return {tone:'muted',label:'已关闭'};
+  if(S.auth==='connecting') return {tone:'busy',label:'连接中'};
+  if(S.auth==='needs_login') return {tone:'warn',label:'需登录'};
+  if(S.auth==='failed') return {tone:'bad',label:'连接失败'};
+  if(S.paused) return {tone:'warn',label:'已暂停'};
+  if(S.status==='translating') return {tone:'busy',label:'翻译中'};
+  if(S.status==='stale') return {tone:'busy',label:'更新中'};
+  if(S.status==='failed') return {tone:'bad',label:'翻译失败'};
+  if(S.status==='ready') return {tone:'ok',label:'译文就绪'};
+  return null;
+}
+
+function bodyHTML(){
+  if(S.auth==='connecting') return `<div class="tp-card"><div class="tp-skel"><span></span><span></span></div><div class="tp-foot"><span class="tp-meta">正在连接 TSim 登录服务…</span></div></div>`;
+  if(S.auth==='needs_login') return `<div class="tp-card"><div class="tp-callout" data-tone="info">${I.lock}<p>登录 TSim 后即可翻译。登录成功会自动翻译当前草稿。</p><button class="tp-solid" data-act="login">登录 TSim</button></div></div>`;
+  if(S.auth==='failed') return `<div class="tp-card"><div class="tp-callout" data-tone="bad">${I.alert}<p>无法连接登录服务，请检查网络后重试。</p><button class="tp-line-btn" data-act="reconnect">重新连接</button></div></div>`;
+  const t=target(),cl=custLang();
+  if(S.follow&&cl==='zh') return `<div class="tp-card"><div class="tp-callout" data-tone="info">${I.info}<p>客户使用中文，无需翻译。如需翻译，请在左上角手动选择语言。</p></div></div>`;
+  if(S.follow&&!LANGS[cl]) return `<div class="tp-card"><div class="tp-callout" data-tone="warn">${I.info}<p>暂未识别客户语言，等待客户发送消息，或手动选择目标语言。</p></div></div>`;
+  if(S.paused) return `<div class="tp-card"><div class="tp-callout" data-tone="warn">${I.pause}<p>翻译已暂停，草稿不会发送到翻译服务。</p><button class="tp-line-btn" data-act="resume">恢复翻译</button></div></div>`;
+  if(S.status==='failed') return `<div class="tp-card"><div class="tp-callout" data-tone="bad">${I.alert}<p>${S.error||'翻译服务暂时不可用'}</p><button class="tp-line-btn" data-act="retry">重试</button></div></div>`;
+  if(S.status==='translating'&&!S.preview) return `<div class="tp-card"><div class="tp-skel"><span></span><span></span></div><div class="tp-foot"><span class="tp-meta">正在翻译为${zhName(t)}…</span>${actionsHTML()}</div></div>`;
+  const has=!!S.preview;
+  const stale=S.status==='stale'||S.status==='translating';
+  const meta=has?(S.follow?`根据客户最近消息识别为${zhName(cl)} · 替换后仍需您手动发送`:`手动指定${zhName(t)} · 替换后仍需您手动发送`):`在下方输入中文，停止输入后自动生成${zhName(t)}译文`;
+  return `<div class="tp-card" data-tone="${ready()?'ready':''}">
+    ${stale&&has?'<div class="tp-stalebar"><i></i>草稿已修改，正在更新译文</div>':''}
+    <div class="tp-text ${has?(stale?'stale':''):'placeholder'}" aria-live="polite">${has?esc(S.preview):'译文预览会显示在这里'}</div>
+    <div class="tp-foot"><span class="tp-meta" title="${meta}">${meta}</span>${actionsHTML()}</div></div>`;
+}
+function actionsHTML(){
+  const r=ready(),canRetry=canTranslate()&&!!S.draft.trim()&&S.status!=='translating';
+  return `<div class="tp-actions">
+    <button class="tp-ghost" data-act="retry" ${canRetry?'':'disabled'} title="重新翻译">${I.retry}<span class="label">重译</span></button>
+    <button class="tp-ghost" data-act="copy" ${r?'':'disabled'} title="复制译文">${I.copy}<span class="label">复制</span></button>
+    <button class="tp-primary" data-act="replace" ${r?'':'disabled'} title="用译文替换草稿（不会发送）">替换草稿<kbd>${KBD}</kbd></button></div>`;
+}
+function langPopHTML(){
+  const cl=custLang(),q=(S.q||'').toLowerCase();
+  const items=Object.entries(LANGS).filter(([k,[n,z]])=>!q||k.includes(q)||n.toLowerCase().includes(q)||z.includes(q));
+  return `<div class="tp-pop lang" role="listbox" aria-label="目标语言">
+    <button class="tp-opt follow" data-lang="auto" aria-selected="${S.follow}"><span class="t"><span>跟随客户语言</span><small>当前识别：${zhName(cl)}${cl==='zh'?'（无需翻译）':''}</small></span></button>
+    <div class="tp-sep"></div>
+    <div class="tp-search">${I.search}<input id="tpLangQ" placeholder="搜索语言" value="${esc(S.q||'')}"></div>
+    <div class="tp-grid">${items.map(([k,[n,z]])=>`<button class="tp-opt" data-lang="${k}" aria-selected="${!S.follow&&S.manual===k}">${z} <small>${n}</small></button>`).join('')||'<div class="tp-note" style="padding:6px 8px">无匹配语言</div>'}</div>
+  </div>`;
+}
+function orderList(){const c=CONVS[S.conv];return S.order==='none'?[]:S.order==='many'?[c.orders[0],'1128834999999']:c.orders}
+function orderPopHTML(){
+  const list=orderList();
+  const det=list.length>1?`<div class="tp-note" style="margin:0 2px 8px">检测到多个不同订单，请确认后手动输入。</div>`
+    :list.length===0?`<div class="tp-note" style="margin:0 2px 8px">当前会话未识别到订单ID。</div>`:'';
+  return `<div class="tp-pop order"><h5 style="margin:0 2px 8px">查询其他订单</h5>${det}
+    <form class="tp-field" id="tpOrderForm"><input id="tpOrderQ" placeholder="输入订单 ID 或其他标识" maxlength="100" autocomplete="off"><button type="submit">查询</button></form>
+    <div class="tp-note" id="tpOrderNote">在 TSim 订单窗口中打开，Esc 关闭。</div></div>`;
+}
+function menuPopHTML(){
+  return `<div class="tp-pop tp-menu">
+    <button class="tp-opt" data-act="${S.paused?'resume':'pause'}">${S.paused?I.play:I.pause} ${S.paused?'恢复翻译':'暂停翻译'}</button>
+    <button class="tp-opt" data-act="disable">${I.globe} 关闭出站翻译</button></div>`;
+}
+
+function renderPanel(){
+  const m=$('#panelMount');
+  if(S.version==='old'){m.innerHTML=legacyHTML();return}
+  const sv=statusView(),t=target(),list=orderList();
+  const langLabel=S.follow&&custLang()==='zh'?'<b>中文客户</b>':`中文 <span class="arrow">→</span> <b>${zhName(t)}</b>`;
+  m.innerHTML=`<div class="tp" ${S.enabled?'':'data-off'} aria-label="出站翻译">
+    <div class="tp-bar">
+      <button class="tp-switch" role="switch" aria-checked="${S.enabled}" data-act="toggle" title="${S.enabled?'关闭':'开启'}出站翻译"></button>
+      <span class="tp-name">出站翻译</span>
+      ${S.enabled?`<button class="tp-chip tp-lang" data-pop="lang" aria-expanded="${openPop==='lang'}" title="选择目标语言">${langLabel}<span class="tp-tag ${S.follow?'':'manual'}">${S.follow?'自动':'手动'}</span>${I.chev}</button>`:''}
+      ${sv?`<span class="tp-status" data-tone="${sv.tone}" title="${sv.label}"><i></i><span class="label">${sv.label}</span></span>`:''}
+      <span class="tp-spacer"></span>
+      <button class="tp-icon tp-find" data-pop="order" aria-expanded="${openPop==='order'}" title="查询其他订单">${I.search}</button>
+      ${list.length===1?`<button class="tp-chip tp-order" data-act="openOrder" data-id="${list[0]}" title="在 TSim 中查看订单 ${list[0]}">${I.receipt}<span class="num">${list[0]}</span></button>`:''}
+      ${S.enabled?`<button class="tp-icon" data-pop="menu" aria-expanded="${openPop==='menu'}" title="更多">${I.more}</button>`:''}
+    </div>
+    <div class="tp-body">${bodyHTML()}</div>
+    ${openPop==='lang'?langPopHTML():''}${openPop==='order'?orderPopHTML():''}${openPop==='menu'?menuPopHTML():''}
+  </div>`;
+  if(openPop==='lang'){const q=$('#tpLangQ');q.focus();q.setSelectionRange(q.value.length,q.value.length)}
+  if(openPop==='order')$('#tpOrderQ').focus();
+}
+
+function legacyHTML(){
+  const st=statusView();const list=orderList();
+  return `<div class="legacy"><div class="row header"><div class="row"><span class="title">出站翻译</span><button class="toggle">${S.enabled?'开':'关'}</button>
+  <select><option>跟随 · ${zhName(custLang())}</option></select></div>${st&&st.tone!=='ok'?`<span style="font-size:12px;background:#e9eef7;border-radius:4px;padding:2px 7px">${st.label}</span>`:''}</div>
+  <div class="preview" style="${S.preview?'':'color:#77859a'}">${S.preview?esc(S.preview):'输入中文后自动生成译文预览'}</div>
+  <div class="row actions"><div class="row"><button class="act">重试</button><button class="act">暂停翻译</button><button class="act">复制译文</button><button class="act primary" data-act="replace">替换原文 · ${mac?'⌘ + ⌥ + Enter':'Ctrl + Alt + Enter'}</button></div><span class="hint">确认译文后替换草稿，再由您在原客户端发送</span></div>
+  <details><summary>订单查询</summary><div class="row" style="margin-top:6px">${list.length===1?`<button class="act" style="color:#315b98">订单 ${list[0]}</button>`:''}<input placeholder="订单 ID / 已选标识" style="height:28px;padding:0 7px"><button class="act">查询标识</button></div></details></div>`;
+}
+
+/* -------- 交互 -------- */
+let tTimer,tSeq=0;
+function onDraft(){
+  S.draft=$('#editor').innerText.replace(/\n$/,'');
+  clearTimeout(tTimer);
+  if(!S.draft.trim()){S.preview=null;S.previewFor='';S.status='idle';renderPanel();return}
+  if(!canTranslate()){renderPanel();return}
+  if(S.preview)S.status='stale';
+  renderPanel();
+  tTimer=setTimeout(translate,600);
+}
+function translate(){
+  if(!canTranslate()||!S.draft.trim())return;
+  const seq=++tSeq,text=S.draft.trim(),lang=target();
+  S.status='translating';S.error=null;renderPanel();
+  setTimeout(()=>{
+    if(seq!==tSeq)return;
+    if(S.result==='fail'){S.status='failed';S.error='翻译服务暂时不可用（模拟错误 503）';}
+    else{S.preview=fakeTranslate(text,lang);S.previewFor=text;S.status=S.draft.trim()===text?'ready':'stale';}
+    renderPanel();
+  },700+Math.random()*500);
+}
+function act(a,el){
+  switch(a){
+    case 'toggle':S.enabled=!S.enabled;openPop=null;if(S.enabled)onDraft();break;
+    case 'disable':S.enabled=false;openPop=null;break;
+    case 'pause':S.paused=true;openPop=null;tSeq++;S.status=S.preview?'stale':'idle';break;
+    case 'resume':S.paused=false;openPop=null;onDraft();return;
+    case 'retry':translate();return;
+    case 'copy':navigator.clipboard?.writeText(S.preview).catch(()=>{});toast('已复制译文');return;
+    case 'replace':
+      if(S.version==='old'&&!S.preview)return;
+      if(S.version==='new'&&!ready())return;
+      $('#editor').innerText=S.preview;S.draft=S.preview;S.preview=null;S.previewFor='';S.status='idle';
+      toast('已替换草稿，请检查后在客户端发送');placeCaret();break;
+    case 'login':S.auth='connecting';sync();setTimeout(()=>{S.auth='ready';sync();onDraft()},1200);break;
+    case 'reconnect':S.auth='connecting';sync();setTimeout(()=>{S.auth='ready';sync();onDraft()},1000);break;
+    case 'openOrder':openOrder(el.dataset.id);break;
+  }
+  renderPanel();
+}
+document.addEventListener('click',e=>{
+  const pop=e.target.closest('[data-pop]');
+  if(pop){openPop=openPop===pop.dataset.pop?null:pop.dataset.pop;S.q='';renderPanel();return}
+  const lang=e.target.closest('[data-lang]');
+  if(lang){const v=lang.dataset.lang;if(v==='auto')S.follow=true;else{S.follow=false;S.manual=v}openPop=null;S.preview=null;S.previewFor='';S.status='idle';onDraft();return}
+  const a=e.target.closest('[data-act]');
+  if(a&&!a.disabled){act(a.dataset.act,a);return}
+  if(openPop&&!e.target.closest('.tp-pop')){openPop=null;renderPanel()}
+});
+document.addEventListener('input',e=>{if(e.target.id==='tpLangQ'){S.q=e.target.value;const pos=e.target.selectionStart;renderPanel();$('#tpLangQ').setSelectionRange(pos,pos)}});
+document.addEventListener('submit',e=>{
+  if(e.target.id!=='tpOrderForm')return;e.preventDefault();
+  const v=$('#tpOrderQ').value.trim();
+  if(!/^[A-Za-z0-9_-]{1,100}$/.test(v)){const n=$('#tpOrderNote');n.textContent='请输入明确的订单标识（字母、数字、-、_）';n.classList.add('err');return}
+  openOrder(v);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){if($('.op-clip')){closeOrder();return}if(openPop){openPop=null;renderPanel()}}
+  if(e.key==='Enter'&&e.altKey&&(mac?e.metaKey:e.ctrlKey)){e.preventDefault();act('replace')}
+});
+$('#editor').addEventListener('input',onDraft);
+$('#sendBtn').onclick=()=>{const t=$('#editor').innerText.trim();if(!t)return;CONVS[S.conv].msgs.push({c:0,t});$('#editor').innerText='';renderMsgs();onDraft()};
+$('#editor').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.altKey&&!e.metaKey&&!e.ctrlKey&&!e.isComposing){e.preventDefault();$('#sendBtn').click()}});
+
+function openOrder(id){
+  openPop=null;renderPanel();closeOrder();
+  document.body.insertAdjacentHTML('beforeend',`<div class="op-veil" onclick="closeOrder()"></div><div class="op-clip"><div class="op-head">TSim 订单查询 <small>${esc(id)}</small><button class="x" onclick="closeOrder()" title="关闭（Esc）">×</button></div><div class="op-body">（此处为 TSim /embed/operator iframe）</div></div>`);
+}
+function closeOrder(){document.querySelectorAll('.op-clip,.op-veil').forEach(n=>n.remove())}
+
+/* -------- 宿主页面 -------- */
+function renderMsgs(){
+  const c=CONVS[S.conv];$('#custName').textContent=c.name;$('#custMeta').textContent=c.meta;
+  $('#msgs').innerHTML=c.msgs.map(m=>`<div class="msg ${m.c?'':'me'}"><span class="who">${m.c?c.name:'商家客服'}</span><div class="bubble">${esc(m.t)}${m.tr?`<div class="tr">${esc(m.tr)}</div>`:''}</div></div>`).join('');
+  $('#msgs').scrollTop=1e6;
+  const list=orderList();
+  $('#infoDl').innerHTML=`<dt>昵称</dt><dd>${c.name}</dd><dt>语言</dt><dd>${zhName(c.lang)}</dd><dt>订单ID</dt><dd>${list.join('<br>')||'—'}</dd><dt>产品</dt><dd>${c.meta.slice(2)}</dd>`;
+}
+document.querySelectorAll('.conv').forEach(n=>n.onclick=()=>{
+  document.querySelectorAll('.conv').forEach(x=>x.classList.toggle('on',x===n));
+  S.conv=n.dataset.conv;S.follow=true;S.preview=null;S.previewFor='';S.status='idle';openPop=null;closeOrder();
+  $('#editor').innerText='';S.draft='';renderMsgs();renderPanel();
+});
+
+/* -------- 控制台 -------- */
+function sync(){
+  document.querySelectorAll('.lab [data-key]').forEach(g=>{
+    const k=g.dataset.key;
+    if(g.tagName==='SELECT')g.value=S[k];
+    else g.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===S[k]));
+  });
+  const w={full:'',narrow:'560px',tiny:'360px'}[S.width];
+  $('#client').classList.toggle('no-side',S.width!=='full');
+  $('#client').style.gridTemplateColumns=S.width==='full'?'':`220px ${w}`;
+  $('#client').style.width=S.width==='full'?'':'auto';
+}
+document.querySelectorAll('.lab .seg').forEach(g=>g.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;S[g.dataset.key]=b.dataset.v;sync();renderMsgs();
+  if(g.dataset.key==='result'&&S.draft.trim())translate();renderPanel()}));
+$('.lab select').onchange=e=>{S.auth=e.target.value;sync();onDraft()};
+$('#labHead').onclick=()=>$('#lab').classList.toggle('min');
+$('#fillDraft').onclick=()=>{const d={ja:'集合时间是早上8点30分，我们会到酒店大堂接您。',en:'可以的，我们会帮您修改接送点。',zh:'门票不包含接送，需要自行前往。'}[S.conv];$('#editor').innerText=d;placeCaret();onDraft()};
+$('#resetDemo').onclick=()=>location.reload();
+
+function placeCaret(){const ed=$('#editor');ed.focus();const r=document.createRange();r.selectNodeContents(ed);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r)}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+let toastT;function toast(t){const n=$('#toast');n.textContent=t;n.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>n.classList.remove('on'),1600)}
+
+sync();renderMsgs();renderPanel();
+</script>
+</body>
+</html>
