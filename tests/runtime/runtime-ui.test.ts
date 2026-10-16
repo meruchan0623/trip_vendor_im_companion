@@ -14,6 +14,32 @@ beforeEach(()=>{vi.useFakeTimers();dom=new JSDOM('',{url:VERIFIED_RUNTIME_BUILD.
 afterEach(async()=>{await handle?.detach();handle=undefined;dom.window.close();vi.restoreAllMocks();vi.useRealTimers();});
 const calls=()=>binding.mock.calls.map(([payload])=>JSON.parse(payload as string));
 describe('runtime factory: thin isolated-world entry over the page features',()=>{
+  it('keeps a cold-start lease before the composer appears, then mounts lazily',async()=>{
+    document.body.innerHTML='<div id="root"></div>';
+    handle=mountRuntimeUi(metadata,document,{bindingName,state:state({auth:'needs_login',status:'needs_login',conversationKey:null})});
+    expect(handle.boundary()).toBe(true);expect(handle.geometry()).toMatchObject({width:0,height:0});
+    await vi.advanceTimersByTimeAsync(1100);handle.heartbeat(1);expect(document.getElementById('tsim-outbound-panel')).toBeNull();
+    document.body.innerHTML=IM;await vi.advanceTimersByTimeAsync(101);
+    const host=document.getElementById('tsim-outbound-panel')!;expect(host.nextElementSibling).toBe(document.querySelector('.chat_area-input'));expect(handle.boundary()).toBe(true);
+    expect((host.shadowRoot!.querySelector('.login') as HTMLButtonElement).hidden).toBe(false);expect(host.shadowRoot!.querySelector('.login')!.textContent).toBe('登录 TSim');
+    await handle.detach();expect(vi.getTimerCount()).toBe(0);
+  });
+  it('survives a temporary vendor composer replacement across heartbeats',async()=>{
+    handle=mountRuntimeUi(metadata,document,{bindingName,state:state()});const oldHost=document.getElementById('tsim-outbound-panel')!;
+    const oldArea=document.querySelector('.chat_area')!;oldArea.remove();handle.heartbeat(1);expect(handle.boundary()).toBe(true);
+    await vi.advanceTimersByTimeAsync(101);handle.heartbeat(2);expect(document.getElementById('tsim-outbound-panel')).toBeNull();
+    document.body.innerHTML=IM;handle.heartbeat(3);expect(document.getElementById('tsim-outbound-panel')).toBe(oldHost);expect(oldHost.nextElementSibling).toBe(document.querySelector('.chat_area-input'));
+    // Replacing only the editor/composer keeps the owned panel and the lease.
+    document.querySelector('.chat_area-input')!.outerHTML='<div class="chat_area-input"><div class="tiptap ProseMirror chat-editor" contenteditable="true"></div></div>';
+    await vi.advanceTimersByTimeAsync(101);handle.heartbeat(4);expect(document.getElementById('tsim-outbound-panel')).toBe(oldHost);
+    // Once the observer has adopted the new anchor, removal alone still fails.
+    oldHost.remove();await vi.advanceTimersByTimeAsync(101);expect(oldHost.isConnected).toBe(false);expect(()=>handle!.heartbeat(5)).toThrow('OWNED_FRAME_BOUNDARY_FAILED');
+  });
+  it('rejects a foreign panel host while waiting for the composer',()=>{
+    document.body.innerHTML='<div id="root"></div>';handle=mountRuntimeUi(metadata,document,{bindingName,state:state()});
+    const fake=document.createElement('div');fake.id='tsim-outbound-panel';document.body.append(fake);
+    expect(()=>handle!.heartbeat(1)).toThrow('OWNED_FRAME_BOUNDARY_FAILED');expect(document.documentElement.hasAttribute('data-tsim-runtime-lease')).toBe(false);
+  });
   it('refuses hidden mounting before creating a panel, lease or listener timers',()=>{
     Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});const before=document.body.innerHTML;
     expect(()=>mountRuntimeUi(metadata,document,{bindingName,state:state()})).toThrow('IM_TARGET_INACTIVE');

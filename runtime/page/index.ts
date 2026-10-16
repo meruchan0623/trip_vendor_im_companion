@@ -32,8 +32,19 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   if(state)update(state);
   return{update,overlay,panel,
     boundary(){
+      if(panel){
+        const own=document.getElementById(PANEL_HOST_ID);
+        // A verified document may precede login/conversation rendering. Absence
+        // of both host and composer is a waiting state, never permission to
+        // accept a foreign host or restore one removed beside a live composer.
+        if(panel.host.id!==PANEL_HOST_ID||own&&own!==panel.host||document.querySelectorAll(`[id="${PANEL_HOST_ID}"]`).length>1||!panel.host.isConnected&&panel.anchor?.isConnected)throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
+        // Reconcile synchronously before a heartbeat can race the observer's
+        // debounce when the vendor replaces the composer subtree.
+        panel.attach();
+        if(panel.host.isConnected&&document.getElementById(PANEL_HOST_ID)!==panel.host)throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
+      }
       const own=document.getElementById(PANEL_HOST_ID),frame=document.getElementById(OPERATOR_FRAME_ID);
-      if(disposed||panel&&(!panel.host.isConnected||own!==panel.host)||frame&&frame!==overlay.frame||overlay.frame&&(!overlay.frame.isConnected||frame!==overlay.frame||document.querySelectorAll(`[id="${OPERATOR_FRAME_ID}"]`).length!==1||!overlay.active||overlay.frame.src!==operatorFrameURL(options.origin??TSIM_OPERATOR_ORIGIN,overlay.active)))throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
+      if(disposed||panel&&own!==null&&own!==panel.host||frame&&frame!==overlay.frame||overlay.frame&&(!overlay.frame.isConnected||frame!==overlay.frame||document.querySelectorAll(`[id="${OPERATOR_FRAME_ID}"]`).length!==1||!overlay.active||overlay.frame.src!==operatorFrameURL(options.origin??TSIM_OPERATOR_ORIGIN,overlay.active)))throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},

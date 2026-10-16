@@ -44,6 +44,43 @@ describe('external draft replacement service',()=>{
     service=new CompanionService(native as unknown as NativeAdapter,async()=>{});expect(service.getState().auth).toBe('connecting');
     release();await Promise.resolve();await Promise.resolve();expect(service.getState().auth).toBe('ready');
   });
+  it('mounts and renews the local panel while authentication is pending',async()=>{
+    await service.dispose();let release!:()=>void;
+    fake.sync.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve;}));
+    fake.identity=null;
+    service=new CompanionService(native as unknown as NativeAdapter,async()=>{},()=>{},{},true);service.setWindowState(window);
+    const external={targetInstanceId:'1:2:3',mountWorkbench:vi.fn(async()=>{}),updateWorkbench:vi.fn(async()=>{}),read:vi.fn(async()=>({writeVerified:false,reason:'COMPOSER_UNAVAILABLE'})),renew:vi.fn(async()=>{}),replace:vi.fn(async()=>{}),close:vi.fn(async()=>{})};
+    vi.mocked(connectExternalComposer).mockResolvedValueOnce(external);
+    await service.connectComposer();
+    expect(external.mountWorkbench).toHaveBeenCalledWith(expect.objectContaining({auth:'connecting'}),expect.any(Function));
+    expect(fake.translate).not.toHaveBeenCalled();expect(external.replace).not.toHaveBeenCalled();
+    service.setWindowState({...window,foreground:false,groupForeground:false});
+    await vi.advanceTimersByTimeAsync(7000);expect(external.renew).toHaveBeenCalled();expect(external.close).not.toHaveBeenCalled();
+    release();await Promise.resolve();await Promise.resolve();
+  });
+  it('keeps a pending local connection through auth recovery but rejects a changed window',async()=>{
+    for(const changeWindow of [false,true]){
+      let resolve!: (value:any)=>void;
+      vi.mocked(connectExternalComposer).mockImplementationOnce(()=>new Promise(done=>{resolve=done;}));
+      const pending=service.connectComposer();await vi.waitFor(()=>expect(resolve).toBeTypeOf('function'));
+      fake.changed?.(fake.identity);
+      if(changeWindow)service.setWindowState({...window,targetInstanceId:'4:5:6'});
+      const external={targetInstanceId:'1:2:3',mountWorkbench:vi.fn(async()=>{}),read:vi.fn(async()=>({writeVerified:false,reason:'COMPOSER_UNAVAILABLE'})),renew:vi.fn(async()=>{}),replace:vi.fn(async()=>{}),close:vi.fn(async()=>{})};
+      resolve(external);await pending;
+      if(changeWindow){expect(external.mountWorkbench).not.toHaveBeenCalled();expect(external.close).toHaveBeenCalled();}
+      else expect(external.mountWorkbench).toHaveBeenCalled();
+    }
+  });
+  it('cancels obsolete window discovery immediately instead of waiting for its timeout',async()=>{
+    let signal:AbortSignal|undefined;
+    vi.mocked(connectExternalComposer).mockImplementationOnce((_id,current)=>new Promise((_resolve,reject)=>{
+      signal=current;current!.addEventListener('abort',()=>reject(new Error('CONNECTION_SUPERSEDED')),{once:true});
+    }));
+    const pending=service.connectComposer();await vi.waitFor(()=>expect(signal).toBeDefined());
+    service.setWindowState({...window,targetInstanceId:'4:5:6'});
+    await pending;expect(signal!.aborted).toBe(true);
+    expect(service.getState().targetInstanceId).toBe('4:5:6');expect(service.getState().error).toBeNull();
+  });
   it('retains permission failures as failed and clears their error on background recovery',async()=>{
     await Promise.resolve();await Promise.resolve();fake.identity=null;fake.changed?.(null);
     expect(service.getState().auth).toBe('connecting');

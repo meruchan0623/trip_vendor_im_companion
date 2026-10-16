@@ -93,12 +93,12 @@ kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padd
 @media (max-height:650px){.preview{max-height:64px}}
 [hidden]{display:none!important}`;
 export interface PanelBridge {invoke(action:string,args?:unknown[]):Promise<void>}
-export interface OutboundPanel {render(state:PanelState):void;setOrder(order:string|undefined):void;attach():boolean;readonly host:HTMLElement;readonly editor:HTMLElement|undefined;dispose():void}
+export interface OutboundPanel {render(state:PanelState):void;setOrder(order:string|undefined):void;attach():boolean;readonly host:HTMLElement;readonly anchor:HTMLElement|undefined;readonly editor:HTMLElement|undefined;dispose():void}
 type Popover='languages'|'query'|'menu';
 /** `openOrder` opens the TSim operator window: the detected order chip opens directly, the search button queries any other identifier. */
 export function createOutboundPanel(document:Document,bridge:PanelBridge,initial:PanelState,hooks:{openOrder?(order:string,identifierType?:OperatorIdentifierType):void;orderUnavailableReason?:string}={}):OutboundPanel{
   const unavailableReason=hooks.orderUnavailableReason??(!hooks.openOrder?'订单查询不可用：尚未连接 TSim 内嵌页面':undefined);
-  const view=document.defaultView!;let state=initial,disposed=false,composing=false,editor:HTMLElement|undefined,timer:number|undefined,notice='',noticeTimer:number|undefined,open:Popover|null=null,orderValue:string|undefined;
+  const view=document.defaultView!;let state=initial,disposed=false,composing=false,editor:HTMLElement|undefined,anchor:HTMLElement|undefined,timer:number|undefined,notice='',noticeTimer:number|undefined,open:Popover|null=null,orderValue:string|undefined;
   const host=document.createElement('div');host.id=PANEL_HOST_ID;host.setAttribute('data-tsim-owned','1');host.setAttribute('aria-label','出站翻译');
   const contain=(event:Event)=>event.stopPropagation();CONTAINED.forEach(type=>host.addEventListener(type,contain));
   const shadow=host.attachShadow({mode:'open'});
@@ -186,8 +186,12 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   /** Keep the host directly above .chat_area-input; the vendor may re-render either side at any time. */
   function attach(){
     if(disposed||document.visibilityState==='hidden')return false;const area=document.querySelector(CHAT_AREA_SELECTOR),input=area?.querySelector<HTMLElement>(INPUT_SELECTOR);
+    // A missing host beside its still-live composer is boundary drift, not a
+    // vendor rerender. Leave it detached so the runtime can revoke its lease.
+    if(!host.isConnected&&anchor?.isConnected)return false;
     if(!area||!input?.parentNode){if(host.isConnected)host.remove();bindEditor(undefined);return false;}
     if(host.parentNode!==input.parentNode||host.nextSibling!==input)input.parentNode.insertBefore(host,input);
+    anchor=input;
     const editors=input.querySelectorAll<HTMLElement>(EDITOR_SELECTOR);bindEditor(editors.length===1?editors[0]:undefined);return true;
   }
   const showCallout=(tone:'info'|'warn'|'bad',name:keyof typeof ICONS,text:string,action?:HTMLButtonElement)=>{callout.hidden=false;callout.dataset.tone=tone;calloutIcon.replaceChildren(icon(name));calloutText.textContent=text;for(const item of [login,resume,retryFailed])item.hidden=item!==action;};
@@ -236,5 +240,5 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   const observer=new view.MutationObserver(mutations=>{if(mutations.every(mutation=>{const target=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;const changed=[...mutation.addedNodes,...mutation.removedNodes];return !!target?.closest('[data-tsim-owned="1"]')||changed.length>0&&changed.every(node=>node===host);}))return;schedule();});
   const onVisibility=()=>{view.clearTimeout(timer);if(document.visibilityState==='hidden')setOpen(null);else attach();};document.addEventListener('visibilitychange',onVisibility);
   render(state);attach();if(document.body)observer.observe(document.body,{childList:true,subtree:true});
-  return{render,setOrder,attach,host,get editor(){return editor;},dispose(){if(disposed)return;setOpen(null);disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);document.removeEventListener('pointerdown',onOutside,true);view.removeEventListener('resize',onResize);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
+  return{render,setOrder,attach,host,get anchor(){return anchor;},get editor(){return editor;},dispose(){if(disposed)return;setOpen(null);disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);document.removeEventListener('pointerdown',onOutside,true);view.removeEventListener('resize',onResize);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
 }
