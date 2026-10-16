@@ -60,7 +60,7 @@ export class CompanionService {
   private orderRequest?:AbortController;
   private clearOrder(){++this.orderGeneration;this.orderRequest?.abort();this.orderRequest=undefined;this.order={identifier:'',status:'idle',error:null,fields:[]};}
   private resetCustomerLanguage(){this.state.customerLanguage='unknown';this.state.followCustomerLanguage=true;this.state.language='en';this.translationIntent++;this.attempted=undefined;this.suppressed=undefined;}
-  private contextChanged(){this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
+  private contextChanged(){this.invalidate();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
   private embeddedState(){return embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null);}
   private retireComposer(composer:ExternalComposer){
     if(this.external!==composer||this.closed)return;
@@ -68,7 +68,7 @@ export class CompanionService {
     this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;
     this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';
     this.retireInteractions();this.external=undefined;this.nextConnectAt=Date.now()+1000;
-    void composer.close().catch(()=>{});this.contextChanged();this.publish();
+    void composer.close().catch(()=>{});this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.contextChanged();this.publish();
   }
   private publishEmbedded(){
     this.embeddedDirty=true;if(this.embeddedPublishing)return;this.embeddedPublishing=true;
@@ -90,6 +90,10 @@ export class CompanionService {
     this.interactionTask=task;void task.finally(()=>{if(this.interactionTask===task)this.interactionTask=undefined;});
   }
   private captured?:Captured;
+  /** Survives temporary capture failures so recovery can distinguish the same customer from a new one. */
+  private verifiedContext?:string;
+  private verifiedCustomerContext?:string;
+  private sessionIdentity?:string;
   private reviewed?:{capture:Captured;identity:PsimIdentity;text:string};
   private epoch=0; private request?:AbortController; private closed=false;
   private busy=false; private foreground=false; private poll?:ReturnType<typeof setInterval>;
@@ -105,6 +109,8 @@ export class CompanionService {
   private pausedContext?:string;
   private renewing=false;
   private context(capture=this.captured){return capture?JSON.stringify(capture.source==='verified-editor'?[this.state.targetInstanceId,capture.snapshot.conversationId,capture.snapshot.scopeGeneration,capture.snapshot.platformAccountScope]:[this.state.targetInstanceId,capture.snapshot.editorIdentity]):'';}
+  /** Language and pause preferences belong to the customer, across editor remounts. */
+  private customerContext(capture=this.captured){return capture?.source==='verified-editor'?JSON.stringify([this.state.targetInstanceId,capture.snapshot.conversationId,capture.snapshot.platformAccountScope,capture.snapshot.documentGeneration]):this.context(capture);}
   private signature(capture=this.captured){return capture?JSON.stringify([capture.source,capture.snapshot,this.state.language,this.state.accountScope]):'';}
   private stopTimer(){if(this.autoTimer)clearTimeout(this.autoTimer);this.autoTimer=undefined;}
   private schedule(){
@@ -126,10 +132,11 @@ export class CompanionService {
   async reportCustomerLanguage(language:string,conversationKey:string){
     if(!/^(unknown|zh|en|ja|ko|ar|ru|el|th|es|fr|de|pt|it|vi|id|ms)$/.test(language)||conversationKey!==this.context()||!this.external||!this.state.messageSurface?.active)return;
     if(!await this.waitForObservation())return;await this.acquireEditor();
-    try{const capture=await this.capture();if(conversationKey!==this.context(capture))return;this.adopt(capture);if(language===this.state.customerLanguage){this.publish();return;}this.state.customerLanguage=language;if(this.state.followCustomerLanguage!==false){this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;if(isPanelTarget(language))this.state.language=language;this.schedule();}this.publish();}finally{this.setBusy(false);}
+    const epoch=this.epoch,customerContext=this.verifiedCustomerContext;
+    try{const capture=await this.capture();if(epoch!==this.epoch||this.closed)return;this.adopt(capture);if(conversationKey!==this.context(capture)||customerContext!==undefined&&customerContext!==this.customerContext(capture)){this.publish();return;}if(language==='unknown'&&this.state.customerLanguage!=='unknown'||language===this.state.customerLanguage){this.publish();return;}this.state.customerLanguage=language;if(this.state.followCustomerLanguage!==false){this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;if(isPanelTarget(language))this.state.language=language;this.schedule();}this.publish();}catch(error){if(epoch===this.epoch&&!this.closed)this.fail(error,true);}finally{this.setBusy(false);}
   }
   async followCustomerLanguage(){this.state.followCustomerLanguage=true;this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;if(isPanelTarget(this.state.customerLanguage))this.state.language=this.state.customerLanguage;this.schedule();this.publish();}
-  async cancelTranslation(){this.translationIntent++;this.pausedContext=this.context();this.state.translationPaused=true;this.invalidate();this.state.phase='idle';this.state.error=null;this.publish();}
+  async cancelTranslation(){this.translationIntent++;this.pausedContext=this.customerContext();this.state.translationPaused=true;this.invalidate();this.state.phase='idle';this.state.error=null;this.publish();}
   async resumeTranslation(){this.translationIntent++;this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;this.invalidate();this.state.phase='idle';this.schedule();this.publish();}
 
   private sessionError:string|null=null;
@@ -137,6 +144,9 @@ export class CompanionService {
   private surfaceMeasurementRevision=0;
   constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options)){
     this.psim=sessionFactory(identity=>{
+      const sessionIdentity=identity?.accountScope;
+      if(sessionIdentity!==undefined&&this.sessionIdentity!==undefined&&sessionIdentity!==this.sessionIdentity){this.contextChanged();this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;}
+      if(sessionIdentity!==undefined)this.sessionIdentity=sessionIdentity;
       this.clearOrder();this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.state.auth=identity?'ready':'connecting';this.state.accountScope=identity?.accountScope??'unknown';
       if(identity&&[messages.BROWSER_BRIDGE_UNAVAILABLE,messages.BROWSER_BRIDGE_TIMEOUT,messages.PSIM_LOGIN_REQUIRED].includes(this.state.error??'')){this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';}
       this.schedule();this.publish();
@@ -172,14 +182,14 @@ export class CompanionService {
   reportBrowserFailure(code:'BROWSER_PLACEMENT_FAILED'|'BROWSER_CLEANUP_UNCONFIRMED'|'BROWSER_SPACE_TOO_SMALL'){this.fail(new Error(code));}
   setWindowState(window:WindowState|null){
     if(this.closed)return;
-    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.resetCustomerLanguage();this.clearOrder();}
+    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.resetCustomerLanguage();this.clearOrder();}
     if(id!==this.state.targetInstanceId){this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
   invalidate(){this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
-  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(code==='MESSAGE_PAGE_INACTIVE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.contextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
+  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){
@@ -200,10 +210,16 @@ export class CompanionService {
   }
   private adopt(capture:Captured,invalidateChanged=true){
     this.surfaceMeasurementRevision++;
-    if(this.captured?.source==='verified-editor'&&capture.source==='verified-editor'&&this.context(this.captured)!==this.context(capture))this.contextChanged();
+    if(capture.source==='verified-editor'){
+      const customerContext=this.customerContext(capture);
+      const context=JSON.stringify([this.context(capture),capture.snapshot.editorIdentity,capture.snapshot.composerId,capture.snapshot.documentGeneration]);
+      if(this.verifiedCustomerContext!==undefined&&this.verifiedCustomerContext!==customerContext)this.contextChanged();
+      else if(this.verifiedContext!==undefined&&this.verifiedContext!==context){this.invalidate();this.clearOrder();this.onContextChanged();}
+      this.verifiedCustomerContext=customerContext;this.verifiedContext=context;
+    }
     const changed=!this.captured||JSON.stringify(this.captured.snapshot)!==JSON.stringify(capture.snapshot)||this.captured.source!==capture.source;
-    if(invalidateChanged&&this.captured&&changed)this.invalidate();
-    if(this.pausedContext!==undefined&&this.pausedContext!==this.context(capture)){this.pausedContext=undefined;this.state.translationPaused=false;}
+    if(invalidateChanged&&this.captured&&changed){this.invalidate();this.attempted=undefined;}
+    if(this.pausedContext!==undefined&&this.pausedContext!==this.customerContext(capture)){this.pausedContext=undefined;this.state.translationPaused=false;}
     if(changed&&this.suppressed!==this.signature(capture))this.suppressed=undefined;
     this.captured=capture;this.state.composerSource=capture.source;
     this.state.messageSurface=capture.source==='verified-editor'?(capture.messageSurface??{active:false,composerRect:null,toolbarRect:null}):{active:false,composerRect:null,toolbarRect:null};
@@ -214,7 +230,7 @@ export class CompanionService {
   private async observe(){
     this.setBusy(true);const epoch=this.epoch,id=this.state.targetInstanceId;
     try{const capture=await this.capture();if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;const recovered=this.sourceFailure&&this.state.phase==='failed'&&this.state.composerSource==='unavailable'&&capture.source==='verified-editor';this.adopt(capture);if(recovered){this.sourceFailure=false;this.state.phase='idle';this.state.error=null;this.schedule();}this.publish();}
-    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.contextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
+    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.clearOrder();this.onContextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
     finally{this.setBusy(false);}
   }
   /** Background captures must finish before a visible enabled user action acquires the editor. */
@@ -266,22 +282,27 @@ export class CompanionService {
     if(intent!==this.translationIntent||!this.foreground||this.state.translationPaused)return;
     if(!automaticSignature&&target!==this.state.language)await this.setTranslationOptions({language:target});
     if(this.state.followCustomerLanguage!==false&&!isPanelTarget(this.state.customerLanguage))return;
-    intent=this.translationIntent;const expectedEpoch=this.epoch;
+    // Authentication may publish a newly recovered identity and revoke old reviews.
+    // Complete that step before creating this translation's epoch, so a manual retry survives recovery.
+    intent=this.translationIntent;const intendedWindow=this.state.targetInstanceId,expectedCustomerContext=this.verifiedCustomerContext;
+    try{await this.psim.sync();}catch(error){if(intent===this.translationIntent&&!this.closed)this.fail(error);return;}
+    if(intent!==this.translationIntent||this.closed||!this.foreground||this.state.translationPaused||target!==this.state.language||intendedWindow!==this.state.targetInstanceId)return;
+    const expectedEpoch=this.epoch;
     if(!await this.waitForObservation()||this.busy||expectedEpoch!==this.epoch||intent!==this.translationIntent||this.state.translationPaused||!this.foreground||target!==this.state.language)return;
     this.invalidate();this.state.error=null;this.state.phase='translating';this.setBusy(true);this.publish();
     const epoch=this.epoch,request=new AbortController();this.request=request;
     const expectedContext=this.context();
     let capture:Captured,identity:PsimIdentity;
     try{
-      await this.psim.sync();
-      if(epoch!==this.epoch)return;
       const currentIdentity=this.psim.identity();if(!currentIdentity)throw new Error('PSIM_LOGIN_REQUIRED');identity=currentIdentity;
-      capture=await this.capture();if(epoch!==this.epoch||!this.foreground)return;
-      if(expectedContext&&expectedContext!==this.context(capture)){this.adopt(capture);this.publish();return;}
+      try{capture=await this.capture();}catch(error){if(epoch===this.epoch)this.fail(error,true);return;}
+      if(epoch!==this.epoch||!this.foreground)return;
+      if(expectedContext&&expectedContext!==this.context(capture)||expectedCustomerContext!==undefined&&expectedCustomerContext!==this.customerContext(capture)){this.adopt(capture);this.publish();return;}
       if(capture.source==='verified-editor'&&!capture.snapshot.isPlainText){this.adopt(capture,false);throw new Error('WRITE_UNAVAILABLE');}
       if(capture.source==='verified-editor'&&capture.snapshot.composing)throw new Error('INPUT_COMPOSING');
       if(!capture.snapshot.text.trim())throw new Error('EMPTY_DRAFT');
       this.adopt(capture,false);
+      if(epoch!==this.epoch||intent!==this.translationIntent||target!==this.state.language){this.publish();return;}
       if(automaticSignature&&automaticSignature!==this.signature()){this.schedule();this.publish();return;}
       this.attempted=this.signature();
     }catch(error){if(epoch===this.epoch)this.fail(error);return;}
@@ -310,7 +331,7 @@ export class CompanionService {
     try{
       await this.psim.sync();
       const auth=this.psim.identity();if(!auth||auth.authGeneration!==reviewed.identity.authGeneration||auth.accountScope!==reviewed.identity.accountScope)throw new Error('AUTH_CHANGED');
-      const current=await this.capture();if(!this.foreground||epoch!==this.epoch||!same(current,reviewed.capture))throw new Error('DRAFT_CHANGED');
+      const current=await this.capture();if(!this.foreground||epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(!same(current,reviewed.capture)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
       if(current.source==='verified-editor'){await this.external!.replace(current.snapshot,reviewed.text,async()=>{
         await this.psim.sync();
         const assertCurrent=()=>{const latest=this.psim.identity();
@@ -320,7 +341,8 @@ export class CompanionService {
       });}else{if(!current.snapshot.canReplace)throw new Error('WRITE_UNAVAILABLE');await this.native.replaceDraft(current.snapshot,reviewed.text);}
       const after=await this.capture();if(epoch!==this.epoch||after.snapshot.text!==reviewed.text)throw new Error('DRAFT_READBACK_MISMATCH');
       this.adopt(after,false);
-      if(current.source==='verified-editor'&&(after.source!=='verified-editor'||after.snapshot.conversationId!==current.snapshot.conversationId||after.snapshot.scopeGeneration!==current.snapshot.scopeGeneration))throw new Error('DRAFT_CHANGED');
+      if(epoch!==this.epoch)throw new Error('DRAFT_CHANGED');
+      if(current.source==='verified-editor'&&(after.source!=='verified-editor'||after.snapshot.conversationId!==current.snapshot.conversationId||after.snapshot.scopeGeneration!==current.snapshot.scopeGeneration||after.snapshot.platformAccountScope!==current.snapshot.platformAccountScope||after.snapshot.documentGeneration!==current.snapshot.documentGeneration||after.snapshot.editorIdentity!==current.snapshot.editorIdentity||after.snapshot.composerId!==current.snapshot.composerId))throw new Error('DRAFT_CHANGED');
       this.suppressed=this.signature(after);this.attempted=this.suppressed;this.reviewed=undefined;this.state.preview=null;this.state.phase='replaced';this.publish();
     }catch(error){this.invalidate();this.fail(error);}finally{this.setBusy(false);}
   }

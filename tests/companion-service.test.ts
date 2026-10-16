@@ -177,7 +177,7 @@ describe('external draft replacement service',()=>{
     active=true;await vi.advanceTimersByTimeAsync(500);await service.setTranslationOptions({language:'ja'});expect(service.getState()).toMatchObject({phase:'waiting',error:null,composerSource:'verified-editor',messageSurface:{active:true}});
     fake.translate.mockRejectedValueOnce(new Error('SERVICE_UNAVAILABLE'));await service.translate('ja');const translationError=service.getState().error;expect(service.getState().phase).toBe('failed');
     active=false;await vi.advanceTimersByTimeAsync(500);active=true;await vi.advanceTimersByTimeAsync(500);expect(service.getState()).toMatchObject({phase:'failed',error:translationError,composerSource:'verified-editor'});
-    await service.translate('ja');expect(service.getState().phase).toBe('ready');snapshot.revision++;await vi.advanceTimersByTimeAsync(500);expect(service.getState().phase).toBe('waiting');active=false;await vi.advanceTimersByTimeAsync(500);active=true;await vi.advanceTimersByTimeAsync(500);expect(service.getState().phase).toBe('stale');await service.setTranslationOptions({language:'ja'});expect(service.getState().phase).toBe('waiting');
+    await service.translate('ja');expect(service.getState().phase).toBe('ready');snapshot.revision++;await vi.advanceTimersByTimeAsync(500);expect(service.getState().phase).toBe('waiting');active=false;await vi.advanceTimersByTimeAsync(500);active=true;await vi.advanceTimersByTimeAsync(500);expect(service.getState().phase).toBe('waiting');await service.setTranslationOptions({language:'ja'});expect(service.getState().phase).toBe('waiting');
   });
   async function verified(){
     const snapshot:VerifiedComposerSnapshot={text:'你好',conversationId:'customer-a',revision:1,composing:false,scopeGeneration:1,authGeneration:1,editorIdentity:'editor',docFingerprint:'plain-doc',isPlainText:true,platformAccountScope:'vendor-a',composerId:'editor',documentGeneration:1};
@@ -185,6 +185,107 @@ describe('external draft replacement service',()=>{
     const external={onInteraction:vi.fn((listener:(event:any)=>void)=>{notify=listener;return unsubscribe;}),setInteractionOptions:vi.fn(async(_options:{shortcutEnabled:boolean})=>{}),targetInstanceId:'1:2:3',read:vi.fn(async()=>({snapshot:structuredClone(snapshot),writeVerified:true,orderEntries:[],orderViewport:{width:800,height:600,dpr:1},messageSurface:{active:true,composerRect:{x:100,y:400,width:500,height:200},toolbarRect:{x:300,y:400,width:300,height:40}}})),renew:vi.fn(async()=>{}),replace:vi.fn(async(_expected:VerifiedComposerSnapshot,text:string,authorize:()=>unknown)=>{await authorize();snapshot.text=text;snapshot.revision++;}),close:vi.fn(async()=>{})};
     vi.mocked(connectExternalComposer).mockResolvedValueOnce(external);await service.connectComposer();await service.setTranslationOptions({language:'ja'});return{snapshot,external,notify:(event:any)=>notify?.(event),unsubscribe};
   }
+  const languageKey=(snapshot:VerifiedComposerSnapshot)=>JSON.stringify(['1:2:3',snapshot.conversationId,snapshot.scopeGeneration,snapshot.platformAccountScope]);
+  it('retains a detected customer language after an unknown scan and while manual language is selected',async()=>{
+    const {snapshot}=await verified();await service.followCustomerLanguage();
+    await service.reportCustomerLanguage('en',languageKey(snapshot));await service.reportCustomerLanguage('unknown',languageKey(snapshot));
+    expect(service.getState()).toMatchObject({customerLanguage:'en',language:'en',followCustomerLanguage:true});
+    await service.setTranslationOptions({language:'ko'});await service.reportCustomerLanguage('unknown',languageKey(snapshot));
+    expect(service.getState()).toMatchObject({customerLanguage:'en',language:'ko',followCustomerLanguage:false});
+  });
+  it.each(['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','READ_FAILED'])('retains same-customer preferences through a temporary %s read failure',async code=>{
+    const {snapshot,external}=await verified();await service.reportCustomerLanguage('en',languageKey(snapshot));await service.translate('ja');
+    external.read.mockRejectedValueOnce(new Error(code));await service.readDraft();
+    expect(service.getState()).toMatchObject({preview:null,draft:null,customerLanguage:'en',language:'ja',followCustomerLanguage:false});
+    await service.readDraft();expect(service.getState()).toMatchObject({customerLanguage:'en',language:'ja',followCustomerLanguage:false,draft:{canReplace:true}});
+  });
+  it.each(['conversation','document','account'] as const)('resets customer preferences if %s changes while captures are unavailable',async change=>{
+    const {snapshot,external}=await verified();await service.reportCustomerLanguage('en',languageKey(snapshot));
+    external.read.mockRejectedValueOnce(new Error('COMPOSER_UNAVAILABLE'));await service.readDraft();
+    if(change==='conversation')snapshot.conversationId='customer-b';else if(change==='document')snapshot.documentGeneration++;else snapshot.platformAccountScope='vendor-b';
+    await service.readDraft();expect(service.getState()).toMatchObject({customerLanguage:'unknown',language:'en',followCustomerLanguage:true,preview:null});
+  });
+  it('resets preferences on a changed authenticated account after temporary identity absence',async()=>{
+    const {snapshot}=await verified();await service.reportCustomerLanguage('en',languageKey(snapshot));
+    fake.changed?.(null);expect(service.getState().language).toBe('ja');
+    fake.identity={accountScope:'psim:other',authGeneration:2,permissions:[]};fake.changed?.(fake.identity);
+    expect(service.getState()).toMatchObject({customerLanguage:'unknown',language:'en',followCustomerLanguage:true,preview:null});
+  });
+  it('detects customer language on an unsupported document but refuses automatic/manual translation and send',async()=>{
+    const {snapshot,external}=await verified();snapshot.isPlainText=false;snapshot.text='';snapshot.revision++;
+    await service.readDraft();await service.followCustomerLanguage();await service.reportCustomerLanguage('en',languageKey(snapshot));
+    expect(service.getState()).toMatchObject({customerLanguage:'en',language:'en',draft:{text:'',canReplace:false}});
+    await vi.advanceTimersByTimeAsync(2000);await service.translate('en');await service.replaceDraft();
+    expect(fake.translate).not.toHaveBeenCalled();expect(external.replace).not.toHaveBeenCalled();
+  });
+  it.each([false,true])('keeps customer language across editor remounts, with capture gap=%s',async gap=>{
+    const {snapshot,external}=await verified();await service.followCustomerLanguage();await service.reportCustomerLanguage('en',languageKey(snapshot));await service.translate('en');
+    if(gap){external.read.mockRejectedValueOnce(new Error('COMPOSER_UNAVAILABLE'));await service.readDraft();}
+    snapshot.scopeGeneration++;snapshot.editorIdentity='remounted-editor';snapshot.composerId='remounted-editor';
+    await service.readDraft();await service.reportCustomerLanguage('unknown',languageKey(snapshot));
+    expect(service.getState()).toMatchObject({customerLanguage:'en',language:'en',followCustomerLanguage:true,preview:null});
+    await service.replaceDraft();expect(external.replace).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1500);expect(fake.translate).toHaveBeenCalledTimes(2);expect(service.getState().phase).toBe('ready');
+  });
+  it('invalidates old order context when only the editor scope changes',async()=>{
+    await service.dispose();const changed=vi.fn();service=new CompanionService(native as unknown as NativeAdapter,async()=>{},changed);service.setWindowState(window);
+    const {snapshot}=await verified();await service.reportCustomerLanguage('en',languageKey(snapshot));await service.translate('ja');
+    snapshot.scopeGeneration++;await service.readDraft();
+    expect(changed).toHaveBeenCalledOnce();expect(service.getState()).toMatchObject({customerLanguage:'en',language:'ja',followCustomerLanguage:false,preview:null});
+  });
+  it('keeps manual selection and pause across a same-customer editor remount',async()=>{
+    const {snapshot}=await verified();await service.reportCustomerLanguage('en',languageKey(snapshot));await service.cancelTranslation();
+    snapshot.scopeGeneration++;snapshot.editorIdentity='remounted-editor';await service.readDraft();
+    expect(service.getState()).toMatchObject({customerLanguage:'en',language:'ja',followCustomerLanguage:false,translationPaused:true});
+    await vi.advanceTimersByTimeAsync(2000);expect(fake.translate).not.toHaveBeenCalled();
+    snapshot.documentGeneration++;await service.readDraft();expect(service.getState()).toMatchObject({customerLanguage:'unknown',followCustomerLanguage:true,translationPaused:false});
+  });
+  it('retries the current text after unsupported quote content disappears even if its snapshot returns unchanged',async()=>{
+    const {snapshot}=await verified();await service.translate('ja');const plain=structuredClone(snapshot);
+    snapshot.isPlainText=false;snapshot.text='';snapshot.docFingerprint='quoted-doc';await service.readDraft();
+    expect(service.getState().preview).toBeNull();await vi.advanceTimersByTimeAsync(1000);expect(fake.translate).toHaveBeenCalledOnce();
+    Object.assign(snapshot,plain);await service.readDraft();await vi.advanceTimersByTimeAsync(1500);
+    expect(fake.translate).toHaveBeenCalledTimes(2);expect(service.getState().phase).toBe('ready');
+  });
+  it.each(['en','ja'] as const)('does not translate a new customer with the old %s target after a capture gap',async target=>{
+    const {snapshot,external}=await verified();await service.setTranslationOptions({language:target});await service.reportCustomerLanguage('ja',languageKey(snapshot));
+    external.read.mockRejectedValueOnce(new Error('COMPOSER_UNAVAILABLE'));await service.readDraft();
+    snapshot.conversationId='customer-b';snapshot.scopeGeneration++;
+    await service.translate(target);await vi.advanceTimersByTimeAsync(2000);
+    expect(fake.translate).not.toHaveBeenCalled();expect(service.getState()).toMatchObject({customerLanguage:'unknown',followCustomerLanguage:true,language:'en',preview:null});
+  });
+  it('adopts the fresh customer and revokes an old preview when a language report discovers a mismatch',async()=>{
+    const {snapshot}=await verified();await service.followCustomerLanguage();await service.reportCustomerLanguage('en',languageKey(snapshot));await service.translate('en');
+    const oldKey=languageKey(snapshot);snapshot.conversationId='customer-b';snapshot.scopeGeneration++;
+    await service.reportCustomerLanguage('ja',oldKey);await service.replaceDraft();
+    expect(service.getState()).toMatchObject({customerLanguage:'unknown',followCustomerLanguage:true,preview:null,draft:{text:'你好'}});
+    expect(fake.translate).toHaveBeenCalledOnce();
+  });
+  it('rejects an old language report whose editor read finishes after target change',async()=>{
+    const {snapshot,external}=await verified();let release!:(value:any)=>void;
+    external.read.mockImplementationOnce(()=>new Promise(resolve=>{release=resolve;}));
+    const pending=service.reportCustomerLanguage('en',languageKey(snapshot));await vi.waitFor(()=>expect(release).toBeTypeOf('function'));
+    service.setWindowState({...window,targetInstanceId:'other-window'});release({snapshot:structuredClone(snapshot),writeVerified:true});await pending;
+    expect(service.getState()).toMatchObject({targetInstanceId:'other-window',customerLanguage:'unknown',draft:null,preview:null});
+  });
+  it('does not start old-customer translation when the customer changes during authentication wait',async()=>{
+    const {snapshot}=await verified();let release!:()=>void;fake.sync.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve;}));
+    const pending=service.translate('ja');await vi.waitFor(()=>expect(release).toBeTypeOf('function'));
+    snapshot.conversationId='customer-b';snapshot.scopeGeneration++;release();await pending;
+    expect(fake.translate).not.toHaveBeenCalled();expect(service.getState()).toMatchObject({customerLanguage:'unknown',followCustomerLanguage:true,preview:null});
+  });
+  it('rejects a delayed completion after observed A to B to A transitions even when A returns with the exact old snapshot',async()=>{
+    const {snapshot}=await verified();const original=structuredClone(snapshot);let finish!:(value:any)=>void;
+    fake.translate.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));const pending=service.translate('ja');await vi.waitFor(()=>expect(finish).toBeTypeOf('function'));
+    snapshot.conversationId='customer-b';snapshot.scopeGeneration++;await service.readDraft();Object.assign(snapshot,original);await service.readDraft();
+    finish({data:{translated_text:'old customer result'}});await pending;await vi.advanceTimersByTimeAsync(1500);
+    expect(service.getState()).toMatchObject({customerLanguage:'unknown',followCustomerLanguage:true,preview:null});expect(fake.translate).toHaveBeenCalledOnce();
+  });
+  it('rejects replacement and clears old language when a same-text different customer is first seen by apply',async()=>{
+    const {snapshot,external}=await verified();await service.reportCustomerLanguage('ja',languageKey(snapshot));await service.translate('ja');
+    snapshot.conversationId='customer-b';snapshot.scopeGeneration++;await service.replaceDraft();
+    expect(external.replace).not.toHaveBeenCalled();expect(service.getState()).toMatchObject({customerLanguage:'unknown',followCustomerLanguage:true,preview:null});
+  });
   it('continues renewing an attached background editor every 500ms and stops after detaching',async()=>{
     const {external,unsubscribe}=await verified();service.setWindowState({...window,foreground:false,groupForeground:false});
     external.read.mockClear();await vi.advanceTimersByTimeAsync(5500);
@@ -257,11 +358,27 @@ describe('external draft replacement service',()=>{
   });
   it('retranslates after a transient message-page capture failure clears a successful preview',async()=>{
     const {external}=await verified();await service.translate('ja');external.read.mockRejectedValueOnce(new Error('MESSAGE_PAGE_INACTIVE'));
-    await vi.advanceTimersByTimeAsync(500);expect(service.getState().preview).toBeNull();await vi.advanceTimersByTimeAsync(2000);expect(fake.translate).toHaveBeenCalledOnce();expect(service.getState().followCustomerLanguage).toBe(true);await service.setTranslationOptions({language:'ja'});await vi.advanceTimersByTimeAsync(1500);expect(fake.translate).toHaveBeenCalledTimes(2);expect(service.getState().phase).toBe('ready');
+    await vi.advanceTimersByTimeAsync(500);expect(service.getState().preview).toBeNull();await vi.advanceTimersByTimeAsync(2000);expect(fake.translate).toHaveBeenCalledTimes(2);expect(service.getState().followCustomerLanguage).toBe(false);await service.setTranslationOptions({language:'ja'});await vi.advanceTimersByTimeAsync(1500);expect(fake.translate).toHaveBeenCalledTimes(2);expect(service.getState().phase).toBe('ready');
   });
   it('restores automatic translation after browser authentication is revoked and restored',async()=>{
     await verified();await service.translate('ja');const identity=fake.identity;fake.identity=null;fake.changed?.(null);expect(service.getState().preview).toBeNull();
     fake.identity=identity;fake.changed?.(identity);await vi.advanceTimersByTimeAsync(1500);expect(fake.translate).toHaveBeenCalledTimes(2);expect(service.getState().phase).toBe('ready');
+  });
+  it('completes a manual retry when fresh authentication is first discovered during that click',async()=>{
+    const {snapshot}=await verified();await service.setTranslationOptions({autoTranslate:false});
+    fake.identity=null;fake.changed?.(null);
+    const recovered={accountScope:'psim:test',authGeneration:2,permissions:[]};snapshot.authGeneration=2;
+    fake.sync.mockImplementationOnce(async()=>{fake.identity=recovered;});
+    await service.translate('ja');
+    expect(fake.translate).toHaveBeenCalledOnce();expect(fake.translate.mock.calls[0][1]).toEqual(recovered);
+    expect(service.getState()).toMatchObject({auth:'ready',accountScope:'psim:test',phase:'ready',preview:'こんにちは'});
+  });
+  it.each(['cancel','window'] as const)('does not revive a manual translate intent after %s while authenticating',async action=>{
+    await verified();await service.setTranslationOptions({autoTranslate:false});
+    let release!:()=>void;fake.sync.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve;}));
+    const pending=service.translate('ja');await vi.waitFor(()=>expect(release).toBeTypeOf('function'));
+    if(action==='cancel')await service.cancelTranslation();else service.setWindowState({...window,targetInstanceId:'new-window'});
+    release();await pending;expect(fake.translate).not.toHaveBeenCalled();
   });
 
   it.each(['language','cancel','foreground'] as const)('does not execute stale translate intent queued behind observation after %s changes',async action=>{
