@@ -5,6 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {posix} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {fingerprintFile as hash} from './file-fingerprint';
+import {createFingerprintCache,createFileFingerprintStore,type FingerprintStore} from './fingerprint-cache';
 import {fingerprintMacExecutable} from './macho-fingerprint';
 import {MACOS_PATCHED_BUILD} from './build-manifest';
 import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,assertBuildFingerprint,sameExecutablePath,type ProcessIdentity,type ListenerIdentity} from './identity';
@@ -73,10 +74,16 @@ async function listeners(port:number):Promise<{pid:number;address:string;port:nu
   }
   return[...found.values()];
 }
+let fingerprintStore:FingerprintStore|undefined;
+/** The helper's private data directory; repeated launches then skip re-reading the ~300 MB vendor archive while it starts. */
+export function configureFingerprintPersistence(file:string){fingerprintStore=createFileFingerprintStore(file);}
+// Shared by every platform instance: each connection attempt creates one, and the vendor is still loading meanwhile.
+const sharedHash=createFingerprintCache(hash,()=>fingerprintStore,'sha256');
+const sharedExecutableHash=createFingerprintCache(MACOS_PATCHED_BUILD?fingerprintMacExecutable:hash,()=>fingerprintStore,MACOS_PATCHED_BUILD?'macho-unsigned-sha256':'sha256');
 /** Read-only process/file inspection; the client is only ever started through LaunchServices so TCC stays attributed to it. */
 export class MacLaunchPlatform implements LaunchPlatform {
-  private hash=hash;
-  private executableHash=MACOS_PATCHED_BUILD?fingerprintMacExecutable:hash;
+  private hash=sharedHash;
+  private executableHash=sharedExecutableHash;
   async inspectReadOnly():Promise<VerifiedIdleSnapshot>{
     macos();
     const clients:number[]=[],main:number[]=[],installers:number[]=[];

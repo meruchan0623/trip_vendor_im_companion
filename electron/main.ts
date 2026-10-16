@@ -12,6 +12,7 @@ import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
 import { ResidentConnection } from './resident-connection';
 import {vendorOwnerPID,watchVendorOwner} from './vendor-owner';
 import {createLaunchPlatform} from '../runtime/platform';
+import {configureFingerprintPersistence} from '../runtime/macos-platform';
 import {VERIFIED_RUNTIME_BUILD} from '../runtime/build-manifest';
 
 // The only local window is on-demand settings; daily business UI belongs to the verified merchant BrowserView.
@@ -125,6 +126,7 @@ async function cleanup():Promise<void> {
   try{await service?.dispose();}finally{native?.stop();}
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
+  if(process.platform==='darwin'&&!smokeMode)configureFingerprintPersistence(join(app.getPath('userData'),'cache','vendor-fingerprints.json'));
   const ownerPID=vendorOwnerPID(process.argv);
   if(ownerPID!==undefined)await adoptVendorOwner(ownerPID);
   native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},undefined,undefined,undefined,()=>resident?.notifyTargetAvailable());
