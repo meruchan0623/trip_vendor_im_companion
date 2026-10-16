@@ -1,12 +1,17 @@
 import{describe,it,expect,vi}from'vitest';
-import{readFile}from'node:fs/promises';
 import{createHash}from'node:crypto';
 import{VERIFIED_RUNTIME_BUILD,type BuildFingerprint}from'../../runtime/identity';
 import{LiveRuntimeDriver}from'../../runtime/driver';
 import{RuntimeAttachment}from'../../runtime/attachment';
 import{LoopbackCDPTransport,approvedSocketURL,type CDPEvent,type EventCDPTransport}from'../../runtime/transport';
-const html=await readFile('work/runtime-investigation/source/dist/src/pages/imPlus/index.html','utf8');
-const renderer=await readFile('work/runtime-investigation/source/dist/js/imWindow-DfcqWwN2.js','utf8');
+// This fake-wire suite exercises byte verification without requiring a private vendor dump.
+const {html,renderer}=vi.hoisted(()=>({html:'<!doctype html><div id="root"></div>',renderer:'/* deterministic vendor renderer fixture */'}));
+vi.mock('../../runtime/build-manifest',async importOriginal=>{
+  const original=await importOriginal<typeof import('../../runtime/build-manifest')>();
+  const {createHash}=await import('node:crypto');
+  const digest=(value:string)=>createHash('sha256').update(value).digest('hex');
+  return {...original,VERIFIED_RUNTIME_BUILD:{...original.VERIFIED_RUNTIME_BUILD,htmlSha256:digest(html),rendererSha256:digest(renderer)}};
+});
 const fingerprint:BuildFingerprint={executable:VERIFIED_RUNTIME_BUILD.executable,executableVersion:VERIFIED_RUNTIME_BUILD.executableVersion,packageVersion:VERIFIED_RUNTIME_BUILD.packageVersion,aresVersion:VERIFIED_RUNTIME_BUILD.aresVersion,executableSha256:VERIFIED_RUNTIME_BUILD.executableSha256,asarSha256:VERIFIED_RUNTIME_BUILD.asarSha256,htmlSha256:VERIFIED_RUNTIME_BUILD.htmlSha256,rendererSha256:VERIFIED_RUNTIME_BUILD.rendererSha256};
 const bundle='/* own factory test fixture */',hash=createHash('sha256').update(bundle).digest('hex');
 class FakeWire implements EventCDPTransport{
