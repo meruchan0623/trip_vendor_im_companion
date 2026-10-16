@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type Server, type Socket } from 'node:net';
-import { mkdir, writeFile, unlink } from 'node:fs/promises';
+import { chmod, mkdir, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import type { OutboundBody, OutboundResponse, PsimIdentity } from '../src/shared/workbench';
@@ -33,7 +33,7 @@ export class BrowserSessionService {
     this.discovery=join(directory,'session.json');
     const endpoint=options.endpoint??`\\\\.\\pipe\\travel-merchant-browser-${randomUUID()}`;
     this.server=createServer(socket=>this.connect(socket));
-    this.ready=(async()=>{await mkdir(directory,{recursive:true});if(options.restrictDirectory)await options.restrictDirectory(directory);else if(process.platform==='win32')await this.restrict(directory);await new Promise<void>((resolve,reject)=>{this.server.once('error',reject);this.server.listen(endpoint,()=>{this.server.removeListener('error',reject);resolve();});});if(this.disposed){this.server.close();return;}await writeFile(this.discovery,JSON.stringify({version:1,pipe:endpoint,capability:this.capability}),{mode:0o600});})();
+    this.ready=(async()=>{await mkdir(directory,{recursive:true});if(options.restrictDirectory)await options.restrictDirectory(directory);else if(process.platform==='win32')await this.restrict(directory);else await chmod(directory,0o700);await new Promise<void>((resolve,reject)=>{this.server.once('error',reject);this.server.listen(endpoint,()=>{this.server.removeListener('error',reject);resolve();});});if(this.disposed){this.server.close();return;}await writeFile(this.discovery,JSON.stringify({version:1,pipe:endpoint,capability:this.capability}),{mode:0o600});})();
     this.ready.then(()=>this.diagnostic('bridge_ready'),error=>{this.diagnostic('bridge_start_failed',undefined,error instanceof Error?error.message:'BROWSER_BRIDGE_UNAVAILABLE');this.revoke();});this.server.on('error',()=>{this.diagnostic('bridge_server_error');this.revoke();});
     this.poll=setInterval(()=>{if(!this.suspended)void this.sync().catch(()=>{});},options.syncIntervalMs??4000);this.poll.unref();
   }
