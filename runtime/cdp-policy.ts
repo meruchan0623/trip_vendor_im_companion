@@ -81,7 +81,7 @@ export class RuntimeCDPPolicy {
     if(result?.exceptionDetails||typeof value?.visible!=='boolean'||typeof value?.focused!=='boolean')throw new Error('ACTIVE_IM_TARGET_UNVERIFIED');
     return{visible:value.visible,focused:value.focused};
   }
-  async enableInspection(){await this.owned('Page.enable',{});await this.owned('Runtime.enable',{});await this.owned('Debugger.enable',{});}
+  async enableInspection(){await Promise.all([this.owned('Page.enable',{}),this.owned('Runtime.enable',{}),this.owned('Debugger.enable',{})]);}
   async verifyExactDocument(){
     const result=await this.owned('Page.getFrameTree',{});const frame=result?.frameTree?.frame;
     if(!frame||frame.id!==this.target.frameId||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
@@ -91,15 +91,16 @@ export class RuntimeCDPPolicy {
   async verifyRenderer(scriptId:string){if(!/^[0-9]+$/.test(scriptId))throw new Error('INVALID_SCRIPT_ID');const result=await this.owned('Debugger.getScriptSource',{scriptId});if(!result||typeof result.scriptSource!=='string'||result.scriptSource.length>8_000_000||createHash('sha256').update(result.scriptSource,'utf8').digest('hex')!==VERIFIED_RUNTIME_BUILD.rendererSha256)throw new Error('LOADED_RENDERER_HASH_MISMATCH');}
   async inspectParentCaptures():Promise<ParentCapture[]>{
     if(!this.isolatedContextId||!Number.isSafeInteger(this.target.executionContextId))throw new Error('MAIN_CONTEXT_REQUIRED');
-    const captures:ParentCapture[]=[];
-    for(const expression of ['window','document','document.documentElement','document.body'] as const){
+    const groups=await Promise.all((['window','document','document.documentElement','document.body'] as const).map(async expression=>{
+      const captures:ParentCapture[]=[];
       // Two fixed read-only inspector handles in the verified main world, so its listeners are visible.
       // Artifact evaluation and factory operations remain in our own isolated world.
       const remote=await this.owned('Runtime.evaluate',{expression,contextId:this.target.executionContextId,objectGroup:this.target.contextNonce,returnByValue:false});
       if(remote?.exceptionDetails||typeof remote?.result?.objectId!=='string')throw new Error('LISTENER_INSPECTION_UNAVAILABLE');
       try{const result=await this.owned('DOMDebugger.getEventListeners',{objectId:remote.result.objectId,depth:1,pierce:true});if(!result||!Array.isArray(result.listeners)||result.listeners.some((listener:any)=>typeof listener.type!=='string'||typeof listener.useCapture!=='boolean'))throw new Error('LISTENER_INSPECTION_UNAVAILABLE');for(const listener of result.listeners)if(listener.useCapture&&/^(keydown|keyup|keypress|beforeinput|input|paste|copy|cut|compositionstart|compositionupdate|compositionend)$/.test(listener.type))captures.push({target:expression,type:listener.type});}finally{await this.owned('Runtime.releaseObject',{objectId:remote.result.objectId});}
-    }
-    return captures;
+      return captures;
+    }));
+    return groups.flat();
   }
   async installNative(source:string,sha256:string,bindingName?:string){
     if(!Number.isSafeInteger(this.target.executionContextId)||source.length>100000||createHash('sha256').update(source).digest('hex')!==sha256)throw new Error('UNAPPROVED_NATIVE_ARTIFACT');

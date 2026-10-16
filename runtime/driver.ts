@@ -71,11 +71,12 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   }
   private current(epoch:number){if(this.invalid||this.epoch!==epoch)throw new Error('RUNTIME_TARGET_CHANGED');}
   watchInvalidation(target:RuntimeTarget,invalidate:()=>void){if(target!==this.target)throw new Error('WRONG_RUNTIME_TARGET');this.invalidators.add(invalidate);if(this.invalid)invalidate();return()=>this.invalidators.delete(invalidate);}
-  async verifyCurrentTarget(target:RuntimeTarget){
+  async verifyCurrentTarget(target:RuntimeTarget,options:{collectParentCaptures?:boolean}={}){
     if(target!==this.target)throw new Error('WRONG_RUNTIME_TARGET');const epoch=this.epoch;this.current(epoch);
     await this.verifyActiveTarget();this.current(epoch);await this.policy.attachSession();this.current(epoch);await this.policy.enableInspection();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
     const deadline=Date.now()+4000;const candidates=()=>[...this.scripts.values()].filter(script=>this.defaultContexts.has(script.context));while(candidates().length===0&&Date.now()<deadline){this.current(epoch);await pause(50);}if(candidates().length!==1||this.defaultContexts.size!==1)throw new Error('LOADED_RENDERER_NOT_UNIQUE');
-    this.target.executionContextId=[...this.defaultContexts][0];await this.policy.verifyRenderer(candidates()[0].id);this.current(epoch);await this.policy.createOwnedWorld();this.current(epoch);this.captures=await this.policy.inspectParentCaptures();this.current(epoch);
+    this.target.executionContextId=[...this.defaultContexts][0];await this.policy.verifyRenderer(candidates()[0].id);this.current(epoch);await this.policy.createOwnedWorld();this.current(epoch);// Capture listeners are optional diagnostics, not an authorization gate.
+    if(options.collectParentCaptures!==false){this.captures=await this.policy.inspectParentCaptures();this.current(epoch);}
   }
   async mountCompanion(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<void>){
     const epoch=this.epoch;this.current(epoch);if(this.mounted)throw new Error('ALREADY_ATTACHED');this.mounted=true;

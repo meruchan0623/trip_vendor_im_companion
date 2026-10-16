@@ -42,7 +42,7 @@ export async function connectExternalComposer(targetInstanceId:string,signal?:Ab
     current();
     if(typeof __RUNTIME_ARTIFACT_SOURCE__==='undefined'||typeof __RUNTIME_ARTIFACT_SHA256__==='undefined')throw new Error('RUNTIME_ARTIFACT_NOT_BUILT');
     driver=await LiveRuntimeDriver.discover(transport,verified.fingerprint,__RUNTIME_ARTIFACT_SOURCE__,__RUNTIME_ARTIFACT_SHA256__,8000);
-    mark('target-found');await driver.verifyCurrentTarget(driver.target);mark('page-verified');
+    mark('target-found');await driver.verifyCurrentTarget(driver.target,{collectParentCaptures:false});mark('page-verified');
     if(typeof __NATIVE_ARTIFACT_SOURCE__==='undefined'||typeof __NATIVE_ARTIFACT_SHA256__==='undefined')throw new Error('EDITOR_ARTIFACT_NOT_BUILT');
     const portAdapter=await driver.externalComposer(__NATIVE_ARTIFACT_SOURCE__,__NATIVE_ARTIFACT_SHA256__);
     mark('native-ready');current();signal?.removeEventListener('abort',abort);const owned=driver;
