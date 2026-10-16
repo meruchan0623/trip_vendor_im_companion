@@ -7,74 +7,182 @@ export const INPUT_SELECTOR='.chat_area-input';
 export const EDITOR_SELECTOR='.tiptap.ProseMirror.chat-editor[contenteditable="true"]';
 export const REATTACH_DEBOUNCE_MS=100;
 export const TARGET_LABELS:Record<typeof PANEL_TARGETS[number],string>={en:'English',ja:'日本語',ko:'한국어',th:'ไทย',vi:'Tiếng Việt',id:'Bahasa Indonesia',ms:'Bahasa Melayu',es:'Español',fr:'Français',de:'Deutsch',ru:'Русский',ar:'العربية','zh-TW':'繁體中文',pt:'Português',it:'Italiano'};
-const LANGUAGE_NAMES:Record<string,string>={zh:'中文',en:'英语',ja:'日语',ko:'韩语',th:'泰语',ar:'阿拉伯语',ru:'俄语',el:'希腊语',vi:'越南语',es:'西班牙语',fr:'法语',de:'德语',pt:'葡萄牙语',it:'意大利语',id:'印尼语',ms:'马来语'};
-const STATUS_TEXT={unavailable:'编辑器未就绪',idle:'等待输入',translating:'翻译中...',ready:'就绪',stale:'已过期',failed:'失败',needs_login:'需登录'} as const;
-export const PANEL_HINT='确认译文后替换草稿，再由您在原客户端发送';
+const LANGUAGE_NAMES:Record<string,string>={zh:'中文',en:'英语',ja:'日语',ko:'韩语',th:'泰语',ar:'阿拉伯语',ru:'俄语',el:'希腊语',vi:'越南语',es:'西班牙语',fr:'法语',de:'德语',pt:'葡萄牙语',it:'意大利语',id:'印尼语',ms:'马来语','zh-TW':'繁体中文'};
+type Tone='ok'|'warn'|'bad'|'busy'|'muted';
+const STATUS:Record<PanelState['status'],[string,Tone]|null>={unavailable:['编辑器未就绪','warn'],idle:null,translating:['翻译中','busy'],ready:['译文就绪','ok'],stale:['待更新','busy'],failed:['翻译失败','bad'],needs_login:null};
+export const PANEL_HINT='替换后仍需您在原客户端手动发送';
+const ORDER_RE=/^[A-Za-z0-9_-]{1,100}$/;
 const CONTAINED=['keydown','keyup','keypress','beforeinput','input','paste','copy','cut','compositionstart','compositionupdate','compositionend','click','mousedown','pointerdown'];
-const STYLE=`:host{all:initial;display:block;box-sizing:border-box;font:13px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;color:#1f2937}
-*{box-sizing:border-box;font:inherit}
-.panel{margin:0;border-top:1px solid #e5e7eb;background:#fafbff;padding:6px 10px}
-.panel.collapsed{padding:2px 10px;background:#f7f8fa}
-.row{display:flex;align-items:center;gap:8px;min-height:24px;flex-wrap:wrap}
-.title{font-weight:600;color:#4c1d95}
-.toggle{border:1px solid #c4b5fd;border-radius:10px;background:#fff;color:#6d28d9;padding:0 8px;height:20px;cursor:pointer}
-.toggle[aria-pressed="true"]{background:#7c3aed;border-color:#7c3aed;color:#fff}
-select{height:22px;border:1px solid #d1d5db;border-radius:4px;background:#fff;padding:0 4px}
-.follow{color:#6b7280;font-size:12px}
-.follow.on{color:#047857}
-.badge{border-radius:9px;padding:0 8px;font-size:12px;background:#eef2ff;color:#4338ca;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
-.badge[data-status="ready"]{background:#ecfdf5;color:#047857}
-.badge[data-status="stale"]{background:#fffbeb;color:#b45309}
-.badge[data-status="failed"],.badge[data-status="needs_login"]{background:#fef2f2;color:#b91c1c}
-.badge[data-status="translating"]{background:#f5f3ff;color:#6d28d9}
+const ICONS={
+  chevron:'<path d="m6 9 6 6 6-6"/>',receipt:'<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>',search:'<circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/>',
+  more:'<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',copy:'<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+  retry:'<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',pause:'<path d="M9 6v12M15 6v12"/>',play:'<path d="m8 5 11 7-11 7z"/>',power:'<path d="M12 3v9"/><path d="M6.3 7.3a8 8 0 1 0 11.4 0"/>',
+  lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',alert:'<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>',info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+} as const;
+const STYLE=`:host{all:initial;display:block;min-width:0;width:100%;box-sizing:border-box;
+--accent:#3a5bd9;--accent-soft:#eef1fd;--ink:#1d2433;--ink-2:#4b5568;--ink-3:#8a93a6;--line:#e3e7ee;--sunken:#f6f7fa;--hover:#eceff4;--ok:#16855a;--warn:#b26a00;--bad:#c2382f;
+font:13px/1.5 -apple-system,BlinkMacSystemFont,'PingFang SC','Segoe UI','Microsoft YaHei',sans-serif;color:var(--ink)}
+*{box-sizing:border-box;font:inherit;min-width:0}
+button{color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer;white-space:nowrap}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+button:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.panel{container-type:inline-size;background:var(--sunken);border-top:1px solid var(--line)}
+.bar{display:flex;align-items:center;gap:6px;height:36px;padding:0 10px 0 12px}
+.switch{width:28px;height:16px;border-radius:9px;background:#cfd5df;position:relative;flex:none;transition:background .15s}
+.switch::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform .15s}
+.switch[aria-checked="true"]{background:var(--accent)}.switch[aria-checked="true"]::after{transform:translateX(12px)}
+.title{font-weight:600;font-size:12.5px;white-space:nowrap;margin-right:2px}.off .title{color:var(--ink-3)}
+.chip{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border-radius:7px;color:var(--ink-2);overflow:hidden}
+.chip:hover:not(:disabled),.icon:hover:not(:disabled),.chip[aria-expanded="true"],.icon[aria-expanded="true"]{background:var(--hover);color:var(--ink)}
+.lang b{color:var(--ink);font-weight:600}.lang .arrow{color:var(--ink-3)}.lang svg{width:12px;height:12px}
+.tag{font-size:10.5px;line-height:16px;padding:0 5px;border-radius:4px;background:var(--accent-soft);color:var(--accent);font-weight:600}.tag.manual{background:#f1f2f5;color:var(--ink-2)}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;max-width:260px}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.badge span{overflow:hidden;text-overflow:ellipsis}
+.badge[data-tone="ok"]{color:var(--ok)}.badge[data-tone="warn"]{color:var(--warn)}.badge[data-tone="bad"]{color:var(--bad)}.badge[data-tone="busy"]::before{animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.25}}
 .spacer{flex:1}
-.preview{margin-top:6px;max-height:96px;overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid #e5e7eb;border-radius:6px;background:#fff;padding:4px 8px;min-height:26px}
-.preview.empty{color:#9ca3af}
-.preview.stale{color:#9ca3af;text-decoration:line-through}
-.actions{margin-top:6px}
-button.act{height:24px;border:1px solid #d1d5db;border-radius:4px;background:#fff;color:#374151;padding:0 10px;cursor:pointer}
-button.act.primary{background:#7c3aed;border-color:#7c3aed;color:#fff}
-button.act:disabled{opacity:.45;cursor:not-allowed}
-.hint{color:#9ca3af;font-size:12px}
-.order{border:1px dashed #a855f7;border-radius:4px;background:#efe2ff;color:#6815a8;padding:0 8px;height:22px;cursor:pointer;white-space:nowrap}
-.order:hover,.order:focus-visible{background:#e2ccff}
-.collapsed .preview,.collapsed .actions{display:none}
+.icon{width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--ink-2);flex:none}
+.find{margin-right:-4px}
+.order .num{font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.body{padding:0 10px 10px}.off .body{display:none}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}.card.ready{border-color:#c9d3f5}
+.stalebar{display:flex;align-items:center;gap:6px;padding:6px 12px 0;font-size:11.5px;color:var(--warn)}
+.stalebar::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1s infinite}
+.preview{padding:9px 12px 4px;min-height:38px;max-height:min(120px,20vh);overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px;line-height:1.55}
+.preview.empty{color:var(--ink-3);font-size:13px}.preview.stale{color:var(--ink-3)}
+.skeleton{padding:12px 12px 6px;display:grid;gap:7px}
+.skeleton i{height:9px;border-radius:5px;background:linear-gradient(90deg,#eef0f4 25%,#f7f8fa 50%,#eef0f4 75%);background-size:200% 100%;animation:shimmer 1.1s linear infinite}
+.skeleton i+i{width:62%}
+@keyframes shimmer{to{background-position:-200% 0}}
+.foot{display:flex;align-items:center;gap:8px;padding:4px 6px 6px 12px;min-height:38px}
+.meta{flex:1;font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.buttons{display:flex;align-items:center;gap:2px;flex:none}
+.ghost{height:28px;padding:0 8px;border-radius:7px;display:inline-flex;align-items:center;gap:5px;color:var(--ink-2);font-size:12.5px}
+.ghost:hover:not(:disabled){background:#f0f2f6;color:var(--ink)}
+.primary{height:28px;padding:0 6px 0 11px;margin-left:4px;border-radius:7px;display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#fff;font-weight:600;font-size:12.5px;box-shadow:0 1px 2px rgba(58,91,217,.35)}
+.primary:hover:not(:disabled){filter:brightness(1.07)}
+kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:0 5px;border-radius:4px;background:rgba(255,255,255,.18)}
+.callout{display:flex;align-items:center;gap:10px;padding:10px 12px;font-size:12.5px;color:var(--ink-2)}
+.callout svg{width:16px;height:16px}.callout p{margin:0;flex:1;overflow-wrap:anywhere}
+.callout[data-tone="info"] svg{color:var(--accent)}.callout[data-tone="warn"] svg{color:var(--warn)}.callout[data-tone="bad"] svg{color:var(--bad)}
+.solid{height:28px;padding:0 12px;border-radius:7px;background:var(--accent);color:#fff;font-weight:600}
+.outline{height:28px;padding:0 12px;border-radius:7px;border:1px solid var(--line);background:#fff;color:var(--ink)}
+.pop{position:fixed;z-index:2147483002;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.16),0 2px 6px rgba(15,23,42,.06);padding:6px;animation:rise .12s ease-out}
+@keyframes rise{from{opacity:0;transform:translateY(4px)}}
+.pop.languages{width:340px}.pop.query{width:300px;padding:10px}.pop.menu{width:236px}
+.pop h5{margin:0 2px 8px;font-size:11px;font-weight:600;color:var(--ink-3)}
+.option{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:7px;text-align:left;white-space:normal}
+.option:hover:not(:disabled){background:#f1f3f7}
+.option[aria-selected="true"],.option[aria-checked="true"]{color:var(--accent);font-weight:600}.option[aria-selected="true"]::after,.option[aria-checked="true"]::after{content:"✓";margin-left:auto}
+.option.mode span{display:grid;gap:1px}.menu .label{padding:4px 8px 2px;font-size:11px;color:var(--ink-3)}
+.option small{color:var(--ink-3);font-weight:400;font-size:11.5px}
+.option.follow{padding:9px 8px}.option.follow span{display:grid;gap:1px}
+.separator{height:1px;background:var(--line);margin:4px 2px}
+.search{display:flex;align-items:center;gap:6px;margin:2px 2px 6px;padding:0 8px;height:32px;border-radius:8px;background:var(--sunken);color:var(--ink-3)}
+.search input{flex:1;border:0;background:none;color:var(--ink);outline:none}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;max-height:220px;overflow:auto}
+.field{display:flex;gap:6px}
+.field input{flex:1;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:8px;outline:none;color:var(--ink);background:#fff}
+.field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.field button{height:32px;padding:0 12px;border-radius:8px;background:var(--ink);color:#fff;font-weight:600}
+.note{font-size:11px;color:var(--ink-3);margin:8px 2px 0}.note.error{color:var(--bad)}
+@container (max-width:560px){.title,.badge span,.ghost span{display:none}.order .num{max-width:72px}}
+@container (max-width:380px){.order .num,.meta,kbd{display:none}.foot{justify-content:flex-end}.lang{padding:0 6px}}
+@media (max-height:650px){.preview{max-height:64px}}
 [hidden]{display:none!important}`;
 export interface PanelBridge {invoke(action:string,args?:unknown[]):Promise<void>}
 export interface OutboundPanel {render(state:PanelState):void;setOrder(order:string|undefined):void;attach():boolean;readonly host:HTMLElement;readonly editor:HTMLElement|undefined;dispose():void}
-/** `openOrder` opens the TSim operator window for the conversation's order number (shown as a chip that stays visible when collapsed). */
+type Popover='languages'|'query'|'menu';
+/** `openOrder` opens the TSim operator window: the detected order chip opens directly, the search button queries any other identifier. */
 export function createOutboundPanel(document:Document,bridge:PanelBridge,initial:PanelState,hooks:{openOrder?(order:string,identifierType?:OperatorIdentifierType):void;orderUnavailableReason?:string}={}):OutboundPanel{
   const unavailableReason=hooks.orderUnavailableReason??(!hooks.openOrder?'订单查询不可用：尚未连接 TSim 内嵌页面':undefined);
-  const view=document.defaultView!;let state=initial,disposed=false,composing=false,editor:HTMLElement|undefined,timer:number|undefined,notice='',noticeTimer:number|undefined;
+  const view=document.defaultView!;let state=initial,disposed=false,composing=false,editor:HTMLElement|undefined,timer:number|undefined,notice='',noticeTimer:number|undefined,open:Popover|null=null,orderValue:string|undefined;
   const host=document.createElement('div');host.id=PANEL_HOST_ID;host.setAttribute('data-tsim-owned','1');host.setAttribute('aria-label','出站翻译');
   const contain=(event:Event)=>event.stopPropagation();CONTAINED.forEach(type=>host.addEventListener(type,contain));
-  const shadow=host.attachShadow({mode:'open'});const make=<K extends keyof HTMLElementTagNameMap>(tag:K,className='',text='')=>{const node=document.createElement(tag);if(className)node.className=className;if(text)node.textContent=text;return node;};
+  const shadow=host.attachShadow({mode:'open'});
+  const make=<K extends keyof HTMLElementTagNameMap>(tag:K,className='',text='')=>{const node=document.createElement(tag);if(className)node.className=className;if(text)node.textContent=text;return node;};
+  const button=(className:string,text='',title='')=>{const node=make('button',className,text);node.type='button';if(title)node.title=title;return node;};
+  const icon=(name:keyof typeof ICONS)=>{const node=make('span');node.style.display='contents';node.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;return node;};
   const style=make('style');style.textContent=STYLE;const panel=make('div','panel');
-  const header=make('div','row'),title=make('span','title','出站翻译'),toggle=make('button','toggle'),select=make('select'),follow=make('span','follow'),badge=make('span','badge'),spacer=make('span','spacer'),login=make('button','act','打开登录'),order=make('button','order');let orderValue:string|undefined;
-  toggle.type='button';login.type='button';order.type='button';order.hidden=true;select.setAttribute('aria-label','目标语言');const automatic=make('option','','自动跟随客户语言');automatic.value='auto';select.append(automatic);for(const target of PANEL_TARGETS){const option=make('option','',`${TARGET_LABELS[target]} (${target})`);option.value=target;select.append(option);}
-  const query=make('input'),queryButton=make('button','order','查询标识');query.type='text';query.placeholder='订单 ID / 已选标识';query.setAttribute('aria-label','明确输入或选择要查询的标识');query.maxLength=100;query.disabled=!!unavailableReason;queryButton.disabled=!!unavailableReason;queryButton.title=unavailableReason??'';if(unavailableReason)queryButton.textContent='订单查询不可用';query.style.width='160px';queryButton.type='button';query.hidden=queryButton.hidden=false;
-  queryButton.addEventListener('mousedown',()=>{const selection=document.getSelection()?.toString().trim();if(selection&&/^[A-Za-z0-9_-]{1,100}$/.test(selection))query.value=selection;});
-  queryButton.addEventListener('click',()=>{const value=query.value.trim();if(!disposed&&/^[A-Za-z0-9_-]{1,100}$/.test(value)){hooks.openOrder?.(value);}else flash('请输入或选中明确的订单标识');});
-  header.append(title,toggle,select,follow,badge,spacer,order,query,queryButton,login);
-  const preview=make('div','preview');preview.setAttribute('aria-live','polite');
-  const actions=make('div','row actions'),retry=make('button','act','重试'),pause=make('button','act','暂停翻译'),copy=make('button','act','复制译文'),replace=make('button','act','替换原文'),hint=make('span','hint',PANEL_HINT);
-  for(const button of [retry,pause,copy,replace])button.type='button';actions.append(retry,pause,copy,replace,make('span','spacer'),hint);
-  panel.append(header,preview,actions);shadow.append(style,panel);
-  const act=(action:string,args:unknown[]=[])=>{if(disposed)return;void bridge.invoke(action,args).catch(()=>{if(!disposed)flash('操作未完成，请检查连接或重新登录');});};
+  // Bar: switch, language, status, other-order search, detected order, more.
+  const bar=make('div','bar'),toggle=button('switch'),title=make('span','title','出站翻译');toggle.setAttribute('role','switch');
+  const lang=button('chip lang'),langText=make('span'),langTag=make('span','tag');lang.setAttribute('aria-haspopup','listbox');lang.setAttribute('aria-label','目标语言');lang.append(langText,langTag,icon('chevron'));
+  const badge=make('span','badge'),badgeText=make('span');badge.setAttribute('role','status');badge.append(badgeText);
+  const find=button('icon find','','查询其他订单');find.setAttribute('aria-label','查询其他订单');find.setAttribute('aria-haspopup','dialog');find.append(icon('search'));
+  const order=button('chip order'),orderNumber=make('span','num');order.hidden=true;
+  const more=button('icon more','','更多');more.setAttribute('aria-label','更多');more.setAttribute('aria-haspopup','menu');more.append(icon('more'));
+  bar.append(toggle,title,lang,badge,make('span','spacer'),find,order,more);
+  // Body: one card that shows either the preview, a skeleton or a callout.
+  const body=make('div','body'),card=make('div','card'),stalebar=make('div','stalebar','草稿已修改，等待更新译文'),preview=make('div','preview'),skeleton=make('div','skeleton');preview.setAttribute('aria-live','polite');skeleton.append(make('i'),make('i'));
+  const callout=make('div','callout'),calloutIcon=make('span'),calloutText=make('p'),login=button('solid login','登录 TSim'),resume=button('outline','恢复翻译'),retryFailed=button('outline','重试');calloutIcon.style.display='contents';callout.append(calloutIcon,calloutText,login,resume,retryFailed);
+  const foot=make('div','foot'),meta=make('span','meta'),source=make('span'),hint=make('span','hint',PANEL_HINT),buttons=make('div','buttons');meta.append(source,hint);
+  const retry=button('ghost','','重新翻译'),copy=button('ghost','','复制译文'),replace=button('primary');retry.append(icon('retry'),make('span','','重试'));copy.append(icon('copy'),make('span','','复制'));retry.setAttribute('aria-label','重试');copy.setAttribute('aria-label','复制译文');
+  const mac=/Mac|iPhone|iPad|iPod/i.test(view.navigator.platform||view.navigator.userAgent);
+  const shortcut=mac?'⌘ + ⌥ + Enter':'Ctrl + Alt + Enter';
+  replace.append(make('span','','替换草稿'),make('kbd','',mac?'⌘⌥↵':'Ctrl Alt ↵'));replace.title=`替换草稿（不发送） · ${shortcut}`;replace.setAttribute('aria-keyshortcuts',mac?'Meta+Alt+Enter':'Control+Alt+Enter');
+  buttons.append(retry,copy,replace);foot.append(meta,buttons);card.append(stalebar,preview,skeleton,callout,foot);body.append(card);
+  // Popovers are fixed-positioned outside the size container so a clipping vendor ancestor cannot hide them.
+  const languages=make('div','pop languages'),follow=button('option follow'),followText=make('span'),followLabel=make('span','','跟随客户语言'),followLang=make('small');languages.setAttribute('role','listbox');languages.setAttribute('aria-label','目标语言');follow.setAttribute('role','option');followText.append(followLabel,followLang);follow.append(followText);
+  const search=make('div','search'),searchInput=make('input'),grid=make('div','grid');searchInput.placeholder='搜索语言';searchInput.setAttribute('aria-label','搜索语言');search.append(icon('search'),searchInput);
+  const options=PANEL_TARGETS.map(target=>{const option=button('option');option.setAttribute('role','option');option.dataset.lang=target;option.append(LANGUAGE_NAMES[target]??target,' ',make('small','',TARGET_LABELS[target]));grid.append(option);return option;});
+  languages.append(follow,make('div','separator'),search,grid);
+  const query=make('div','pop query'),queryForm=make('form','field'),queryInput=make('input'),queryButton=button('','查询'),queryNote=make('div','note');queryButton.type='submit';query.setAttribute('role','dialog');query.setAttribute('aria-label','查询其他订单');
+  queryInput.type='text';queryInput.placeholder='输入订单 ID 或其他标识';queryInput.setAttribute('aria-label','明确输入或选择要查询的标识');queryInput.maxLength=100;queryInput.autocomplete='off';queryForm.append(queryInput,queryButton);query.append(make('h5','','查询其他订单'),queryForm,queryNote);
+  const menu=make('div','pop menu'),pause=button('option'),pauseIcon=make('span'),pauseText=make('span'),disable=button('option');menu.setAttribute('role','menu');pauseIcon.style.display='contents';pause.append(pauseIcon,pauseText);disable.append(icon('power'),'关闭出站翻译');
+  menu.append(pause,disable);
+  const popovers:Record<Popover,[HTMLElement,HTMLButtonElement]>={languages:[languages,lang],query:[query,find],menu:[menu,more]};
+  for(const [pop] of Object.values(popovers))pop.hidden=true;
+  panel.append(bar,body);shadow.append(style,panel,languages,query,menu);
+  const act=(action:string,args:unknown[]=[])=>{if(disposed)return;void bridge.invoke(action,args).catch(()=>{if(!disposed)flash('操作未完成，请检查连接或重新登录','bad');});};
   const ready=()=>!state.translationPaused&&state.enabled&&state.auth==='ready'&&state.status==='ready'&&!!state.preview&&!state.busy&&!state.draft?.composing&&!composing;
-  const flash=(text:string)=>{notice=text;view.clearTimeout(noticeTimer);noticeTimer=view.setTimeout(()=>{notice='';render(state);},1500);render(state);};
-  async function copyPreview(){const text=state.preview;if(!text||!ready())return;try{await view.navigator.clipboard.writeText(text);flash('已复制');return;}catch{/* fall back below */}const area=make('textarea');area.value=text;area.style.cssText='position:fixed;opacity:0;pointer-events:none';shadow.append(area);area.select();let ok=false;try{ok=document.execCommand('copy');}catch{ok=false;}area.remove();flash(ok?'已复制':'复制失败');}
-  toggle.addEventListener('click',()=>act('setEnabled',[!state.enabled]));
-  select.addEventListener('change',()=>select.value==='auto'?act('followCustomer'):act('setTarget',[{lang:select.value,source:'manual'}]));
+  let noticeTone:Tone='ok';
+  const flash=(text:string,tone:Tone='ok')=>{notice=text;noticeTone=tone;view.clearTimeout(noticeTimer);noticeTimer=view.setTimeout(()=>{notice='';render(state);},1500);render(state);};
+  async function copyPreview(){const text=state.preview;if(!text||!ready())return;try{await view.navigator.clipboard.writeText(text);flash('已复制');return;}catch{/* fall back below */}const area=make('textarea');area.value=text;area.style.cssText='position:fixed;opacity:0;pointer-events:none';shadow.append(area);area.select();let ok=false;try{ok=document.execCommand('copy');}catch{ok=false;}area.remove();flash(ok?'已复制':'复制失败',ok?'ok':'bad');}
+  function place(pop:HTMLElement,trigger:HTMLElement){
+    const rect=trigger.getBoundingClientRect(),bounds=host.getBoundingClientRect(),width=Math.min(pop.offsetWidth||300,view.innerWidth-16);
+    const alignRight=rect.left+rect.width/2>bounds.left+bounds.width/2;
+    const left=alignRight?Math.min(rect.right,view.innerWidth-8)-width:Math.max(8,rect.left);
+    Object.assign(pop.style,{left:`${Math.max(8,left)}px`,bottom:`${Math.max(8,view.innerHeight-rect.top+6)}px`,maxWidth:`${view.innerWidth-16}px`});
+  }
+  function setOpen(next:Popover|null){
+    if(disposed)return;open=next;
+    for(const [key,[pop,trigger]] of Object.entries(popovers) as [Popover,[HTMLElement,HTMLButtonElement]][]){const on=key===next;pop.hidden=!on;trigger.setAttribute('aria-expanded',String(on));if(on)place(pop,trigger);}
+    if(next==='languages'){searchInput.value='';filterLanguages();searchInput.focus();}
+    if(next==='query'){queryNote.classList.remove('error');queryNote.textContent=unavailableReason??(orderValue?'在 TSim 订单窗口中打开，Esc 关闭':'未识别到唯一订单 ID，可手动输入查询');queryInput.focus();}
+  }
+  const toggleOpen=(key:Popover)=>setOpen(open===key?null:key);
+  function filterLanguages(){const term=searchInput.value.trim().toLowerCase();for(const option of options){const target=option.dataset.lang!;option.hidden=!!term&&![target,TARGET_LABELS[target as typeof PANEL_TARGETS[number]].toLowerCase(),LANGUAGE_NAMES[target]??''].some(text=>text.includes(term));}}
+  function submitQuery(){const value=queryInput.value.trim();if(!disposed&&!unavailableReason&&ORDER_RE.test(value)){setOpen(null);hooks.openOrder?.(value);return;}queryNote.textContent='请输入或选中明确的订单标识（字母、数字、-、_）';queryNote.classList.add('error');}
+  toggle.addEventListener('click',()=>{setOpen(null);act('setEnabled',[!state.enabled]);});
+  lang.addEventListener('click',()=>toggleOpen('languages'));
+  more.addEventListener('click',()=>toggleOpen('menu'));
+  find.addEventListener('mousedown',()=>{const selection=document.getSelection()?.toString().trim();if(selection&&ORDER_RE.test(selection))queryInput.value=selection;});
+  find.addEventListener('click',()=>toggleOpen('query'));
+  follow.addEventListener('click',()=>{setOpen(null);act('followCustomer');});
+  for(const option of options)option.addEventListener('click',()=>{setOpen(null);act('setTarget',[{lang:option.dataset.lang,source:'manual'}]);});
+  searchInput.addEventListener('input',filterLanguages);
+  searchInput.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();options.find(option=>!option.hidden)?.click();}});
+  queryForm.addEventListener('submit',event=>{event.preventDefault();submitQuery();});
+  order.addEventListener('click',()=>{if(orderValue&&!disposed&&!unavailableReason){setOpen(null);hooks.openOrder?.(orderValue,'order_number');}});
   login.addEventListener('click',()=>act('openLogin'));
-  order.addEventListener('click',()=>{if(orderValue&&!disposed){hooks.openOrder?.(orderValue,'order_number');}});
-  function setOrder(next:string|undefined){if(next===orderValue)return;orderValue=next;order.hidden=!next;order.textContent=next?`订单 ${next}`:'';order.title=unavailableReason??(next?`在 TSim 中查询订单 ${next}`:'');order.disabled=!!unavailableReason;}
+  pause.addEventListener('click',()=>{setOpen(null);act(state.translationPaused?'resume':'cancel');});
+  disable.addEventListener('click',()=>{setOpen(null);act('setEnabled',[false]);});
+  resume.addEventListener('click',()=>act('resume'));
   retry.addEventListener('click',()=>{if(!state.translationPaused)act('retry');});
-  pause.addEventListener('click',()=>act(state.translationPaused?'resume':'cancel'));
+  retryFailed.addEventListener('click',()=>{if(!state.translationPaused)act('retry');});
   copy.addEventListener('click',()=>{void copyPreview();});
   replace.addEventListener('click',()=>{if(ready())act('apply',[{mode:'replace'}]);});
+  // Close popovers on Escape or a click elsewhere, in the panel or on the vendor page.
+  shadow.addEventListener('keydown',event=>{if((event as KeyboardEvent).key==='Escape'&&open){const [,trigger]=popovers[open];setOpen(null);trigger.focus();}});
+  shadow.addEventListener('pointerdown',event=>{if(!open)return;const path=event.composedPath();const [pop,trigger]=popovers[open];if(!path.includes(pop)&&!path.includes(trigger))setOpen(null);});
+  const onOutside=(event:Event)=>{if(open&&!event.composedPath().includes(host))setOpen(null);};
+  const onResize=()=>{if(open)setOpen(null);};
+  document.addEventListener('pointerdown',onOutside,true);view.addEventListener('resize',onResize);
   const onCompositionStart=()=>{composing=true;render(state);};const onCompositionEnd=()=>{composing=false;render(state);};
   function bindEditor(next:HTMLElement|undefined){if(next===editor)return;editor?.removeEventListener('compositionstart',onCompositionStart);editor?.removeEventListener('compositionend',onCompositionEnd);editor=next;composing=false;editor?.addEventListener('compositionstart',onCompositionStart);editor?.addEventListener('compositionend',onCompositionEnd);}
+  function setOrder(next:string|undefined){if(next===orderValue)return;orderValue=next;order.hidden=!next;order.replaceChildren(...(next?[icon('receipt'),orderNumber]:[]));orderNumber.textContent=next??'';order.title=unavailableReason??(next?`在 TSim 中查看订单 ${next}`:'');order.setAttribute('aria-label',next?`查看订单 ${next}`:'');order.disabled=!!unavailableReason;}
   /** Keep the host directly above .chat_area-input; the vendor may re-render either side at any time. */
   function attach(){
     if(disposed||document.visibilityState==='hidden')return false;const area=document.querySelector(CHAT_AREA_SELECTOR),input=area?.querySelector<HTMLElement>(INPUT_SELECTOR);
@@ -82,22 +190,51 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     if(host.parentNode!==input.parentNode||host.nextSibling!==input)input.parentNode.insertBefore(host,input);
     const editors=input.querySelectorAll<HTMLElement>(EDITOR_SELECTOR);bindEditor(editors.length===1?editors[0]:undefined);return true;
   }
+  const showCallout=(tone:'info'|'warn'|'bad',name:keyof typeof ICONS,text:string,action?:HTMLButtonElement)=>{callout.hidden=false;callout.dataset.tone=tone;calloutIcon.replaceChildren(icon(name));calloutText.textContent=text;for(const item of [login,resume,retryFailed])item.hidden=item!==action;};
   function render(next:PanelState){
-    state=next;if(disposed)return;const on=state.enabled;
-    panel.classList.toggle('collapsed',!on);toggle.textContent=on?'开':'关';toggle.setAttribute('aria-pressed',String(on));toggle.title=on?'关闭出站翻译':'开启出站翻译';
-    const selection=state.followCustomer.following?'auto':state.target;if(select.value!==selection)select.value=selection;
-    const lang=state.followCustomer.lang;follow.hidden=false;follow.classList.toggle('on',state.followCustomer.following);follow.textContent=state.followCustomer.following?`跟随客户 · ${LANGUAGE_NAMES[lang??'']??(lang==='unknown'||!lang?'待识别':lang)}`:`客户 ${LANGUAGE_NAMES[lang??'']??(lang==='unknown'||!lang?'未识别':lang)} · 已手动`;
-    badge.setAttribute('data-status',state.status);badge.textContent=notice||(state.translationPaused?'翻译已暂停':state.status==='failed'?`${STATUS_TEXT.failed}: ${state.error??'未知错误'}`:STATUS_TEXT[state.status]);badge.title=badge.textContent;
-    login.hidden=state.status!=='needs_login'&&state.auth!=='needs_login'&&state.auth!=='failed';login.disabled=state.auth==='connecting';
-    const automaticHint=state.followCustomer.following?(lang==='zh'?'客户使用中文，无需翻译；也可手动选择目标语言':!lang||lang==='unknown'?'客户语言待识别，请等待客户原文或手动选择目标语言':!PANEL_TARGETS.includes(lang as typeof PANEL_TARGETS[number])?'客户语言暂不支持自动翻译，请手动选择目标语言':''):'';
-    const text=state.preview??'';preview.textContent=text||automaticHint||(state.translationPaused?'翻译已暂停，点击恢复翻译后继续':state.status==='translating'?'翻译中...':'输入中文后自动生成译文预览');preview.classList.toggle('empty',!text);preview.classList.toggle('stale',!!text&&state.status==='stale');
-    const usable=ready();copy.disabled=!usable;replace.disabled=!usable;
-    pause.textContent=state.translationPaused?'恢复翻译':'暂停翻译';pause.disabled=!on||state.auth==='connecting';
-    retry.disabled=state.followCustomer.following&&(!state.followCustomer.lang||!PANEL_TARGETS.includes(state.followCustomer.lang as typeof PANEL_TARGETS[number]))||!!state.translationPaused||!on||state.busy||state.auth!=='ready'||!state.draft?.text.trim()||state.status==='translating';
+    state=next;if(disposed)return;const on=state.enabled,paused=!!state.translationPaused;
+    if(!on&&open&&open!=='query')setOpen(null);
+    panel.classList.toggle('off',!on);toggle.setAttribute('aria-checked',String(on));toggle.title=on?'关闭出站翻译':'开启出站翻译';toggle.setAttribute('aria-label',toggle.title);lang.hidden=!on;more.hidden=!on;
+    // Language chip and list.
+    const following=state.followCustomer.following,customer=state.followCustomer.lang,customerName=LANGUAGE_NAMES[customer??'']??(customer==='unknown'||!customer?'待识别':customer);
+    const supported=!!customer&&PANEL_TARGETS.includes(customer as typeof PANEL_TARGETS[number]),targetName=LANGUAGE_NAMES[state.target]??state.target;
+    langText.replaceChildren();
+    if(following&&customer==='zh')langText.append(make('b','','中文客户'));
+    else{const shown=following?(supported?customerName:'待定'):targetName;langText.append('中文 ',make('span','arrow','→'),' ',make('b','',shown));}
+    langTag.textContent=following?'自动':'手动';langTag.classList.toggle('manual',!following);
+    lang.title=following?`自动跟随客户语言：${customerName}`:`手动目标：${targetName}；客户语言：${customerName}`;
+    follow.setAttribute('aria-selected',String(following));followLang.textContent=`当前识别：${customerName}${customer==='zh'?'（无需翻译）':''}`;
+    for(const option of options)option.setAttribute('aria-selected',String(!following&&option.dataset.lang===state.target));
+    pauseIcon.replaceChildren(icon(paused?'play':'pause'));pauseText.textContent=paused?'恢复翻译':'暂停翻译';pause.disabled=!on||state.auth==='connecting';
+    // Status badge.
+    const status:[string,Tone]|null=notice?[notice,noticeTone]:!on?null:state.auth==='connecting'?['正在连接…','busy']:state.auth==='needs_login'?['需登录','warn']:state.auth==='failed'?['连接失败','bad']:paused?['翻译已暂停','warn']:STATUS[state.status];
+    badge.hidden=!status;badgeText.textContent=status?.[0]??'';badge.dataset.tone=status?.[1]??'muted';badge.title=badgeText.textContent;
+    // Card content.
+    const text=state.preview??'',stale=!!text&&(state.status==='stale'||state.status==='translating');
+    callout.hidden=true;preview.hidden=skeleton.hidden=foot.hidden=stalebar.hidden=true;
+    const automaticHint=following&&!text?(customer==='zh'?'客户使用中文，无需翻译；如需翻译，请在左上角手动选择语言':!customer||customer==='unknown'?'客户语言待识别，请等待客户发送消息，或手动选择目标语言':!supported?`客户语言（${customerName}）暂不支持自动翻译，请手动选择目标语言`:''):'';
+    if(state.auth==='connecting'){skeleton.hidden=foot.hidden=false;source.textContent='正在连接 TSim 登录服务，请稍候';}
+    else if(state.auth==='needs_login')showCallout('info','lock','请先登录 TSim，登录成功后将自动翻译当前草稿',login);
+    else if(state.auth==='failed')showCallout('bad','alert',state.error||'登录服务连接失败，请稍后重试');
+    else if(paused)showCallout('warn','pause','翻译已暂停，草稿不会发送到翻译服务',resume);
+    else if(automaticHint)showCallout(customer==='zh'?'info':'warn','info',automaticHint);
+    else if(state.status==='failed')showCallout('bad','alert',`翻译失败：${state.error??'未知错误'}`,retryFailed);
+    else if(state.status==='unavailable')showCallout('warn','alert','未找到可用的回复编辑器，请点击回复框后重试');
+    else if(state.status==='translating'&&!text){skeleton.hidden=foot.hidden=false;source.textContent=`正在翻译为${following?customerName:targetName}…`;}
+    else{
+      preview.hidden=foot.hidden=false;stalebar.hidden=!stale;
+      preview.textContent=text||'输入中文后自动生成译文预览';preview.classList.toggle('empty',!text);preview.classList.toggle('stale',stale);
+      source.textContent=text?(following?`根据客户最近消息识别为${customerName} · `:`手动指定${targetName} · `):'';
+    }
+    hint.hidden=!text||stale;
+    const usable=ready();card.classList.toggle('ready',usable);copy.disabled=!usable;replace.disabled=!usable;
+    retry.disabled=retryFailed.disabled=following&&!supported||paused||!on||state.busy||state.auth!=='ready'||!state.draft?.text.trim()||state.status==='translating';
+    // Order controls.
+    find.disabled=!!unavailableReason;find.title=unavailableReason??'查询其他订单';queryInput.disabled=queryButton.disabled=!!unavailableReason;
   }
   const schedule=()=>{if(disposed||document.visibilityState==='hidden')return;view.clearTimeout(timer);timer=view.setTimeout(attach,REATTACH_DEBOUNCE_MS);};
   const observer=new view.MutationObserver(mutations=>{if(mutations.every(mutation=>{const target=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;const changed=[...mutation.addedNodes,...mutation.removedNodes];return !!target?.closest('[data-tsim-owned="1"]')||changed.length>0&&changed.every(node=>node===host);}))return;schedule();});
-  const onVisibility=()=>{view.clearTimeout(timer);if(document.visibilityState!=='hidden')attach();};document.addEventListener('visibilitychange',onVisibility);
+  const onVisibility=()=>{view.clearTimeout(timer);if(document.visibilityState==='hidden')setOpen(null);else attach();};document.addEventListener('visibilitychange',onVisibility);
   render(state);attach();if(document.body)observer.observe(document.body,{childList:true,subtree:true});
-  return{render,setOrder,attach,host,get editor(){return editor;},dispose(){if(disposed)return;disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
+  return{render,setOrder,attach,host,get editor(){return editor;},dispose(){if(disposed)return;setOpen(null);disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);document.removeEventListener('pointerdown',onOutside,true);view.removeEventListener('resize',onResize);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
 }
