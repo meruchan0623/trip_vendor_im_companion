@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NativeAdapter, NativeDraftSnapshot, WindowState } from '../electron/native-adapter';
-const fake=vi.hoisted(()=>({identity:{accountScope:'psim:test',authGeneration:1,permissions:[]} as {accountScope:string;authGeneration:number;permissions:string[]}|null,changed:undefined as undefined|((identity:any)=>void),translate:vi.fn(),sync:vi.fn(),openLogin:vi.fn(),backgroundPolling:vi.fn(),sessionOptions:undefined as undefined|{backgroundPolling?:boolean}}));
+const fake=vi.hoisted(()=>({identity:{accountScope:'psim:test',authGeneration:1,permissions:[]} as {accountScope:string;authGeneration:number;permissions:string[]}|null,changed:undefined as undefined|((identity:any)=>void),translate:vi.fn(),sync:vi.fn(),openLogin:vi.fn(),backgroundPolling:vi.fn(),sessionOptions:undefined as undefined|{backgroundPolling?:boolean;onStatus?:(status:'connecting'|'needs_login'|'ready'|'failed',errorCode?:string)=>void}}));
 vi.mock('../electron/browser-profile-session',()=>({BrowserProfileSessionService:class{
   private observed:string|undefined;
   constructor(changed:(identity:any)=>void,options:{backgroundPolling?:boolean}){fake.changed=changed;fake.sessionOptions=options;}
   setBackgroundPolling(enabled:boolean){fake.backgroundPolling(enabled);}
   identity(){return fake.identity;}
-  async sync(){await fake.sync();const value=JSON.stringify(fake.identity);if(value!==this.observed){this.observed=value;fake.changed?.(fake.identity);}}
-  translate(...args:unknown[]){return fake.translate(...args);}dispose(){}logout(){fake.identity=null;fake.changed?.(null);return Promise.resolve();}openLogin(){return fake.openLogin();}
+  async sync(){await fake.sync();const value=JSON.stringify(fake.identity);if(value!==this.observed){this.observed=value;fake.changed?.(fake.identity);fake.sessionOptions?.onStatus?.(fake.identity?'ready':'needs_login');}}
+  translate(...args:unknown[]){return fake.translate(...args);}dispose(){}logout(){fake.identity=null;fake.changed?.(null);fake.sessionOptions?.onStatus?.('needs_login');return Promise.resolve();}openLogin(){return fake.openLogin();}
 }}));
 vi.mock('../electron/external-composer',()=>({connectExternalComposer:vi.fn()}));
 import { CompanionService } from '../electron/companion-service';
@@ -39,6 +39,24 @@ describe('external draft replacement service',()=>{
     await service.dispose();expect(vi.getTimerCount()).toBe(0);expect(fake.backgroundPolling).toHaveBeenLastCalledWith(false);
     service.setWindowState(window);await vi.advanceTimersByTimeAsync(60000);expect(vi.getTimerCount()).toBe(0);expect(native.readDraft).toHaveBeenCalledTimes(2);
   });
+  it('starts with connecting until the first browser scan completes',async()=>{
+    await service.dispose();let release!:()=>void;fake.sync.mockImplementationOnce(()=>new Promise<void>(resolve=>{release=resolve;}));
+    service=new CompanionService(native as unknown as NativeAdapter,async()=>{});expect(service.getState().auth).toBe('connecting');
+    release();await Promise.resolve();await Promise.resolve();expect(service.getState().auth).toBe('ready');
+  });
+  it('retains permission failures as failed and clears their error on background recovery',async()=>{
+    await Promise.resolve();await Promise.resolve();fake.identity=null;fake.changed?.(null);
+    expect(service.getState().auth).toBe('connecting');
+    fake.sessionOptions?.onStatus?.('failed','BROWSER_SESSION_ACCESS_DENIED');
+    expect(service.getState()).toMatchObject({auth:'failed',phase:'failed'});expect(service.getState().error).toContain('系统阻止读取浏览器登录态');
+    service.reportBrowserFailure('BROWSER_PLACEMENT_FAILED');expect(service.getState().error).toContain('系统阻止读取浏览器登录态');
+    fake.identity={accountScope:'psim:test',authGeneration:2,permissions:[]};fake.changed?.(fake.identity);fake.sessionOptions?.onStatus?.('ready');
+    expect(service.getState()).toMatchObject({auth:'ready',phase:'idle',error:null});
+  });
+  it('shows needs_login only after a completed no-session scan',async()=>{
+    await Promise.resolve();await Promise.resolve();fake.identity=null;fake.changed?.(null);fake.sessionOptions?.onStatus?.('needs_login');
+    expect(service.getState()).toMatchObject({auth:'needs_login',error:null});
+  });
   it('discovers the existing browser identity at startup and opens only the browser session entry',async()=>{
     await Promise.resolve();await Promise.resolve();
     expect(fake.sync).toHaveBeenCalledOnce();expect(service.getState()).toMatchObject({auth:'ready',accountScope:'psim:test'});
@@ -52,7 +70,7 @@ describe('external draft replacement service',()=>{
   it('revokes a delayed translation when the browser session changes',async()=>{
     let complete!:(value:any)=>void;fake.translate.mockImplementation(()=>new Promise(resolve=>{complete=resolve;}));
     const pending=service.translate('ja');await vi.waitFor(()=>expect(fake.translate).toHaveBeenCalled());
-    fake.identity=null;fake.changed?.(null);complete({success:true,data:{translated_text:'旧账户译文'}});await pending;
+    fake.identity=null;fake.changed?.(null);fake.sessionOptions?.onStatus?.('needs_login');complete({success:true,data:{translated_text:'旧账户译文'}});await pending;
     expect(service.getState()).toMatchObject({auth:'needs_login',preview:null});expect(native.replaceDraft).not.toHaveBeenCalled();
   });
   it('reads the source from the real textbox and replaces only a reviewed response with readback',async()=>{

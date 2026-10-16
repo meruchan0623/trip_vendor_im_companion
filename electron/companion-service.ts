@@ -11,10 +11,22 @@ type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
 const messages:Record<string,string>={
   MESSAGE_PAGE_INACTIVE:'请先切换到旅游商家的“消息”页面并打开客户会话。',
-  PSIM_LOGIN_REQUIRED:'请在浏览器中登录 TSim 客服页面，再连接浏览器会话。',
+  PSIM_LOGIN_REQUIRED:'请点击请求登录，登录 TSim 后将自动保存会话。',
+  SESSION_STORAGE_ENCRYPTION_UNAVAILABLE:'系统安全存储不可用，请解锁系统钥匙串后重试。',
+  SESSION_STORAGE_CORRUPT:'保存的登录态无法解密，请在账户设置中重新登录。',
+  SESSION_STORAGE_INVALID:'保存的登录态无效，请在账户设置中重新登录。',
+  SESSION_STORAGE_READ_FAILED:'无法读取已保存的登录态，请检查本机存储后重试。',
+  SESSION_STORAGE_WRITE_FAILED:'登录态保存失败，请检查本机存储后重试。',
+  SESSION_STORAGE_CLEAR_FAILED:'登录态清除失败，请检查本机存储后重试。',
+  PSIM_SESSION_LOAD_FAILED:'无法读取已保存的登录态，请重试或重新登录。',
+  PSIM_SESSION_SAVE_FAILED:'登录态保存失败，请检查本机存储后重试。',
+  PSIM_SESSION_CLEAR_FAILED:'登录态清除失败，请检查本机存储后重试。',
   BROWSER_BRIDGE_UNAVAILABLE:'未读取到浏览器 TSim 会话，请确认已在 Edge 或 Chrome 登录。',
+  BROWSER_SESSION_ACCESS_DENIED:'系统阻止读取浏览器登录态。请在系统隐私设置中允许旅游商家助手访问浏览器数据，再重试。',
+  SERVICE_UNAVAILABLE:'暂时无法核验 TSim 登录态，请检查网络后重试。',
   BROWSER_SESSION_STORAGE_INVALID:'浏览器会话数据暂不可读，请稍后重试。',
   BROWSER_SESSION_TIMEOUT:'TSim 会话核验超时，请稍后重试。',
+  BROWSER_LOGIN_OPEN_FAILED:'TSim 登录页未能打开，请检查 Edge 或 Chrome 后重试。',
   BROWSER_BRIDGE_TIMEOUT:'浏览器 TSim 会话响应超时，请检查浏览器连接后重试。',
   EXISTING_CLIENT_DEBUG_PORT_REQUIRED:'此客户端未开放编辑器连接。请使用辅助启动入口启动客户端后再连接。',
   COMPOSER_UNAVAILABLE:'未找到可读取的回复文本框，请先打开客户会话。',
@@ -27,10 +39,12 @@ const messages:Record<string,string>={
   BROWSER_PLACEMENT_FAILED:'订单浮层未能显示，请重新点击订单号。',
   BROWSER_SPACE_TOO_SMALL:'订单查询空间不足，请先放大商家窗口，再打开订单。',
 };
+export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
+export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export class CompanionService {
-  private state:StandaloneState={attached:false,targetInstanceId:null,nativeStatus:'starting',auth:'needs_login',accountScope:'unknown',draft:null,preview:null,phase:'idle',error:null,language:'en',customerLanguage:'unknown',followCustomerLanguage:true,autoTranslate:true,shortcutEnabled:true,translationPaused:false,browserOpen:false,composerSource:'unavailable',orderEntries:[],orderViewport:null,messageSurface:{active:false,composerRect:null,toolbarRect:null}};
+  private state:StandaloneState={attached:false,targetInstanceId:null,nativeStatus:'starting',auth:'connecting',accountScope:'unknown',draft:null,preview:null,phase:'idle',error:null,language:'en',customerLanguage:'unknown',followCustomerLanguage:true,autoTranslate:true,shortcutEnabled:true,translationPaused:false,browserOpen:false,composerSource:'unavailable',orderEntries:[],orderViewport:null,messageSurface:{active:false,composerRect:null,toolbarRect:null}};
   private listeners=new Set<(state:StandaloneState)=>void>();
-  private psim:BrowserProfileSessionService;
+  private psim:SessionPort;
   private sessionStarting:Promise<void>;
   private external?:ExternalComposer;
   private externalConnecting?:Promise<void>;
@@ -116,15 +130,22 @@ export class CompanionService {
   async cancelTranslation(){this.translationIntent++;this.pausedContext=this.context();this.state.translationPaused=true;this.invalidate();this.state.phase='idle';this.state.error=null;this.publish();}
   async resumeTranslation(){this.translationIntent++;this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;this.invalidate();this.state.phase='idle';this.schedule();this.publish();}
 
+  private sessionError:string|null=null;
   private sourceFailure=false;
   private surfaceMeasurementRevision=0;
-  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false){
-    this.psim=new BrowserProfileSessionService(identity=>{
-      this.clearOrder();this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.state.auth=identity?'ready':'needs_login';this.state.accountScope=identity?.accountScope??'unknown';
+  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options)){
+    this.psim=sessionFactory(identity=>{
+      this.clearOrder();this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.state.auth=identity?'ready':'connecting';this.state.accountScope=identity?.accountScope??'unknown';
       if(identity&&[messages.BROWSER_BRIDGE_UNAVAILABLE,messages.BROWSER_BRIDGE_TIMEOUT,messages.PSIM_LOGIN_REQUIRED].includes(this.state.error??'')){this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';}
       this.schedule();this.publish();
-    },{...sessionOptions,openExternal:openLoginURL,backgroundPolling:false});
-    this.sessionStarting=this.psim.sync().catch(error=>{if(!this.closed)this.fail(error);});
+    },{...sessionOptions,openExternal:openLoginURL,backgroundPolling:false,onStatus:(status,code)=>{
+      if(this.closed)return;
+      this.state.auth=status;
+      if(status==='failed'){this.sessionError=messages[code??'SERVICE_UNAVAILABLE']??messages.BROWSER_SESSION_STORAGE_INVALID;this.state.error=this.sessionError;this.state.phase='failed';}
+      else if(status==='ready'||status==='needs_login'){if(this.sessionError&&this.state.error===this.sessionError){this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';}this.sessionError=null;}
+      sessionOptions.onStatus?.(status,code);this.schedule();this.publish();
+    }});
+    this.sessionStarting=this.psim.sync().catch(error=>{if(!this.closed){if(this.state.auth!=='needs_login')this.state.auth='failed';this.fail(error);this.sessionError=this.state.error;}});
   }
   private updatePolling(){
     const active=this.state.attached&&!this.closed;
@@ -137,7 +158,7 @@ export class CompanionService {
       else if(this.external&&!this.renewing&&!this.externalConnecting){const external=this.external;this.renewing=true;void external.renew().catch(()=>this.retireComposer(external)).finally(()=>{this.renewing=false;});}
     },500);
   }
-  getState(){return structuredClone(this.state);}
+  getState(){const state=structuredClone(this.state);if(state.auth==='failed'&&this.sessionError)state.error=this.sessionError;return state;}
   getOrderStatus(){return this.order.status;}
   getSurfaceMeasurementRevision(){return this.surfaceMeasurementRevision;}
   getBrowserProfile(){return this.psim.getBrowserProfile();}
@@ -156,7 +177,7 @@ export class CompanionService {
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
   invalidate(){this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
-  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(code==='MESSAGE_PAGE_INACTIVE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.contextChanged();}this.state.error=messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
+  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(code==='MESSAGE_PAGE_INACTIVE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.contextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){

@@ -4,6 +4,23 @@ const READ_PATHS=new Set(['/agent/profile','/agent/package-query/dataplan-list',
 const POST_PATHS=new Set(['/agent/login','/agent/auth/refresh','/agent/logout','/agent/translate','/agent/package-query/perform']);
 const fail=(code:string)=>new Error(code);
 type Fetcher=(input:string,init:RequestInit)=>Promise<Response>;
+export interface OwnedSessionStore {
+  load():Promise<{accessToken:string;sessionRef:string}|null>;
+  save(value:{accessToken:string;sessionRef:string}):Promise<void>;
+  clear():Promise<void>;
+}
+type StoredSession={accessToken:string;sessionRef:string};
+function storageError(error:unknown,fallback:string):Error {const code=error instanceof Error?error.message:'';return fail(/^SESSION_STORAGE_[A-Z_]{1,60}$/.test(code)?code:fallback);}
+const REFRESH_WINDOW_MS=5*60_000,OPAQUE_REFRESH_MS=30*60_000;
+function storedSession(value:unknown):StoredSession|null {
+  if(!value||typeof value!=='object'||Array.isArray(value))return null;
+  const candidate=value as Record<string,unknown>;
+  if(Object.keys(candidate).sort().join(',')!=='accessToken,sessionRef'||typeof candidate.accessToken!=='string'||!candidate.accessToken||candidate.accessToken.length>16000||/[\s\u0000-\u001f\u007f]/.test(candidate.accessToken)||typeof candidate.sessionRef!=='string'||!candidate.sessionRef||candidate.sessionRef.length>2048||/[\u0000-\u001f\u007f]/.test(candidate.sessionRef))return null;
+  return{accessToken:candidate.accessToken,sessionRef:candidate.sessionRef};
+}
+function tokenExpiry(token:string):number|null {
+  try{const parts=token.split('.');if(parts.length!==3)return null;const payload=JSON.parse(Buffer.from(parts[1],'base64url').toString('utf8'));return typeof payload.exp==='number'&&Number.isFinite(payload.exp)&&payload.exp>0?payload.exp*1000:null;}catch{return null;}
+}
 export interface OrderProjection {identifier:string;found:boolean;fields:{label:string;value:string}[];source:'旅游商家原编号（未转换）';ownership:'tsim_cs 服务端权限核验'}
 function scalar(value:unknown):string|undefined{if(typeof value==='string'&&value.length<=1000)return value;if(typeof value==='number'&&Number.isFinite(value))return String(value);return undefined;}
 function id(value:unknown):string{const text=scalar(value);if(!text||!/^[-A-Za-z0-9_]{1,128}$/.test(text))throw fail('INVALID_READ_IDENTIFIER');return text;}
@@ -11,38 +28,91 @@ function id(value:unknown):string{const text=scalar(value);if(!text||!/^[-A-Za-z
 export class OwnedPsimService {
   private token:string|null=null;private sessionRef:string|null=null;private accountId:string|null=null;private permissions:string[]=[];private epoch=0;private verified=false;private closed=false;private authQueue=Promise.resolve();
   private active=new Set<AbortController>();
-  constructor(private fetcher:Fetcher=fetch,private changed:(identity:PsimIdentity|null)=>void=()=>{}){}
+  private revision=0;private storeQueue:Promise<void>=Promise.resolve();private refreshedAt=0;private dirty=false;
+  constructor(private fetcher:Fetcher=fetch,private changed:(identity:PsimIdentity|null)=>void=()=>{},private store?:OwnedSessionStore){}
+  private assertCurrent(revision:number){if(this.closed||revision!==this.revision)throw fail('AUTH_CHANGED');}
+  private storage<T>(operation:()=>Promise<T>):Promise<T>{const result=this.storeQueue.then(operation);this.storeQueue=result.then(()=>{},()=>{});return result;}
+  private async forgetStored(){if(!this.store)return;try{await this.storage(()=>this.store!.clear());}catch(error){throw storageError(error,'PSIM_SESSION_CLEAR_FAILED');}}
+  private async persist(revision:number){
+    if(!this.store||!this.dirty)return;this.assertCurrent(revision);const value=storedSession({accessToken:this.token,sessionRef:this.sessionRef});if(!value)throw fail('INVALID_STORED_SESSION');
+    try{await this.storage(async()=>{this.assertCurrent(revision);await this.store!.save(value);});}catch(error){if(error instanceof Error&&error.message==='AUTH_CHANGED')throw error;if(revision===this.revision)this.revoke();throw storageError(error,'PSIM_SESSION_SAVE_FAILED');}this.assertCurrent(revision);this.dirty=false;
+  }
+  private async rejectSession(){this.clear();await this.forgetStored();}
   identity():PsimIdentity|null{return this.verified&&this.token&&this.accountId?{accountScope:`psim:${this.accountId}`,authGeneration:this.epoch,permissions:[...this.permissions]}:null;}
   private revoke(){this.epoch++;this.verified=false;for(const controller of this.active)controller.abort();this.active.clear();this.changed(null);}
-  private clear(){this.revoke();this.token=null;this.sessionRef=null;this.accountId=null;this.permissions=[];}
+  private clear(){this.revoke();this.token=null;this.sessionRef=null;this.accountId=null;this.permissions=[];this.dirty=false;}
   private serialAuth<T>(operation:()=>Promise<T>):Promise<T>{const result=this.authQueue.then(()=>{if(this.closed)throw fail('OWNED_SERVICE_CLOSED');return operation();});this.authQueue=result.then(()=>{},()=>{});return result;}
   private async request(method:'GET'|'POST',path:string,body:unknown,signal?:AbortSignal,token=this.token):Promise<any>{
     const url=new URL(path,PSIM_API_ORIGIN);if(url.origin!==PSIM_API_ORIGIN||url.hash||url.username||url.password||(method==='GET'?!READ_PATHS.has(url.pathname):!POST_PATHS.has(url.pathname)))throw fail('FORBIDDEN_SERVICE_REQUEST');
     if(method==='POST'&&url.search)throw fail('FORBIDDEN_SERVICE_REQUEST');
     if(method==='GET'){const allowed=url.pathname.endsWith('/dataplan-list')?'query_id':url.pathname.endsWith('/detail')||url.pathname.endsWith('/live-detail')?'card_dataplan_id':null;for(const key of url.searchParams.keys())if(key!==allowed)throw fail('FORBIDDEN_SERVICE_REQUEST');}
-    const controller=new AbortController();this.active.add(controller);const combined=signal?AbortSignal.any([signal,controller.signal,AbortSignal.timeout(30000)]):AbortSignal.any([controller.signal,AbortSignal.timeout(30000)]);
+    const requestEpoch=this.epoch;const controller=new AbortController();this.active.add(controller);const combined=signal?AbortSignal.any([signal,controller.signal,AbortSignal.timeout(30000)]):AbortSignal.any([controller.signal,AbortSignal.timeout(30000)]);
     try{const headers:Record<string,string>={'Accept':'application/json'};if(token)headers.Authorization=`Bearer ${token}`;let payload:BodyInit|undefined;if(body instanceof FormData)payload=body;else if(body!==undefined){headers['Content-Type']='application/json';payload=JSON.stringify(body);}
       const response=await this.fetcher(url.href,{method,headers,body:payload,signal:combined,redirect:'error'});
-      if(!response.ok){if(response.status===401&&token===this.token)this.clear();throw fail(`PSIM_HTTP_${response.status}`);}
+      if(!response.ok){if((response.status===401||response.status===423)&&token&&token===this.token&&requestEpoch===this.epoch)await this.rejectSession();throw fail(`PSIM_HTTP_${response.status}`);}
       const text=await response.text();if(text.length>2_000_000)throw fail('SERVICE_RESPONSE_TOO_LARGE');try{return JSON.parse(text);}catch{throw fail('INVALID_SERVICE_RESPONSE');}
     }finally{this.active.delete(controller);}
   }
-  login(username:string,password:string):Promise<PsimIdentity>{return this.serialAuth(()=>this.loginInternal(username,password));}
-  private async loginInternal(username:string,password:string):Promise<PsimIdentity>{
+  login(username:string,password:string):Promise<PsimIdentity>{
+    // Invalidate in-flight restoration immediately, even when this login waits in the queue.
+    this.revision++;this.clear();const revision=this.revision;
+    return this.serialAuth(()=>this.loginInternal(username,password,revision));
+  }
+  private async loginInternal(username:string,password:string,revision:number):Promise<PsimIdentity>{
+    this.assertCurrent(revision);
     if(typeof username!=='string'||username.length<1||username.length>200||typeof password!=='string'||password.length<1||password.length>4096)throw fail('INVALID_LOGIN');
-    this.clear();const epoch=this.epoch;const form=new FormData();form.set('username',username);form.set('password',password);
-    const response=await this.request('POST','/agent/login',form,undefined,null);if(epoch!==this.epoch)throw fail('AUTH_CHANGED');const data=response?.data;
-    if(response?.success!==true||typeof data?.access_token!=='string'||data.access_token.length>16000||data.token_type!=='bearer'||typeof data.session_ref!=='string'||!data.session_ref)throw fail('LOGIN_RESPONSE_INVALID');
-    this.token=data.access_token;this.sessionRef=data.session_ref;
-    try{await this.validate();}catch(error){if(epoch===this.epoch)this.clear();throw error;}const identity=this.identity();if(!identity)throw fail('LOGIN_RESPONSE_INVALID');return identity;
+    await this.forgetStored();this.assertCurrent(revision);const form=new FormData();form.set('username',username);form.set('password',password);
+    const response=await this.request('POST','/agent/login',form,undefined,null);this.assertCurrent(revision);
+    const session=storedSession({accessToken:response?.data?.access_token,sessionRef:response?.data?.session_ref});
+    if(response?.success!==true||response?.data?.token_type!=='bearer'||!session)throw fail('LOGIN_RESPONSE_INVALID');
+    this.token=session.accessToken;this.sessionRef=session.sessionRef;this.refreshedAt=Date.now();this.dirty=true;
+    const identity=await this.validate();this.assertCurrent(revision);await this.persist(revision);return identity;
   }
   async validate():Promise<PsimIdentity>{
-    if(!this.token||this.closed)throw fail('PSIM_LOGIN_REQUIRED');const epoch=this.epoch;let response:any;try{response=await this.request('GET','/agent/profile',undefined);}catch(error){if(epoch===this.epoch)this.revoke();throw error;}if(epoch!==this.epoch)throw fail('AUTH_CHANGED');const data=response?.data;
-    if(response?.success!==true||data?.is_active!==true||!Array.isArray(data.permissions)||!data.permissions.every((permission:unknown)=>typeof permission==='string'&&permission.length<=100)){this.clear();throw fail('PROFILE_UNVERIFIED');}
-    const account=id(data.id),permissions=[...new Set<string>(data.permissions)].sort(),wasVerified=this.verified;let changed=false;if(this.accountId!==account||JSON.stringify(this.permissions)!==JSON.stringify(permissions)){this.epoch++;for(const controller of this.active)controller.abort();this.accountId=account;this.permissions=permissions;changed=true;}this.verified=true;if(changed||!wasVerified)this.changed(this.identity());const identity=this.identity();if(!identity)throw fail('PROFILE_UNVERIFIED');return identity;
+    if(!this.token||this.closed)throw fail('PSIM_LOGIN_REQUIRED');const epoch=this.epoch;let response:any;
+    try{response=await this.request('GET','/agent/profile',undefined);}catch(error){if(epoch===this.epoch)this.revoke();throw error;}
+    if(epoch!==this.epoch||this.closed)throw fail('AUTH_CHANGED');const data=response?.data;
+    let account:string;try{account=id(data?.id);}catch{await this.rejectSession();throw fail('PROFILE_UNVERIFIED');}
+    if(response?.success!==true||data?.is_active!==true||!Array.isArray(data.permissions)||!data.permissions.every((permission:unknown)=>typeof permission==='string'&&permission.length<=100)){await this.rejectSession();throw fail('PROFILE_UNVERIFIED');}
+    const permissions=[...new Set<string>(data.permissions)].sort(),wasVerified=this.verified;let changed=false;
+    if(this.accountId!==account||JSON.stringify(this.permissions)!==JSON.stringify(permissions)){this.epoch++;for(const controller of this.active)controller.abort();this.accountId=account;this.permissions=permissions;changed=true;}
+    this.verified=true;if(changed||!wasVerified)this.changed(this.identity());const identity=this.identity();if(!identity)throw fail('PROFILE_UNVERIFIED');return identity;
   }
-  refresh():Promise<PsimIdentity>{return this.serialAuth(async()=>{if(!this.token)throw fail('PSIM_LOGIN_REQUIRED');this.revoke();const epoch=this.epoch;const response=await this.request('POST','/agent/auth/refresh',undefined);if(epoch!==this.epoch)throw fail('AUTH_CHANGED');const data=response?.data;if(response?.success!==true||typeof data?.access_token!=='string'||data.access_token.length>16000||data.token_type!=='bearer'||typeof data.session_ref!=='string')throw fail('REFRESH_RESPONSE_INVALID');this.token=data.access_token;this.sessionRef=data.session_ref;return this.validate();});}
-  logout():Promise<void>{return this.serialAuth(async()=>{const token=this.token;this.clear();if(token)await this.request('POST','/agent/logout',undefined,undefined,token);});}
+  restore():Promise<PsimIdentity|null>{return this.serialAuth(()=>this.restoreInternal(this.revision));}
+  private async restoreInternal(revision:number):Promise<PsimIdentity|null>{
+    this.assertCurrent(revision);if(this.token)return this.validate();if(!this.store)return null;
+    let value:unknown;try{value=await this.storage(()=>this.store!.load());}catch(error){throw storageError(error,'PSIM_SESSION_LOAD_FAILED');}this.assertCurrent(revision);
+    if(value===null)return null;const session=storedSession(value);if(!session){await this.forgetStored();this.assertCurrent(revision);throw fail('INVALID_STORED_SESSION');}
+    this.token=session.accessToken;this.sessionRef=session.sessionRef;this.refreshedAt=Date.now();
+    return this.validate();
+  }
+  ensureSession():Promise<PsimIdentity|null>{return this.serialAuth(async()=>{
+    const revision=this.revision;let identity=this.token?await this.validate():await this.restoreInternal(revision);this.assertCurrent(revision);
+    if(!identity||!this.token)return null;const expiry=tokenExpiry(this.token);
+    if(expiry===null?Date.now()-this.refreshedAt>=OPAQUE_REFRESH_MS:expiry-Date.now()<=REFRESH_WINDOW_MS)identity=await this.refreshInternal(revision);
+    else await this.persist(revision);
+    return identity;
+  });}
+  refresh():Promise<PsimIdentity>{return this.serialAuth(()=>this.refreshInternal(this.revision));}
+  private async refreshInternal(revision:number):Promise<PsimIdentity>{
+    this.assertCurrent(revision);if(!this.token)throw fail('PSIM_LOGIN_REQUIRED');this.revoke();
+    const response=await this.request('POST','/agent/auth/refresh',undefined);this.assertCurrent(revision);
+    const session=storedSession({accessToken:response?.data?.access_token,sessionRef:response?.data?.session_ref});
+    if(response?.success!==true||response?.data?.token_type!=='bearer'||!session){await this.rejectSession();throw fail('REFRESH_RESPONSE_INVALID');}
+    this.token=session.accessToken;this.sessionRef=session.sessionRef;this.refreshedAt=Date.now();this.dirty=true;
+    const identity=await this.validate();this.assertCurrent(revision);await this.persist(revision);return identity;
+  }
+  logout():Promise<void>{
+    const token=this.token;this.revision++;this.clear();
+    // Queue durable deletion now, after any write that has already begun.
+    const cleared=this.forgetStored().then(()=>null,error=>error as Error);
+    return this.serialAuth(async()=>{
+      const clearError=await cleared;let remoteError:unknown;
+      // A failed disk deletion must not leave the server session active.
+      try{if(token)await this.request('POST','/agent/logout',undefined,undefined,token);}catch(error){remoteError=error;}
+      if(clearError)throw clearError;if(remoteError)throw remoteError;
+    });
+  }
   async translate(body:OutboundBody,identity:PsimIdentity,signal:AbortSignal):Promise<OutboundResponse>{
     const current=this.identity();if(!current||current.accountScope!==identity.accountScope||current.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');
     if(body.purpose!=='outbound'||body.source_lang!=='zh'||typeof body.text!=='string'||!body.text.trim()||body.text.length>20000||!/^[-a-z0-9]{1,100}$/.test(body.draft_request_id)||typeof body.composer_content_version!=='string'||body.composer_content_version.length>25000||!['zh','en','ja','ko','es','fr','de','ru','pt','it','ar','th','vi','id','ms','zh-TW'].includes(body.target_lang))throw fail('INVALID_OUTBOUND_REQUEST');
@@ -59,5 +129,5 @@ export class OwnedPsimService {
     for(const row of rows.slice(0,20)){const card=id(row?.card_dataplan_id);const detail=await this.request('GET',`/agent/package-query/detail?${new URLSearchParams({card_dataplan_id:card})}`,undefined,signal);const value=detail?.result??detail?.data;if(!value||typeof value!=='object')throw fail('ORDER_DETAIL_RESPONSE_INVALID');for(const key of details){const text=scalar(value[key]);if(text!==undefined)fields.push({label:key,value:text});}}
     if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');return{identifier:identifier.trim(),found:rows.length>0,fields,source:'旅游商家原编号（未转换）',ownership:'tsim_cs 服务端权限核验'};
   }
-  dispose(){this.closed=true;this.clear();}
+  dispose(){this.closed=true;this.revision++;this.clear();}
 }

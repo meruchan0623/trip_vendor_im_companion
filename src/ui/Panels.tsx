@@ -65,7 +65,7 @@ export function ComposerToolbar({
     notice ||
     state.error ||
     (state.auth !== "ready"
-      ? "请连接浏览器 TSim 会话"
+      ? "请连接TSim 登录态"
       : state.composerSource === "unavailable"
         ? "请连接原文本框"
         : phases[state.phase]);
@@ -255,15 +255,15 @@ export function SettingsPanel({ api, state, busy, perform }: BaseProps) {
       </section>
       <section className="settings-section" aria-label="账户设置">
         <div className="account-row">
-          <span>浏览器 TSim 会话</span>
-          <strong>{state.auth === "ready" ? "已连接" : "未连接"}</strong>
+          <span>TSim 登录态</span>
+          <strong>{state.auth === "ready" ? "已登录" : state.auth === "connecting" ? "正在恢复…" : state.auth === "failed" ? "恢复失败" : "未登录"}</strong>
         </div>
         {state.auth === "ready" && <p className="account-scope">{state.accountScope}</p>}
         <div className="button-row">
-          <button className="secondary" disabled={!api || busy} onClick={() => api && void perform(() => api.openLogin())}>打开浏览器 TSim 页面</button>
-          {state.auth === "ready" && <button className="text-button" disabled={!api || busy} onClick={() => api && void perform(() => api.logout())}>断开浏览器会话</button>}
+          <button className="secondary" disabled={!api || busy} onClick={() => api && void perform(() => api.openLogin())}>登录 / 切换 TSim 账户</button>
+          {state.auth === "ready" && <button className="text-button" disabled={!api || busy} onClick={() => api && void perform(() => api.logout())}>退出 TSim 并清除登录态</button>}
         </div>
-        <p className="hint">复用已登录的 TSim 账户。断开连接不会退出网站登录。</p>
+        <p className="hint">登录态在本机加密保存，重启后自动恢复；退出会清除保存的会话。</p>
       </section>
     </>
   );

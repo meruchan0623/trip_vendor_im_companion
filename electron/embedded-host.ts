@@ -3,7 +3,7 @@ import type { StandaloneState } from '../src/shared/companion-api';
 
 /** The only state sent to the vendor renderer. Authentication credentials stay in the host. */
 export function embeddedPanelState(state:StandaloneState,conversationKey:string|null=null):PanelState {
-  const status:PanelState['status']=state.auth!=='ready'?'needs_login':!state.attached||state.composerSource!=='verified-editor'?'unavailable':state.phase==='ready'?'ready':state.phase==='translating'?'translating':state.phase==='stale'?'stale':state.phase==='failed'?'failed':'idle';
+  const status:PanelState['status']=state.auth==='needs_login'?'needs_login':state.auth==='failed'?'failed':state.auth==='connecting'?'unavailable':!state.attached||state.composerSource!=='verified-editor'?'unavailable':state.phase==='ready'?'ready':state.phase==='translating'?'translating':state.phase==='stale'?'stale':state.phase==='failed'?'failed':'idle';
   return {auth:state.auth,conversationKey:state.messageSurface?.active?conversationKey:null,draft:state.draft?{text:state.draft.text,composing:!state.draft.canReplace}:null,enabled:state.autoTranslate!==false,target:state.language,followCustomer:{lang:state.customerLanguage??'unknown',following:state.followCustomerLanguage!==false,manualEnabled:false},status,preview:state.preview,error:state.error,busy:['reading','replacing','translating'].includes(state.phase),translationPaused:state.translationPaused===true};
 }
 

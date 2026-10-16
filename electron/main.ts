@@ -1,9 +1,11 @@
-import { app, clipboard, BrowserWindow, ipcMain, screen, shell, Tray, Menu, nativeImage, type IpcMainInvokeEvent } from 'electron';
+import { app, clipboard, BrowserWindow, ipcMain, screen, shell, Tray, Menu, nativeImage, safeStorage, type IpcMainInvokeEvent } from 'electron';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { NativeAdapter, type WindowState } from './native-adapter';
 import { CompanionService } from './companion-service';
+import { PersistentSessionService } from './owned-session';
+import { SecureSessionStore } from './secure-session-store';
 import { startExternalClient } from './external-composer';
 import { lockContents, lockLocalSession } from './security';
 import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
@@ -112,7 +114,7 @@ async function cleanup():Promise<void> {
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
   native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},undefined,undefined,undefined,()=>resident?.notifyTargetAvailable());
-  service=new CompanionService(native,url=>shell.openExternal(url),()=>{},smokeMode?{enabled:false}:{},true);service.onState(publish);
+  service=new CompanionService(native,url=>shell.openExternal(url),()=>{},smokeMode?{enabled:false}:{},true,(changed,options)=>new PersistentSessionService(changed,options,new SecureSessionStore(join(app.getPath('userData'),'auth','tsim-session.enc'),safeStorage)));service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
   // macOS runs without Dock or menu bar icons; Windows keeps its tray controls.

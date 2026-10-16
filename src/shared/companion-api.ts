@@ -6,7 +6,7 @@ export interface OrderViewport {width:number;height:number;dpr:number;clientOffs
 export interface OrderEntry {identifier:string;identifierType:'order_number'|'iccid'|'eiccid';rect:{x:number;y:number;width:number;height:number}}
 export interface StandaloneState {
   attached:boolean; targetInstanceId:string|null; nativeStatus:string;
-  auth:'ready'|'needs_login'; accountScope:string;
+  auth:'ready'|'needs_login'|'connecting'|'failed'; accountScope:string;
   draft:{text:string;canReplace:boolean}|null; preview:string|null;
   phase:'idle'|'reading'|'translating'|'ready'|'stale'|'failed'|'replaced'|'waiting'|'replacing';
   customerLanguage?:string; followCustomerLanguage?:boolean;

@@ -208,14 +208,14 @@ describe("独立跟随草稿工具", () => {
     await act(async () => toggle.click());
     expect(api.setTranslationOptions).toHaveBeenCalledWith({autoTranslate:false});
   });
-  it("复用浏览器会话，断开入口不提供独立账号密码表单", async () => {
+  it("持久会话设置不接触密码，登录与清除通过固定动作", async () => {
     await renderRoute("#settings");
-    expect(container.textContent).toContain("浏览器 TSim 会话");
-    expect(container.textContent).toContain("断开连接不会退出网站登录");
+    expect(container.textContent).toContain("TSim 登录态");
+    expect(container.textContent).toContain("退出会清除保存的会话");
     expect(container.querySelector('input[type="password"], input[name="username"]')).toBeNull();
-    await click("打开浏览器 TSim 页面");
+    await click("登录 / 切换 TSim 账户");
     expect(api.openLogin).toHaveBeenCalledOnce();
-    await click("断开浏览器会话");
+    await click("退出 TSim 并清除登录态");
     expect(api.logout).toHaveBeenCalledOnce();
   });
   it("未绑定时可启动客户端，已绑定不显示启动动作", async () => {
