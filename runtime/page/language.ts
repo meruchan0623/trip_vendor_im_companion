@@ -73,7 +73,20 @@ export function dominantLanguage(texts:readonly string[]):string{
 /** Last N guest bubbles, text only, oldest first. Positive guest attribution is required; untagged rows may be merchant colleagues. */
 export function collectCustomerTexts(document:Document,limit=CUSTOMER_SAMPLE_LIMIT):string[]{
   const visibility=new Map<Element,boolean>();
-  const visible=(node:Element)=>{for(let current:Element|null=node;current;current=current.parentElement){const cached=visibility.get(current);if(cached!==undefined)return cached;if(current.hasAttribute('hidden')||current.getAttribute('aria-hidden')==='true')return false;const style=document.defaultView?.getComputedStyle(current);if(style?.display==='none'||style?.visibility==='hidden')return false;}visibility.set(node,true);return true;};
+  const visible=(node:Element)=>{
+    const path:Element[]=[];let result=true;
+    for(let current:Element|null=node;current;current=current.parentElement){
+      const cached=visibility.get(current);if(cached!==undefined){result=cached;break;}
+      path.push(current);
+      if(current.hasAttribute('hidden')||current.getAttribute('aria-hidden')==='true'){result=false;break;}
+      const style=document.defaultView?.getComputedStyle(current);
+      if(style?.display==='none'||style?.visibility==='hidden'){result=false;break;}
+    }
+    // Cache ancestors too: the last five bubbles share most of their layout tree.
+    // This cache is local to one scan, so later visibility changes remain observable.
+    for(const element of path)visibility.set(element,result);
+    return result;
+  };
   const lists=[...document.querySelectorAll('.chat_list_content')].filter(visible);if(lists.length!==1)return [];
   const nodes=[...lists[0].querySelectorAll<HTMLElement>('li.normal-message-item.customer .chat-content .chat-text')].filter(node=>!node.closest(VENDOR_TRANSLATION_SELECTOR));
   const texts:string[]=[];

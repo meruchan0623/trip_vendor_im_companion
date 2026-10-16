@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {describe,it,expect} from 'vitest';
+import {describe,it,expect,vi} from 'vitest';
 import {JSDOM} from 'jsdom';
 import {detectLanguage,dominantLanguage,collectCustomerTexts,customerLanguage,isNonTranslatableToken} from '../../runtime/page/language';
 const chat=(items:[string,string][])=>new JSDOM(`<div class="chat_list_content"><ul>${items.map(([who,text])=>`<li class="normal-message-item ${who}"><div class="message-name">${who==='customer'?'<span class="tag-guest">客人</span>':''}</div><div class="chat-content"><div class="chat-text">${text}</div></div></li>`).join('')}</ul></div>`).window.document;
@@ -17,6 +17,20 @@ describe('dominantLanguage majority vote',()=>{
   it('a tie goes to the language of the newest tied message',()=>{expect(dominantLanguage(['Hello there','こんにちは'])).toBe('ja');expect(dominantLanguage(['こんにちは','Hello there'])).toBe('en');expect(dominantLanguage(['你好呀','Hello there','こんにちは','你好吗','Hello again'])).toBe('en');});
   it('samples only the last five customer bubbles, oldest first, ignoring service messages',()=>{const doc=chat([['customer','你好呀'],['customer','你在吗'],['customer','你好吗'],['service','Hello from us'],['customer','Hello there'],['customer','How are you'],['customer','Fine thanks'],['customer','こんにちは'],['customer','Order please']]);expect(collectCustomerTexts(doc)).toEqual(['你好吗','Hello there','How are you','Fine thanks','こんにちは','Order please'].slice(-5));expect(customerLanguage(doc)).toBe('en');});
   it('never treats untagged merchant colleagues as customers even without any guest tags',()=>{const doc=new JSDOM('<div class="chat_list_content"><li class="normal-message-item customer"><div class="chat-content"><div class="chat-text">Hello there colleague</div></div></li></div>').window.document;expect(collectCustomerTexts(doc)).toEqual([]);expect(customerLanguage(doc)).toBe('unknown');});
+  it('reads shared ancestor styles once per scan and observes subsequent visibility changes',()=>{
+    const doc=chat(Array.from({length:5},()=>['customer','Hello there'] as [string,string]));
+    const view=doc.defaultView!,read=vi.spyOn(view,'getComputedStyle');
+    try{
+      expect(collectCustomerTexts(doc)).toHaveLength(5);
+      for(const ancestor of [doc.documentElement,doc.body,doc.querySelector('.chat_list_content'),doc.querySelector('ul')]){
+        expect(read.mock.calls.filter(([node])=>node===ancestor)).toHaveLength(1);
+      }
+      doc.querySelector('ul')!.setAttribute('hidden','');
+      expect(collectCustomerTexts(doc)).toEqual([]);
+      doc.querySelector('ul')!.removeAttribute('hidden');
+      expect(collectCustomerTexts(doc)).toHaveLength(5);
+    }finally{read.mockRestore();view.close();}
+  });
   it('a Chinese-speaking customer yields zh',()=>{expect(customerLanguage(chat([['customer','Hi'],['customer','你好，我的订单呢'],['customer','麻烦查一下']]))).toBe('zh');});
   it('group chat: merchant colleagues rendered as .customer are skipped when guests carry .tag-guest (live client evidence)',()=>{const row=(guest:boolean,text:string)=>`<li class="normal-message-item customer"><div class="message-name">${guest?'<span class="tag tag-guest">客人</span>':''}<span class="nick-name">n</span></div><div class="chat-content"><div class="chat-text">${text}</div></div></li>`;const doc=new JSDOM(`<div class="chat_list_content"><ul>${[row(true,'Then, how can I fix this?'),row(false,'這個無法更改的'),row(true,'This issue cause me the problems!'),row(false,'携程上的新西蘭esim就是新加坡IP的'),row(false,'這個沒有辦法改變'),row(true,'yes I think I would to cancel with the refund please'),row(false,'請稍等我爲您取消'),row(false,'您好，已爲您提交退订信息')].join('')}</ul></div>`).window.document;expect(collectCustomerTexts(doc)).toEqual(['Then, how can I fix this?','This issue cause me the problems!','yes I think I would to cancel with the refund please']);expect(customerLanguage(doc)).toBe('en');});
   it('vendor machine translation (.tran-group second .chat-text) is not sampled (live client evidence)',()=>{const row=(text:string,tran:string)=>`<li class="normal-message-item customer"><div class="message-name"><span class="tag tag-guest">客人</span></div><div class="chat-content"><p class="chat-text">${text}</p><div class="tran-group"><p class="chat-text">${tran}</p><div class="tran-con"><div class="tran-con-title">来自google翻译</div></div></div></div></li>`;const doc=new JSDOM(`<div class="chat_list_content"><ul>${row('This issue cause me the problems!','这个问题给我带来了很多麻烦！')+row('yes I think I would to cancel','是的，我想取消')+row('Then, how can I fix this?','那我该如何解决这个问题呢？')}</ul></div>`).window.document;expect(collectCustomerTexts(doc)).toEqual(['This issue cause me the problems!','yes I think I would to cancel','Then, how can I fix this?']);expect(customerLanguage(doc)).toBe('en');});
