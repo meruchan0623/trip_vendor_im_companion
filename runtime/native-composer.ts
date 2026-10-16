@@ -8,10 +8,34 @@ export function isReplaceChord(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'
 export function isReplaceIntent(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'|'isTrusted'|'repeat'|'isComposing'|'keyCode'>){return isReplaceChord(event)&&event.isTrusted&&!event.repeat&&!event.isComposing&&event.keyCode!==229;}
 export interface NativePoll {snapshot?:VerifiedComposerSnapshot;writeVerified:boolean;reason?:string;orderEntries?:OrderEntry[];orderViewport?:OrderViewport;messageSurface?:MessageSurface;orderFrame?:{rect:SurfaceRect;clientWidth:number;clientHeight:number;clientLeft:number;clientTop:number}}
 const inactiveSurface=():MessageSurface=>({active:false,composerRect:null,toolbarRect:null});
-function visibleRect(element:Element|null,document:Document):SurfaceRect|null{
+function visibleRect(element:Element|null,document:Document,clip?:SurfaceRect):SurfaceRect|null{
   if(!element?.isConnected||element.closest('[hidden],[aria-hidden="true"],.customer_info.close'))return null;
   const view=document.defaultView!;for(let parent:Element|null=element;parent;parent=parent.parentElement){const style=view.getComputedStyle(parent);if(style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||style.opacity==='0')return null;}
-  const r=element.getBoundingClientRect();if(![r.x,r.y,r.width,r.height].every(Number.isFinite)||r.width<=0||r.height<=0||r.x<0||r.y<0||r.right>view.innerWidth+1||r.bottom>view.innerHeight+1)return null;
+  let r=element.getBoundingClientRect();
+  // Tiptap grows with the draft inside the vendor's scrolling input. Its full
+  // content box may extend beyond the viewport; only the exposed input matters.
+  if(clip){
+    // Vendor CSS also uses flex:1;height:0 with visible overflow on .chat-editor.
+    // At the bottom, its border box can be offscreen while overflowing text is
+    // still exposed by the scrolling .chat-box. Include that content extent.
+    const style=view.getComputedStyle(element),contentHeight=(element as HTMLElement).scrollHeight;
+    if((style.overflowY||style.overflow||'visible')==='visible'&&Number.isFinite(contentHeight)&&contentHeight>r.height){
+      r={x:r.x,y:r.y,width:r.width,height:contentHeight,left:r.left,top:r.top,right:r.right,bottom:r.y+contentHeight} as DOMRect;
+    }
+    let x=Math.max(r.x,clip.x),y=Math.max(r.y,clip.y),right=Math.min(r.right,clip.x+clip.width),bottom=Math.min(r.bottom,clip.y+clip.height);
+    // Scrolling moves the content box above the toolbar. Compare the exposed
+    // portion after ancestor clipping, not the document's unscrolled origin.
+    for(let parent=element.parentElement;parent;parent=parent.parentElement){
+      const style=view.getComputedStyle(parent),clips=(value:string)=>/^(auto|scroll|hidden|clip)$/.test(value);
+      const clipX=clips(style.overflowX||style.overflow),clipY=clips(style.overflowY||style.overflow);
+      if(!clipX&&!clipY)continue;
+      const bounds=parent.getBoundingClientRect();
+      if(clipX){x=Math.max(x,bounds.left);right=Math.min(right,bounds.right);}
+      if(clipY){y=Math.max(y,bounds.top);bottom=Math.min(bottom,bounds.bottom);}
+    }
+    r={x,y,width:right-x,height:bottom-y,right,bottom} as DOMRect;
+  }
+  if(![r.x,r.y,r.width,r.height].every(Number.isFinite)||r.width<=0||r.height<=0||r.x<0||r.y<0||r.right>view.innerWidth+1||r.bottom>view.innerHeight+1)return null;
   return{x:r.x,y:r.y,width:r.width,height:r.height};
 }
 /** Local geometry only. The host also verifies the separate main window's selected message navigation. */
@@ -21,7 +45,7 @@ export function messageSurfaceGeometry(document:Document):MessageSurface{
   const composer=composers[0],composerRect=visibleRect(composer,document);if(!composerRect)return inactiveSurface();
   const toolbars=composer.querySelectorAll('.chat-func-list'),editors=composer.querySelectorAll(SELECTOR),sends=composer.querySelectorAll(SEND_SELECTOR);
   if(toolbars.length!==1||editors.length!==1)return inactiveSurface();
-  const bar=visibleRect(toolbars[0],document),editor=visibleRect(editors[0],document);if(!bar||!editor)return inactiveSurface();
+  const bar=visibleRect(toolbars[0],document),editor=visibleRect(editors[0],document,composerRect);if(!bar||!editor)return inactiveSurface();
   const barBottom=bar.y+bar.height;if(bar.x<composerRect.x||bar.y<composerRect.y||bar.x+bar.width>composerRect.x+composerRect.width||barBottom>composerRect.y+composerRect.height||barBottom>editor.y+1)return inactiveSurface();
   for(const send of sends){const r=visibleRect(send,document);if(r&&r.y<barBottom&&r.y+r.height>bar.y&&r.x<bar.x+bar.width&&r.x+r.width>bar.x)return inactiveSurface();}
   // Leave all vendor attachment/screenshot/translation controls clickable.
