@@ -10,7 +10,7 @@ export async function fingerprintFile(path:string):Promise<string>{
   const file=await fs.open(path,'r');
   try{
     const before=await file.stat();if(identity(before)!==identity(pathBefore))throw new Error('FINGERPRINT_FILE_CHANGED');
-    const hash=createHash('sha256'),buffer=Buffer.allocUnsafe(64*1024);let position=0;
+    const hash=createHash('sha256'),buffer=Buffer.allocUnsafe(1024*1024);let position=0;
     while(position<before.size){const {bytesRead}=await file.read(buffer,0,Math.min(buffer.length,before.size-position),position);if(!bytesRead)throw new Error('FINGERPRINT_FILE_CHANGED');hash.update(buffer.subarray(0,bytesRead));position+=bytesRead;}
     if(identity(before)!==identity(await file.stat())||identity(before)!==identity(await fs.lstat(path)))throw new Error('FINGERPRINT_FILE_CHANGED');
     return hash.digest('hex');
