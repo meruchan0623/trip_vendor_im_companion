@@ -108,7 +108,7 @@ export class CompanionService {
   private schedule(){
     const capture=this.captured,key=this.signature();
     if(this.state.followCustomerLanguage!==false&&!isPanelTarget(this.state.customerLanguage))return;
-    if(this.closed||!this.foreground||!this.state.autoTranslate||this.state.translationPaused||this.state.auth!=='ready'||capture?.source!=='verified-editor'||capture.snapshot.composing||!capture.snapshot.text.trim()||key===this.attempted||key===this.suppressed)return;
+    if(this.closed||!this.foreground||!this.state.autoTranslate||this.state.translationPaused||this.state.auth!=='ready'||capture?.source!=='verified-editor'||!capture.snapshot.isPlainText||capture.snapshot.composing||!capture.snapshot.text.trim()||key===this.attempted||key===this.suppressed)return;
     if(this.autoTimer){this.state.phase='waiting';return;}
     this.state.phase='waiting';
     this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.busy||this.externalConnecting){this.schedule();return;}this.attempted=key;void this.translate(this.state.language,key);},1500);
@@ -206,7 +206,7 @@ export class CompanionService {
     this.captured=capture;this.state.composerSource=capture.source;
     this.state.messageSurface=capture.source==='verified-editor'?(capture.messageSurface??{active:false,composerRect:null,toolbarRect:null}):{active:false,composerRect:null,toolbarRect:null};
     this.state.orderEntries=capture.source==='verified-editor'?capture.orderEntries:[];this.state.orderViewport=capture.source==='verified-editor'?capture.orderViewport:null;
-    this.state.draft={text:capture.snapshot.text,canReplace:capture.source==='verified-editor'?!capture.snapshot.composing:capture.snapshot.canReplace};
+    this.state.draft={text:capture.snapshot.text,canReplace:capture.source==='verified-editor'?capture.snapshot.isPlainText&&!capture.snapshot.composing:capture.snapshot.canReplace};
     if(invalidateChanged)this.schedule();
   }
   private async observe(){
@@ -276,6 +276,7 @@ export class CompanionService {
       const currentIdentity=this.psim.identity();if(!currentIdentity)throw new Error('PSIM_LOGIN_REQUIRED');identity=currentIdentity;
       capture=await this.capture();if(epoch!==this.epoch||!this.foreground)return;
       if(expectedContext&&expectedContext!==this.context(capture)){this.adopt(capture);this.publish();return;}
+      if(capture.source==='verified-editor'&&!capture.snapshot.isPlainText){this.adopt(capture,false);throw new Error('WRITE_UNAVAILABLE');}
       if(capture.source==='verified-editor'&&capture.snapshot.composing)throw new Error('INPUT_COMPOSING');
       if(!capture.snapshot.text.trim())throw new Error('EMPTY_DRAFT');
       this.adopt(capture,false);
