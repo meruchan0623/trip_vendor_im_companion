@@ -25,7 +25,8 @@
     "package:mac:app": "npm run build:native:mac && npm run build && install-electron && electron-builder --mac --arm64",
     "install:mac": "node scripts/install-macos-companion.mjs install",
     "rollback:mac": "node scripts/install-macos-companion.mjs rollback",
-    "prepare:mac:arm64": "node scripts/prepare-macos-arm64.mjs"
+    "prepare:mac:arm64": "node scripts/prepare-macos-arm64.mjs",
+    "inject:mac": "node scripts/inject-macos-official.mjs"
   },
   "dependencies": {
     "react": "19.3.0",
