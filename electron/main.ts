@@ -11,6 +11,7 @@ import { ResidentConnection } from './resident-connection';
 
 // The only local window is on-demand settings; daily business UI belongs to the verified merchant BrowserView.
 if(process.platform==='win32')app.disableHardwareAcceleration();
+const residentPlatform=process.platform==='win32'||process.platform==='darwin';
 const smokeMode=process.argv.includes('--smoke-test');
 const acceptance=process.argv.includes('--acceptance');
 if(smokeMode)app.setPath('userData',join(process.cwd(),'work/smoke-profile'));
@@ -60,13 +61,16 @@ async function openSettings():Promise<void> {
     if(quitting||window.isDestroyed()||window!==panel||intent!==panelIntent)return;
     if(window.isMinimized())window.restore();
     const work=screen.getDisplayMatching(window.getBounds()).workArea,width=Math.min(360,work.width),height=Math.min(480,work.height),bounds=window.getBounds();
-    window.setBounds({x:Math.max(work.x,Math.min(bounds.x,work.x+work.width-width)),y:Math.max(work.y,Math.min(bounds.y,work.y+work.height-height)),width,height});window.show();window.focus();publish();
+    window.setBounds({x:Math.max(work.x,Math.min(bounds.x,work.x+work.width-width)),y:Math.max(work.y,Math.min(bounds.y,work.y+work.height-height)),width,height});
+    // A Dock-less macOS app is not activated by its menu bar item; bring settings forward explicitly.
+    if(process.platform==='darwin')app.focus({steal:true});window.show();window.focus();publish();
   }catch{if(window===panel&&!quitting){console.error('SETTINGS_LOAD_FAILED');hideSettings();}}
 }
 function createResidentTray():void {
-  const pixels=Buffer.alloc(20*20*4);
-  for(let y=0;y<20;y++)for(let x=0;x<20;x++){const letter=y>=5&&y<=7&&x>=4&&x<=15||y>=7&&y<=15&&x>=8&&x<=11;pixels.set(letter?[255,255,255,255]:[190,100,30,255],(y*20+x)*4);}
-  tray=new Tray(nativeImage.createFromBitmap(pixels,{width:20,height:20,scaleFactor:1}));tray.setToolTip('旅游商家助手');
+  // macOS menu bar: 18pt icon drawn at 2x so Retina displays render it crisply.
+  const scale=process.platform==='darwin'?2:1,size=process.platform==='darwin'?36:20,pixels=Buffer.alloc(size*size*4);
+  for(let py=0;py<size;py++)for(let px=0;px<size;px++){const x=Math.floor(px*20/size),y=Math.floor(py*20/size),letter=y>=5&&y<=7&&x>=4&&x<=15||y>=7&&y<=15&&x>=8&&x<=11;pixels.set(letter?[255,255,255,255]:[190,100,30,255],(py*size+px)*4);}
+  tray=new Tray(nativeImage.createFromBitmap(pixels,{width:size,height:size,scaleFactor:scale}));tray.setToolTip('旅游商家助手');
   tray.setContextMenu(Menu.buildFromTemplate([{label:'打开连接设置',click:()=>{void openSettings();}},{type:'separator'},{label:'退出助手',click:()=>app.quit()}]));tray.on('double-click',()=>{void openSettings();});
 }
 function stateChanged(state:WindowState|null):void {
@@ -80,7 +84,7 @@ function stateChanged(state:WindowState|null):void {
 function setupIPC():void {
   handle('state',()=>service.getState());handle('list-windows',()=>native.list());
   handle('start-client',async()=>{
-    if(process.platform!=='win32')throw new Error('WINDOWS_REQUIRED');
+    if(!residentPlatform)throw new Error('WINDOWS_REQUIRED');
     await resident!.connect(async current=>{
       const pid=await startExternalClient(),deadline=Date.now()+8000;
       while(current()&&Date.now()<deadline){const windows=await native.list();if(!current())break;const targets=windows.filter(window=>window.targetInstanceId.startsWith(`${pid}:`));if(targets.length===1)return targets[0]!.targetInstanceId;if(targets.length>1)throw new Error('AMBIGUOUS_CLIENT_WINDOW');await new Promise<void>(resolve=>setTimeout(resolve,150));}
@@ -98,19 +102,25 @@ function setupIPC():void {
   handle('open-order',()=>{throw new Error('USE_EMBEDDED_ORDER_PANEL');});handle('close-order',()=>{});
   handle('minimize',()=>panel?.minimize());handle('close',hideSettings);
 }
+function helperPath():string {
+  if(process.platform==='darwin')return app.isPackaged?join(process.resourcesPath,'native/macos/TravelMerchant.WindowHelper'):join(app.getAppPath(),'native/macos/bin/TravelMerchant.WindowHelper');
+  return app.isPackaged?join(process.resourcesPath,'native/windows/TravelMerchant.WindowHelper.exe'):join(app.getAppPath(),'native/windows/bin/publish/TravelMerchant.WindowHelper.exe');
+}
 async function cleanup():Promise<void> {
   if(cleaned)return;cleaned=true;acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();
   try{await service?.dispose();}finally{native?.stop();}
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
-  native=new NativeAdapter(app.isPackaged?join(process.resourcesPath,'native/windows/TravelMerchant.WindowHelper.exe'):join(app.getAppPath(),'native/windows/bin/publish/TravelMerchant.WindowHelper.exe'),stateChanged,status=>{service?.setNativeStatus(status);},undefined,undefined,undefined,()=>resident?.notifyTargetAvailable());
+  native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},undefined,undefined,undefined,()=>resident?.notifyTargetAvailable());
   service=new CompanionService(native,url=>shell.openExternal(url),()=>{},smokeMode?{enabled:false}:{},true);service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
-  if(process.platform==='win32'){native.start();registerSettings();createResidentTray();if(!smokeMode)resident.start();}else service.setNativeStatus('windows_required');
-  if(smokeMode){console.log(JSON.stringify({event:'shell_started',electron:process.versions.electron,localWindows:0,trayAvailable:!!tray,residentMode:!!tray,embeddedBusinessUI:true,remoteNavigation:false}));setTimeout(()=>{void cleanup().then(()=>{console.log(JSON.stringify({event:'smoke_complete',remoteNavigation:false,credentialsAccessed:false}));app.exit(0);});},1500);}
+  // macOS runs without Dock or menu bar icons; Windows keeps its tray controls.
+  if(residentPlatform){if(process.platform==='darwin'){app.setActivationPolicy('accessory');app.dock?.hide();}native.start();registerSettings();if(process.platform==='win32')createResidentTray();if(!smokeMode)resident.start();}else service.setNativeStatus('windows_required');
+  if(smokeMode){console.log(JSON.stringify({event:'shell_started',electron:process.versions.electron,localWindows:0,trayAvailable:!!tray,residentMode:residentPlatform,embeddedBusinessUI:true,remoteNavigation:false}));setTimeout(()=>{void cleanup().then(()=>{console.log(JSON.stringify({event:'smoke_complete',remoteNavigation:false,credentialsAccessed:false}));app.exit(0);});},1500);}
 }).catch(error=>{console.error('SHELL_START_FAILED',error instanceof Error?error.message:'unknown');app.exit(1);});
 else app.quit();
-app.on('second-instance',()=>{void openSettings();});app.on('activate',()=>{void openSettings();});
-app.on('window-all-closed',()=>{if(!quitting&&(process.platform!=='win32'||!tray))app.quit();});
+app.on('second-instance',()=>{});
+// OS activation (including vendor startup) must never summon the settings panel.
+app.on('window-all-closed',()=>{if(!quitting&&!residentPlatform)app.quit();});
 app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;void cleanup().finally(()=>app.quit());});

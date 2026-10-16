@@ -1,4 +1,4 @@
-import { VERIFIED_RUNTIME_BUILD,assertBuildFingerprint,assertOwnedLoopbackListener,type BuildFingerprint,type ProcessIdentity,type ListenerIdentity } from './identity';
+import { VERIFIED_RUNTIME_BUILD,assertBuildFingerprint,assertOwnedLoopbackListener,sameExecutablePath,type BuildFingerprint,type ProcessIdentity,type ListenerIdentity } from './identity';
 export interface VerifiedIdleSnapshot {verified:true;fingerprint:BuildFingerprint;clientProcessIds:number[];clientMainProcessIds:number[];installerProcessIds:number[]}
 export interface LaunchPlatform {
   inspectReadOnly():Promise<VerifiedIdleSnapshot>;
@@ -37,7 +37,7 @@ export async function reattachExplicitDevInstance(platform:LaunchPlatform&{proce
   if(snapshot.verified!==true||snapshot.installerProcessIds.length||snapshot.clientMainProcessIds.length!==1||snapshot.clientMainProcessIds[0]!==pid)throw new Error('REATTACH_PROCESS_MISMATCH');
   assertBuildFingerprint(snapshot.fingerprint);
   const process=await platform.processIdentity(pid);
-  if(process.executable.toLowerCase()!==VERIFIED_RUNTIME_BUILD.executable.toLowerCase())throw new Error('REATTACH_PROCESS_MISMATCH');
+  if(!sameExecutablePath(process.executable,VERIFIED_RUNTIME_BUILD.executable))throw new Error('REATTACH_PROCESS_MISMATCH');
   assertOwnedLoopbackListener(process,await platform.waitForListener(process,port,1500),port);
   return{process,port,fingerprint:snapshot.fingerprint};
 }

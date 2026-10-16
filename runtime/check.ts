@@ -1,5 +1,5 @@
 import {createInterface} from 'node:readline';
-import {WindowsLaunchPlatform} from './windows-platform';
+import {createLaunchPlatform} from './platform';
 import {launchFromExplicitUserAction,reattachExplicitDevInstance} from './launcher';
 import {assertOwnedLoopbackListener} from './identity';
 import {connectOwnedLoopback} from './transport';
@@ -15,7 +15,7 @@ function safeFailure(error:unknown){const text=error instanceof Error?error.mess
 async function main(){
   if(process.argv.slice(2).length===1&&process.argv[2]==='--owned-auth'){await runOwnedAuthWorker();return;}
   const args=process.argv.slice(2);const reattach=args.length===1?/^--reattach=(\d{1,7}):(\d{4,5})$/.exec(args[0]):null;if(args.length>1||args.some(arg=>!['--dry-run','--launch'].includes(arg))&&!reattach)throw new Error('INVALID_ARGUMENTS');
-  const platform=new WindowsLaunchPlatform();
+  const platform=createLaunchPlatform();
   if(!args.includes('--launch')&&!reattach){const snapshot=await platform.inspectReadOnly();log('dry-run',{verifiedBuild:snapshot.fingerprint.aresVersion,clientProcesses:snapshot.clientProcessIds.length,installerProcesses:snapshot.installerProcessIds.length,idle:snapshot.clientProcessIds.length===0&&snapshot.installerProcessIds.length===0,existingInstanceAttach:false,launchImplemented:true,runtimeAttach:'awaiting-live-acceptance',serviceBridgeImplemented:true,customerSend:false,vendorFilesWritten:false});return;}
   const started=Date.now();log('launch-requested',{customerSend:false,vendorFilesWritten:false});
   const launched=reattach?await reattachExplicitDevInstance(platform,Number(reattach[1]),Number(reattach[2])):await launchFromExplicitUserAction(platform,'start-runtime-assistance');log('client-started',{pid:launched.process.pid,elapsedMs:Date.now()-started});

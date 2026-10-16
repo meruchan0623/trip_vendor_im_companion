@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const fake=vi.hoisted(()=>{
@@ -18,7 +18,7 @@ const fake=vi.hoisted(()=>{
   return{handlers,appEvents,windows,menu,Window,service,native,input,createInput:vi.fn((_options:unknown)=>input),delay:undefined as Promise<void>|undefined,setStateCallback:(fn:any)=>stateCallback=fn,emitState:(value:any)=>stateCallback(value),resident:{dispose:vi.fn(),setBound:vi.fn(),start:vi.fn(),notifyTargetAvailable:vi.fn(),connect:vi.fn(),disconnect:vi.fn()},tray:{setToolTip:vi.fn(),setContextMenu:vi.fn(),on:vi.fn(),destroy:vi.fn()},quit:vi.fn()};
 });
 vi.mock('node:readline',()=>({createInterface:fake.createInput}));
-vi.mock('electron',()=>({app:{disableHardwareAcceleration:vi.fn(),requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),on:(name:string,fn:Function)=>fake.appEvents.set(name,fn),getAppPath:()=>process.cwd(),isPackaged:false,quit:fake.quit,exit:vi.fn()},BrowserWindow:fake.Window,ipcMain:{handle:(name:string,handler:any)=>fake.handlers.set(name,handler)},shell:{openExternal:vi.fn()},clipboard:{writeText:vi.fn()},screen:{getDisplayMatching:()=>({workArea:{x:0,y:0,width:320,height:400}})},Tray:class{constructor(){return fake.tray;}},Menu:{buildFromTemplate:(items:any[])=>{fake.menu.splice(0,fake.menu.length,...items);return items;}},nativeImage:{createFromBitmap:()=>({})}}));
+vi.mock('electron',()=>({app:{disableHardwareAcceleration:vi.fn(),requestSingleInstanceLock:()=>true,whenReady:()=>Promise.resolve(),on:(name:string,fn:Function)=>fake.appEvents.set(name,fn),getAppPath:()=>process.cwd(),isPackaged:false,quit:fake.quit,exit:vi.fn(),focus:vi.fn(),dock:{hide:vi.fn()}},BrowserWindow:fake.Window,ipcMain:{handle:(name:string,handler:any)=>fake.handlers.set(name,handler)},shell:{openExternal:vi.fn()},clipboard:{writeText:vi.fn()},screen:{getDisplayMatching:()=>({workArea:{x:0,y:0,width:320,height:400}})},Tray:class{constructor(){return fake.tray;}},Menu:{buildFromTemplate:(items:any[])=>{fake.menu.splice(0,fake.menu.length,...items);return items;}},nativeImage:{createFromBitmap:()=>({})}}));
 vi.mock('../electron/native-adapter',()=>({NativeAdapter:class{constructor(_path:string,onState:any){fake.setStateCallback(onState);return fake.native;}}}));
 vi.mock('../electron/companion-service',()=>({CompanionService:class{constructor(){return fake.service;}}}));
 vi.mock('../electron/resident-connection',()=>({ResidentConnection:class{constructor(){return fake.resident;}}}));
@@ -27,8 +27,10 @@ const current=()=>fake.windows.filter(window=>!window.isDestroyed()).at(-1);
 const event=(window=current())=>({sender:window.webContents,senderFrame:window.webContents.mainFrame});
 const invoke=(name:string,value?:unknown,source=event())=>fake.handlers.get('standalone:'+name)!(source,value);
 const tick=()=>new Promise<void>(done=>setImmediate(done));
-async function open(){fake.appEvents.get('activate')?.();await tick();return current();}
-beforeAll(async()=>{vi.stubGlobal('__dirname',resolve('dist-electron'));await import('../electron/main');await tick();});
+async function open(){fake.menu.find(item=>item.label==='打开连接设置')?.click();await tick();return current();}
+const originalPlatform=Object.getOwnPropertyDescriptor(process,'platform')!;
+afterAll(()=>Object.defineProperty(process,'platform',originalPlatform));
+beforeAll(async()=>{Object.defineProperty(process,'platform',{...originalPlatform,value:'win32'});vi.stubGlobal('__dirname',resolve('dist-electron'));await import('../electron/main');await tick();});
 afterEach(()=>{fake.delay=undefined;if(current())invoke('close');});
 describe('embedded desktop settings shell',()=>{
   it('creates no daily business window at startup or on native geometry notifications',()=>{
@@ -48,7 +50,7 @@ describe('embedded desktop settings shell',()=>{
     invoke('close');expect(()=>invoke('state',undefined,source)).toThrow('UNAUTHORIZED_RENDERER');
   });
   it('shares a concurrent settings load and cannot revive a window closed before loading finishes',async()=>{
-    let release!:()=>void;fake.delay=new Promise<void>(done=>release=done);fake.appEvents.get('activate')?.();fake.appEvents.get('activate')?.();const window=current();
+    let release!:()=>void;fake.delay=new Promise<void>(done=>release=done);fake.menu.find(item=>item.label==='打开连接设置')?.click();fake.menu.find(item=>item.label==='打开连接设置')?.click();const window=current();
     expect(fake.windows.filter(item=>!item.isDestroyed())).toHaveLength(1);expect(window.visible).toBe(false);
     invoke('close');release();await tick();expect(window.isDestroyed()).toBe(true);expect(window.visible).toBe(false);expect(current()).toBeUndefined();
   });
@@ -56,15 +58,15 @@ describe('embedded desktop settings shell',()=>{
     await open();const stops=fake.native.stop.mock.calls.length,disposals=fake.service.dispose.mock.calls.length;invoke('close');
     expect(fake.native.stop).toHaveBeenCalledTimes(stops);expect(fake.service.dispose).toHaveBeenCalledTimes(disposals);expect(fake.quit).not.toHaveBeenCalled();
   });
-  it('discards a failed settings load so the next tray or activation can retry',async()=>{
+  it('discards a failed settings load so the next tray action can retry',async()=>{
     fake.delay=Promise.reject(new Error('load failed'));const log=vi.spyOn(console,'error').mockImplementation(()=>{});
-    try{fake.appEvents.get('activate')?.();await tick();expect(current()).toBeUndefined();fake.delay=undefined;await open();expect(current().visible).toBe(true);}finally{log.mockRestore();}
+    try{fake.menu.find(item=>item.label==='打开连接设置')?.click();await tick();expect(current()).toBeUndefined();fake.delay=undefined;await open();expect(current().visible).toBe(true);}finally{log.mockRestore();}
   });
   it('refuses the old external order flow and never creates another business window',async()=>{
     await open();const count=fake.windows.length;expect(()=>invoke('open-order',{identifier:'000123',type:'order_number'})).toThrow('USE_EMBEDDED_ORDER_PANEL');await invoke('open-translation');expect(fake.windows).toHaveLength(count);expect(current().options.title).toBe('翻译设置');
   });
   it('keeps tray access and explicitly disposes the host and helper when the assistant quits',async()=>{
-    if(process.platform==='win32')expect(fake.menu.map(item=>item.label)).toContain('打开连接设置');
+    if(process.platform==='win32'||process.platform==='darwin')expect(fake.menu.map(item=>item.label)).toContain('打开连接设置');
     const preventDefault=vi.fn();fake.appEvents.get('before-quit')?.({preventDefault});await tick();expect(preventDefault).toHaveBeenCalled();expect(fake.resident.dispose).toHaveBeenCalledOnce();expect(fake.service.dispose).toHaveBeenCalledOnce();expect(fake.native.stop).toHaveBeenCalledOnce();expect(fake.quit).toHaveBeenCalled();
   });
 });

@@ -109,9 +109,11 @@ export class OwnedAuthClient {
     await this.start(); if (this.disposed || !this.url) throw fail('OWNED_AUTH_UNAVAILABLE');
     const url = loginURL(this.url);
     if (this.options.openLoginURL) { await this.options.openLoginURL(url); return; }
-    if (process.platform !== 'win32') throw fail('OWNED_LOGIN_OPENER_REQUIRED');
+    if (process.platform !== 'win32' && process.platform !== 'darwin') throw fail('OWNED_LOGIN_OPENER_REQUIRED');
     await new Promise<void>((resolve, reject) => {
-      const opener = spawnChild('rundll32.exe', ['url.dll,FileProtocolHandler', url], { shell: false, detached: true, windowsHide: true, stdio: 'ignore' });
+      const opener = process.platform === 'darwin'
+        ? spawnChild('/usr/bin/open', [url], { shell: false, detached: true, stdio: 'ignore' })
+        : spawnChild('rundll32.exe', ['url.dll,FileProtocolHandler', url], { shell: false, detached: true, windowsHide: true, stdio: 'ignore' });
       opener.once('error', () => reject(fail('OWNED_LOGIN_OPEN_FAILED')));
       opener.once('spawn', () => { opener.unref(); resolve(); });
     });

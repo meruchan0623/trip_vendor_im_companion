@@ -15,13 +15,14 @@
     "package:win": "npm run build:native && npm run build && electron-builder --win portable --x64",
     "build:browser-bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File native/browser-bridge/build.ps1",
     "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/windows/build.ps1",
-    "package:mac": "npm run build && electron-builder --mac dir",
     "build:host": "vite build --config host/vite.config.ts",
     "build:embedded": "node scripts/build-embedded.mjs",
     "patch:prepare": "node scripts/patch-client.mjs prepare",
     "build:runtime": "node scripts/build-electron.mjs",
     "build:lightweight": "npm run typecheck && tsc -p host-node/tsconfig.json && node scripts/build-lightweight-node.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File native/resident/build.ps1",
-    "package:lightweight": "npm run build:lightweight && node scripts/package-lightweight.mjs"
+    "package:lightweight": "npm run build:lightweight && node scripts/package-lightweight.mjs",
+    "build:native:mac": "bash native/macos/build.sh",
+    "package:mac:app": "npm run build:native:mac && npm run build && install-electron && electron-builder --mac --arm64"
   },
   "dependencies": {
     "react": "19.3.0",
@@ -55,15 +56,6 @@
       "dist-electron/preload.cjs",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "native/windows/bin/publish",
-        "to": "native/windows",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
     "win": {
       "target": [
         {
@@ -73,14 +65,47 @@
           ]
         }
       ],
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "extraResources": [
+        {
+          "from": "native/windows/bin/publish",
+          "to": "native/windows",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "portable": {
       "artifactName": "TravelMerchantCompanion-${version}-win-x64.exe"
     },
     "mac": {
-      "target": "dir",
-      "category": "public.app-category.business"
+      "target": [
+        {
+          "target": "dir"
+        },
+        {
+          "target": "zip"
+        }
+      ],
+      "category": "public.app-category.business",
+      "artifactName": "TravelMerchantCompanion-${version}-mac-${arch}.${ext}",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "notarize": false,
+      "extendInfo": {
+        "LSUIElement": true
+      },
+      "extraResources": [
+        {
+          "from": "native/macos/bin",
+          "to": "native/macos",
+          "filter": [
+            "TravelMerchant.WindowHelper"
+          ]
+        }
+      ]
     }
   }
 }

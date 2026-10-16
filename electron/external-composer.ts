@@ -1,6 +1,4 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { WindowsLaunchPlatform } from '../runtime/windows-platform';
+import { createLaunchPlatform, existingClientDebugPort } from '../runtime/platform';
 import { reattachExplicitDevInstance, launchFromExplicitUserAction } from '../runtime/launcher';
 import { connectOwnedLoopback } from '../runtime/transport';
 import { LiveRuntimeDriver } from '../runtime/driver';
@@ -10,7 +8,6 @@ declare const __NATIVE_ARTIFACT_SOURCE__:string;
 declare const __NATIVE_ARTIFACT_SHA256__:string;
 declare const __RUNTIME_ARTIFACT_SOURCE__:string;
 declare const __RUNTIME_ARTIFACT_SHA256__:string;
-const execute=promisify(execFile);
 export interface ExternalComposer {
   targetInstanceId:string;
   onInteraction?(listener:(event:NativeInteraction)=>void):()=>void;
@@ -25,13 +22,10 @@ export interface ExternalComposer {
 }
 /** Attaches to an already running, fingerprinted client and mounts only owned page UI. */
 export async function connectExternalComposer(targetInstanceId:string):Promise<ExternalComposer> {
-  if(process.platform!=='win32'||!/^\d+:\d+:\d+$/.test(targetInstanceId))throw new Error('INVALID_TARGET');
+  if(process.platform!=='win32'&&process.platform!=='darwin'||!/^\d+:\d+:\d+$/.test(targetInstanceId))throw new Error('INVALID_TARGET');
   const pid=Number(targetInstanceId.split(':')[0]);
-  const script=`$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); $p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if(-not $p -or $p.CommandLine -match '--type=' -or $p.CommandLine -notmatch '--remote-debugging-port=(\\d+)'){throw 'DEBUG_PORT_REQUIRED'}; @{port=[int]$Matches[1]}|ConvertTo-Json -Compress`;
-  let port:number;
-  try { const {stdout}=await execute('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{windowsHide:true,timeout:10000,maxBuffer:16000});port=JSON.parse(stdout.trim()).port; }
-  catch {throw new Error('EXISTING_CLIENT_DEBUG_PORT_REQUIRED');}
-  const platform=new WindowsLaunchPlatform();
+  const port=await existingClientDebugPort(pid);
+  const platform=createLaunchPlatform();
   const verified=await reattachExplicitDevInstance(platform,pid,port);
   const verify=async()=>{const process=await platform.processIdentity(pid);if(process.startedAt!==verified.process.startedAt)throw new Error('PROCESS_CHANGED');await reattachExplicitDevInstance(platform,pid,port);};
   const transport=await connectOwnedLoopback(port,verify);
@@ -55,5 +49,5 @@ export async function connectExternalComposer(targetInstanceId:string):Promise<E
   }catch(error){if(driver)await driver.disconnect().catch(()=>{});else await transport.disconnect().catch(()=>{});throw error;}
 }
 export async function startExternalClient():Promise<number>{
-  const launched=await launchFromExplicitUserAction(new WindowsLaunchPlatform(),'start-runtime-assistance');return launched.process.pid;
+  const launched=await launchFromExplicitUserAction(createLaunchPlatform(),'start-runtime-assistance');return launched.process.pid;
 }
