@@ -7,12 +7,21 @@ export const CHAT_AREA_SELECTOR='.im_detail.inform-con > .chat_area';
 export const INPUT_SELECTOR='.chat_area-input';
 export const EDITOR_SELECTOR='.tiptap.ProseMirror.chat-editor[contenteditable="true"]';
 export const REATTACH_DEBOUNCE_MS=100;
+/** Grace before an emptied draft folds the card, so select-all retyping or a send does not make the composer jump. */
+export const COLLAPSE_DELAY_MS=400;
 export const TARGET_LABELS:Record<typeof PANEL_TARGETS[number],string>={en:'English',ja:'日本語',ko:'한국어',th:'ไทย',vi:'Tiếng Việt',id:'Bahasa Indonesia',ms:'Bahasa Melayu',es:'Español',fr:'Français',de:'Deutsch',ru:'Русский',ar:'العربية','zh-TW':'繁體中文',pt:'Português',it:'Italiano',tr:'Türkçe'};
 const LANGUAGE_NAMES:Record<string,string>={zh:'中文',en:'英语',ja:'日语',ko:'韩语',th:'泰语',ar:'阿拉伯语',ru:'俄语',el:'希腊语',vi:'越南语',es:'西班牙语',fr:'法语',de:'德语',pt:'葡萄牙语',it:'意大利语',id:'印尼语',ms:'马来语','zh-TW':'繁体中文',tr:'土耳其语'};
 type Tone='ok'|'warn'|'bad'|'busy'|'muted';
 const STATUS:Record<PanelState['status'],[string,Tone]|null>={unavailable:['编辑器未就绪','warn'],idle:null,translating:['翻译中','busy'],ready:['译文就绪','ok'],stale:['待更新','busy'],failed:['翻译失败','bad'],needs_login:null};
 export const PANEL_HINT='替换后仍需您在原客户端手动发送';
 export const SEND_HINT='按 Enter 直接发送译文';
+export type PanelDensity='off'|'bar'|'card';
+/** Idle panels fold to the bar; a draft, a preview or a blocking account/fallback problem opens the card. */
+export function panelDensity(state:PanelState):PanelDensity{
+  if(!state.enabled)return 'off';
+  if(state.auth==='needs_login'||state.auth==='failed'||state.error?.includes('兜底语言'))return 'card';
+  return state.draft?.text.trim()||state.preview?'card':'bar';
+}
 const ORDER_RE=/^[A-Za-z0-9_-]{1,100}$/;
 const CONTAINED=['keydown','keyup','keypress','beforeinput','input','paste','copy','cut','compositionstart','compositionupdate','compositionend','click','mousedown','pointerdown'];
 const ICONS={
@@ -42,6 +51,7 @@ svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:
 .badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;max-width:260px}
 .badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
 .badge span{overflow:hidden;text-overflow:ellipsis}
+.idle{font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .badge[data-tone="ok"]{color:var(--ok)}.badge[data-tone="warn"]{color:var(--warn)}.badge[data-tone="bad"]{color:var(--bad)}.badge[data-tone="busy"]::before{animation:pulse 1s infinite}
 @keyframes pulse{50%{opacity:.25}}
 .spacer{flex:1}
@@ -49,9 +59,7 @@ svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:
 .find{margin-right:-4px}
 .order .num{font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;max-width:140px}
 .body{padding:0 10px 10px}.off .body{display:none}
-.card{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}.card.ready{border-color:#c9d3f5}
-.stalebar{display:flex;align-items:center;gap:6px;padding:6px 12px 0;font-size:11.5px;color:var(--warn)}
-.stalebar::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1s infinite}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden;animation:rise .12s ease-out}.card.ready{border-color:#c9d3f5}
 .preview{padding:9px 12px 4px;min-height:38px;max-height:min(120px,20vh);overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13.5px;line-height:1.55}
 .preview.empty{color:var(--ink-3);font-size:13px}.preview.stale{color:var(--ink-3)}
 .skeleton{padding:12px 12px 6px;display:grid;gap:7px}
@@ -60,9 +68,8 @@ svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:
 @keyframes shimmer{to{background-position:-200% 0}}
 .foot{display:flex;align-items:center;gap:8px;padding:4px 6px 6px 12px;min-height:38px}
 .meta{flex:1;font-size:11.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.meta.stale{color:var(--warn)}.meta.stale::before{content:"";display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:50%;background:currentColor;vertical-align:1px;animation:pulse 1s infinite}
 .buttons{display:flex;align-items:center;gap:2px;flex:none}
-.ghost{height:28px;padding:0 8px;border-radius:7px;display:inline-flex;align-items:center;gap:5px;color:var(--ink-2);font-size:12.5px}
-.ghost:hover:not(:disabled){background:#f0f2f6;color:var(--ink)}
 .primary{height:28px;padding:0 6px 0 11px;margin-left:4px;border-radius:7px;display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#fff;font-weight:600;font-size:12.5px;box-shadow:0 1px 2px rgba(58,91,217,.35)}
 .primary:hover:not(:disabled){filter:brightness(1.07)}
 kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:0 5px;border-radius:4px;background:rgba(255,255,255,.18)}
@@ -94,9 +101,10 @@ kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padd
 .field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .field button{height:32px;padding:0 12px;border-radius:8px;background:var(--ink);color:#fff;font-weight:600}
 .note{font-size:11px;color:var(--ink-3);margin:8px 2px 0}.note.error{color:var(--bad)}
-@container (max-width:560px){.title,.badge span,.ghost span{display:none}.order .num{max-width:72px}}
-@container (max-width:380px){.order .num,.meta,kbd{display:none}.foot{justify-content:flex-end}.lang{padding:0 6px}}
+@container (max-width:560px){.title,.badge span,.idle{display:none}.order .num{max-width:72px}}
+@container (max-width:380px){.order .num,.meta:not(.stale),kbd{display:none}.foot{justify-content:flex-end}.lang{padding:0 6px}}
 @media (max-height:650px){.preview{max-height:64px}}
+@media (prefers-reduced-motion:reduce){.card,.pop{animation:none}.badge::before,.meta.stale::before,.skeleton i{animation:none!important}}
 [hidden]{display:none!important}`;
 export interface PanelBridge {invoke(action:string,args?:unknown[]):Promise<void>}
 export interface OutboundPanel {render(state:PanelState):void;setOrder(order:string|undefined):void;attach():boolean;readonly host:HTMLElement;readonly anchor:HTMLElement|undefined;readonly editor:HTMLElement|undefined;dispose():void}
@@ -104,7 +112,7 @@ type Popover='languages'|'query'|'menu';
 /** `openOrder` opens the TSim operator window: the detected order chip opens directly, the search button queries any other identifier. */
 export function createOutboundPanel(document:Document,bridge:PanelBridge,initial:PanelState,hooks:{openOrder?(order:string,identifierType?:OperatorIdentifierType):void;orderUnavailableReason?:string}={}):OutboundPanel{
   const unavailableReason=hooks.orderUnavailableReason??(!hooks.openOrder?'订单查询不可用：尚未连接 TSim 内嵌页面':undefined);
-  const view=document.defaultView!;let state=initial,disposed=false,composing=false,editor:HTMLElement|undefined,anchor:HTMLElement|undefined,timer:number|undefined,notice='',noticeTimer:number|undefined,open:Popover|null=null,orderValue:string|undefined;
+  const view=document.defaultView!;let state=initial,shown:PanelDensity|undefined,shownConversation:string|null|undefined,collapseTimer:number|undefined,disposed=false,composing=false,editor:HTMLElement|undefined,anchor:HTMLElement|undefined,timer:number|undefined,notice='',noticeTimer:number|undefined,open:Popover|null=null,orderValue:string|undefined;
   const host=document.createElement('div');host.id=PANEL_HOST_ID;host.setAttribute('data-tsim-owned','1');host.setAttribute('aria-label','出站翻译');
   const contain=(event:Event)=>event.stopPropagation();CONTAINED.forEach(type=>host.addEventListener(type,contain));
   const shadow=host.attachShadow({mode:'open'});
@@ -115,20 +123,20 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   // Bar: switch, language, status, other-order search, detected order, more.
   const bar=make('div','bar'),toggle=button('switch'),title=make('span','title','出站翻译');toggle.setAttribute('role','switch');
   const lang=button('chip lang'),langText=make('span'),langTag=make('span','tag');lang.setAttribute('aria-haspopup','listbox');lang.setAttribute('aria-label','目标语言');lang.append(langText,langTag,icon('chevron'));
-  const badge=make('span','badge'),badgeText=make('span');badge.setAttribute('role','status');badge.append(badgeText);
+  const badge=make('span','badge'),badgeText=make('span'),idle=make('span','idle');badge.setAttribute('role','status');badge.append(badgeText);idle.hidden=true;
   const find=button('icon find','','查询其他订单');find.setAttribute('aria-label','查询其他订单');find.setAttribute('aria-haspopup','dialog');find.append(icon('search'));
   const order=button('chip order'),orderNumber=make('span','num');order.hidden=true;
   const more=button('icon more','','更多');more.setAttribute('aria-label','更多');more.setAttribute('aria-haspopup','menu');more.append(icon('more'));
-  bar.append(toggle,title,lang,badge,make('span','spacer'),find,order,more);
-  // Body: one card that shows either the preview, a skeleton or a callout.
-  const body=make('div','body'),card=make('div','card'),stalebar=make('div','stalebar','草稿已修改，等待更新译文'),preview=make('div','preview'),skeleton=make('div','skeleton');preview.setAttribute('aria-live','polite');skeleton.append(make('i'),make('i'));
+  bar.append(toggle,title,lang,badge,idle,make('span','spacer'),find,order,more);
+  // Body: one card that shows either the preview, a skeleton or a callout; folded away while idle.
+  const body=make('div','body'),card=make('div','card'),preview=make('div','preview'),skeleton=make('div','skeleton');preview.setAttribute('aria-live','polite');skeleton.append(make('i'),make('i'));
   const callout=make('div','callout'),calloutIcon=make('span'),calloutText=make('p'),login=button('solid login','登录 TSim'),resume=button('outline','恢复翻译'),retryFailed=button('outline','重试'),chooseFallback=button('outline fallback-action','修改兜底语言');calloutIcon.style.display='contents';callout.append(calloutIcon,calloutText,login,resume,retryFailed,chooseFallback);
   const foot=make('div','foot'),meta=make('span','meta'),source=make('span'),hint=make('span','hint',PANEL_HINT),buttons=make('div','buttons');meta.append(source,hint);
-  const retry=button('ghost','','重新翻译'),copy=button('ghost','','复制译文'),replace=button('primary');retry.append(icon('retry'),make('span','','重试'));copy.append(icon('copy'),make('span','','复制'));retry.setAttribute('aria-label','重试');copy.setAttribute('aria-label','复制译文');
+  const retry=button('icon','','重新翻译'),copy=button('icon','','复制译文'),replace=button('primary');retry.append(icon('retry'));copy.append(icon('copy'));retry.setAttribute('aria-label','重试');copy.setAttribute('aria-label','复制译文');
   const mac=/Mac|iPhone|iPad|iPod/i.test(view.navigator.platform||view.navigator.userAgent);
   const shortcut=mac?'⌘ + ⌥ + Enter':'Ctrl + Alt + Enter';
   replace.append(make('span','','替换草稿'),make('kbd','',mac?'⌘⌥↵':'Ctrl Alt ↵'));replace.title=`替换草稿（不发送） · ${shortcut}`;replace.setAttribute('aria-keyshortcuts',mac?'Meta+Alt+Enter':'Control+Alt+Enter');
-  buttons.append(retry,copy,replace);foot.append(meta,buttons);card.append(stalebar,preview,skeleton,callout,foot);body.append(card);
+  buttons.append(retry,copy,replace);foot.append(meta,buttons);card.append(callout,preview,skeleton,foot);body.append(card);
   // Popovers are fixed-positioned outside the size container so a clipping vendor ancestor cannot hide them.
   const languages=make('div','pop languages'),follow=button('option follow'),followText=make('span'),followLabel=make('span','','跟随客户语言'),followLang=make('small');languages.setAttribute('role','listbox');languages.setAttribute('aria-label','目标语言');follow.setAttribute('role','option');followText.append(followLabel,followLang);follow.append(followText);
   const search=make('div','search'),searchInput=make('input'),grid=make('div','grid');searchInput.placeholder='搜索语言';searchInput.setAttribute('aria-label','搜索语言');search.append(icon('search'),searchInput);
@@ -240,6 +248,11 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   function render(next:PanelState){
     state=next;if(disposed)return;const on=state.enabled,paused=!!state.translationPaused;
     if(!on&&open==='languages')setOpen(null);
+    // Expand at once; within one conversation fold only after the draft has stayed empty for the grace period.
+    const wanted=panelDensity(state),sameConversation=shownConversation===state.conversationKey;shownConversation=state.conversationKey;
+    if(wanted==='bar'&&shown==='card'&&sameConversation){if(collapseTimer===undefined)collapseTimer=view.setTimeout(()=>{collapseTimer=undefined;shown='bar';render(state);},COLLAPSE_DELAY_MS);}
+    else{view.clearTimeout(collapseTimer);collapseTimer=undefined;shown=wanted;}
+    if(body.hidden!==(shown!=='card'))body.hidden=shown!=='card';
     panel.classList.toggle('off',!on);toggle.setAttribute('aria-checked',String(on));toggle.title=on?'关闭出站翻译':'开启出站翻译';toggle.setAttribute('aria-label',toggle.title);lang.hidden=!on;more.hidden=false;disable.disabled=!on;
     // Language chip and list.
     const following=state.followCustomer.following,customer=state.followCustomer.lang,resolution=state.followCustomer.resolution,collecting=resolution?.status==='collecting',fallback=following&&resolution?.status==='fallback',customerName=LANGUAGE_NAMES[customer??'']??(customer==='unknown'||!customer?'未识别':customer);
@@ -260,9 +273,12 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     // Status badge.
     const status:[string,Tone]|null=notice?[notice,noticeTone]:!on?null:state.auth==='connecting'?['正在连接…','busy']:state.auth==='needs_login'?['需登录','warn']:state.auth==='failed'?['连接失败','bad']:paused?['翻译已暂停','warn']:state.sendPending?['译文生成后自动发送','busy']:STATUS[state.status];
     badge.hidden=!status;badgeText.textContent=status?.[0]??'';badge.dataset.tone=status?.[1]??'muted';badge.title=badgeText.textContent;
+    // The folded bar keeps one quiet line saying what happens next.
+    const idleText=shown==='bar'&&!status?(following&&customer==='zh'?'客户使用中文，无需翻译':collecting?'正在识别客户语言…':'输入中文后自动生成译文'):'';
+    if(idle.textContent!==idleText)idle.textContent=idleText;if(idle.hidden!==!idleText)idle.hidden=!idleText;
     // Card content.
     const text=state.preview??'',stale=!!text&&(state.status==='stale'||state.status==='translating');
-    callout.hidden=true;preview.hidden=skeleton.hidden=foot.hidden=stalebar.hidden=true;
+    callout.hidden=true;preview.hidden=skeleton.hidden=foot.hidden=true;meta.classList.remove('stale');
     const automaticHint=following&&!text&&!fallback?(customer==='zh'?'客户使用中文，无需翻译；如需翻译，请在左上角手动选择语言':collecting?'正在采集客户原文，完成后自动确定目标或使用配置的兜底语言':!customer||customer==='unknown'?'当前服务未提供语言识别状态，请手动选择目标语言':!supported?`客户语言（${customerName}）暂不支持自动翻译，请手动选择目标语言`:''):'';
     if(state.auth==='connecting'){skeleton.hidden=foot.hidden=false;source.textContent='正在连接 TSim 登录服务，请稍候';}
     else if(state.auth==='needs_login')showCallout('info','lock','请先登录 TSim_CS 的 Edge / Chrome 页面，助手自动复用登录，无需重复输入密码',login);
@@ -274,9 +290,9 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     else if(state.status==='unavailable')showCallout('warn','alert','未找到可用的回复编辑器，请点击回复框后重试');
     else if(state.status==='translating'&&!text){skeleton.hidden=foot.hidden=false;source.textContent=`正在翻译为${fallback?`${fallbackName}（兜底，非识别结果）`:following?customerName:targetName}…`;}
     else{
-      preview.hidden=foot.hidden=false;stalebar.hidden=!stale;
+      preview.hidden=foot.hidden=false;meta.classList.toggle('stale',stale);
       preview.textContent=text||'输入中文后自动生成译文预览';preview.classList.toggle('empty',!text);preview.classList.toggle('stale',stale);
-      source.textContent=text?(following?(fallback?`${fallbackName}兜底 · 非识别结果 · `:`根据客户最近消息识别为${customerName} · `):`手动指定${targetName} · `):'';
+      source.textContent=stale?'草稿已修改，等待更新译文':text?(following?(fallback?`${fallbackName}兜底 · 非识别结果 · `:`根据客户最近消息识别为${customerName} · `):`手动指定${targetName} · `):'';
     }
     if(fallbackHint&&state.auth==='ready'&&!paused&&state.status!=='failed'&&state.status!=='unavailable'&&!state.error?.includes('兜底语言'))showCallout('warn','info',fallbackHint,chooseFallback,!preview.hidden);
     hint.hidden=!text||stale;
@@ -290,5 +306,5 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   const observer=new view.MutationObserver(mutations=>{if(mutations.every(mutation=>{const target=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;const changed=[...mutation.addedNodes,...mutation.removedNodes];return !!target?.closest('[data-tsim-owned="1"]')||changed.length>0&&changed.every(node=>node===host);}))return;schedule();});
   const onVisibility=()=>{view.clearTimeout(timer);if(document.visibilityState==='hidden'){setOpen(null);removeLogin(true);}else attach();};document.addEventListener('visibilitychange',onVisibility);
   render(state);attach();if(document.body)observer.observe(document.body,{childList:true,subtree:true});
-  return{render,setOrder,attach,host,get anchor(){return anchor;},get editor(){return editor;},dispose(){if(disposed)return;setOpen(null);removeLogin();view.removeEventListener('message',onLoginMessage);disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);document.removeEventListener('pointerdown',onOutside,true);view.removeEventListener('resize',onResize);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
+  return{render,setOrder,attach,host,get anchor(){return anchor;},get editor(){return editor;},dispose(){if(disposed)return;view.clearTimeout(collapseTimer);setOpen(null);removeLogin();view.removeEventListener('message',onLoginMessage);disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);document.removeEventListener('pointerdown',onOutside,true);view.removeEventListener('resize',onResize);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
 }
