@@ -84,6 +84,15 @@
       "artifactName": "TravelMerchantCompanion-${version}-win-x64.exe"
     },
     "mac": {
+      "electronLanguages": ["en", "en_GB", "zh_CN", "zh_TW"],
+      "files": [
+        "dist/**/*",
+        "dist-electron/main.cjs",
+        "dist-electron/preload.cjs",
+        "licenses/**/*",
+        "package.json",
+        "!node_modules{,/**/*}"
+      ],
       "target": [
         {
           "target": "dir"

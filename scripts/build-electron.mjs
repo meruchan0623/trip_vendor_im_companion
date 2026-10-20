@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
+import { isBuiltin } from 'node:module';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 // Selects the vendor build manifest compiled into every bundle; cross-build with TMC_RUNTIME_PLATFORM=win32|darwin.
 const runtimePlatform=process.env.TMC_RUNTIME_PLATFORM||process.platform;
@@ -25,5 +26,9 @@ await mkdir('dist-runtime',{recursive:true});
 await writeFile('dist-runtime/runtime-ui.js',runtimeSource);
 await writeFile('dist-runtime/native-composer.js',nativeSource);
 await writeFile('dist-runtime/artifact.json',JSON.stringify({kind:'embedded-companion',customerSend:'user-enter',runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)},null,2));
-await build({entryPoints:['electron/main.ts','electron/preload.ts'],bundle:true,platform:'node',target:'node24',format:'cjs',outdir:'dist-electron',outExtension:{'.js':'.cjs'},external:['electron'],define:{...platformDefine,__NATIVE_ARTIFACT_SOURCE__:JSON.stringify(nativeSource),__NATIVE_ARTIFACT_SHA256__:JSON.stringify(hash(nativeSource)),__RUNTIME_ARTIFACT_SOURCE__:JSON.stringify(runtimeSource),__RUNTIME_ARTIFACT_SHA256__:JSON.stringify(hash(runtimeSource))}});
+const host=await build({entryPoints:['electron/main.ts','electron/preload.ts'],bundle:true,metafile:true,platform:'node',target:'node24',format:'cjs',outdir:'dist-electron',outExtension:{'.js':'.cjs'},external:['electron'],define:{...platformDefine,__NATIVE_ARTIFACT_SOURCE__:JSON.stringify(nativeSource),__NATIVE_ARTIFACT_SHA256__:JSON.stringify(hash(nativeSource)),__RUNTIME_ARTIFACT_SOURCE__:JSON.stringify(runtimeSource),__RUNTIME_ARTIFACT_SHA256__:JSON.stringify(hash(runtimeSource))}});
+// Mac packaging omits node_modules: every application dependency must be bundled.
+for(const output of Object.values(host.metafile.outputs))for(const dependency of output.imports){
+  if(dependency.external&&dependency.path!=='electron'&&!isBuiltin(dependency.path))throw new Error('UNBUNDLED_HOST_DEPENDENCY '+dependency.path);
+}
 console.log(JSON.stringify({event:'embedded_build_complete',runtimePlatform,customerSend:'user-enter',runtimeSha256:hash(runtimeSource),nativeSha256:hash(nativeSource)}));

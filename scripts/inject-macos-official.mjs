@@ -13,6 +13,7 @@ import {userInfo} from 'node:os';
 import {launcherSource} from './install-macos-companion.mjs';
 import {patchVendorAsar, sha256} from './lib/mac-pkg-asar.mjs';
 import {OFFICIAL_REQUIREMENT} from './lib/mac-pkg-installer.mjs';
+import {verifyPackedMacHelper} from './lib/mac-helper-package.mjs';
 
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('APPLE_SILICON_BUILD_HOST_REQUIRED');
 const TARGET = '/Applications/旅游商家桌面版.app', APP_NAME = '旅游商家桌面版.app', HELPER = '旅游商家助手.app';
@@ -95,6 +96,7 @@ const env = {...process.env, TMC_RUNTIME_PLATFORM: 'darwin', TMC_MACOS_MANIFEST:
 run('npm', ['run', 'build:native:mac'], env); run('npm', ['run', 'build'], env);
 run('npx', ['electron-builder', '--mac', 'dir', '--arm64', '-c.directories.output=work/mac-inject/helper'], env);
 const helper = join(work, 'helper/mac-arm64', HELPER), companionExecutable = plist(helper, 'CFBundleExecutable');
+console.log(JSON.stringify({event:'mac_helper_package_verified',...await verifyPackedMacHelper(helper)}));
 
 // 3. Inject the helper, launcher and bootstrap, then re-sign the whole bundle ad hoc.
 const launcherSwift = join(work, 'Launcher.swift'); await writeFile(launcherSwift, launcherSource);
