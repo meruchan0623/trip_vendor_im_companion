@@ -1,12 +1,14 @@
 import {ownedLoginURL,isLoginPopoverId,type LoginPopover} from '../src/shared/owned-login';
 import { randomUUID, createHash } from 'node:crypto';
 import { BrowserProfileSessionService, type BrowserProfileSessionOptions } from './browser-profile-session';
-import { isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, sameVerifiedDraft, type OutboundMode, type PanelTarget, type PanelOrderState, type PsimIdentity, type VerifiedComposerSnapshot } from '../src/shared/workbench';
+import { isCustomerLanguage, isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, sameVerifiedDraft, type OutboundMode, type PanelTarget, type PanelOrderState, type PsimIdentity, type VerifiedComposerSnapshot } from '../src/shared/workbench';
 import type { StandaloneState, OrderEntry } from '../src/shared/companion-api';
 import type {NativeInteraction} from '../runtime/native-composer';
 import type { NativeAdapter, NativeDraftSnapshot, WindowState } from './native-adapter';
 import { connectExternalComposer, type ExternalComposer } from './external-composer';
 import { embeddedPanelState, invokeEmbeddedAction } from './embedded-host';
+import {collectingCustomerLanguage,emptyLanguageCounts,isCustomerLanguageResolution,resolveCustomerLanguage,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../src/shared/customer-language';
+import type {TranslationOptionsStore} from './translation-options-store';
 import type {BrowserProfile} from './browser-profile-session';
 import type {OperatorSelection} from './system-browser';
 import {reportVendorProgress} from './vendor-progress';
@@ -14,6 +16,9 @@ import {reportVendorProgress} from './vendor-progress';
 type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
 const messages:Record<string,string>={
+  TRANSLATION_OPTIONS_READ_FAILED:'无法读取兜底语言设置，请重新选择并保存。',
+  TRANSLATION_OPTIONS_INVALID:'兜底语言设置无效，请重新选择并保存。',
+  TRANSLATION_OPTIONS_SAVE_FAILED:'兜底语言保存失败，仍保留原设置，请重试。',
   MESSAGE_PAGE_INACTIVE:'请先切换到旅游商家的“消息”页面并打开客户会话。',
   PSIM_LOGIN_REQUIRED:'请先在 Edge 或 Chrome 登录 TSim_CS，助手将自动复用浏览器会话。',
   SESSION_STORAGE_ENCRYPTION_UNAVAILABLE:'系统安全存储不可用，请解锁系统钥匙串后重试。',
@@ -50,6 +55,7 @@ const messages:Record<string,string>={
 };
 /** Quiet period after the last edit before an automatic outbound translation request. */
 export const AUTO_TRANSLATE_DELAY_MS=500;
+export const CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS=5000;
 export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
@@ -61,10 +67,11 @@ export class CompanionService {
   private loginPopover:LoginPopover|undefined;
   private loginGeneration=0;
   private loginOpening:{epoch:number;generation:number}|undefined;
-  private state:StandaloneState={attached:false,targetInstanceId:null,nativeStatus:'starting',auth:'connecting',accountScope:'unknown',draft:null,preview:null,phase:'idle',error:null,language:'en',customerLanguage:'unknown',followCustomerLanguage:true,autoTranslate:true,shortcutEnabled:true,outboundMode:'send',sendPending:false,translationPaused:false,browserOpen:false,composerSource:'unavailable',orderEntries:[],orderViewport:null,messageSurface:{active:false,composerRect:null,toolbarRect:null}};
+  private state:StandaloneState={attached:false,targetInstanceId:null,nativeStatus:'starting',auth:'connecting',accountScope:'unknown',draft:null,preview:null,phase:'idle',error:null,language:'en',customerLanguage:'unknown',fallbackTarget:'en',customerLanguageResolution:unavailableCustomerLanguage(),followCustomerLanguage:true,autoTranslate:true,shortcutEnabled:true,outboundMode:'send',sendPending:false,translationPaused:false,browserOpen:false,composerSource:'unavailable',orderEntries:[],orderViewport:null,messageSurface:{active:false,composerRect:null,toolbarRect:null}};
   private listeners=new Set<(state:StandaloneState)=>void>();
   private psim:SessionPort;
   private sessionStarting:Promise<void>;
+  private translationOptionsStarting:Promise<void>;
   private external?:ExternalComposer;
   private externalConnecting?:Promise<void>;
   private stopInteraction?:()=>void;
@@ -78,7 +85,17 @@ export class CompanionService {
   private orderGeneration=0;
   private orderRequest?:AbortController;
   private clearOrder(){this.invalidateOrderWindow();++this.orderGeneration;this.orderRequest?.abort();this.orderRequest=undefined;this.order={identifier:'',status:'idle',error:null,fields:[]};}
-  private resetCustomerLanguage(){this.state.customerLanguage='unknown';this.state.followCustomerLanguage=true;this.state.language='en';this.translationIntent++;this.attempted=undefined;this.suppressed=undefined;}
+  private customerResolutionTimer?:ReturnType<typeof setTimeout>;
+  private customerResolutionGeneration=0;
+  private automaticTarget(){return isPanelTarget(this.state.customerLanguage)?this.state.customerLanguage:this.state.customerLanguageResolution?.status==='fallback'?this.state.fallbackTarget??'en':undefined;}
+  private applyAutomaticTarget(){if(this.state.followCustomerLanguage===false)return;const target=this.automaticTarget();if(target)this.state.language=target;}
+  private invalidateLanguage(){this.clearPendingSend();this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;}
+  private resetCustomerLanguage(collecting=true){
+    clearTimeout(this.customerResolutionTimer);const generation=++this.customerResolutionGeneration;
+    this.state.customerLanguage='unknown';this.state.customerLanguageResolution=collecting?collectingCustomerLanguage():unavailableCustomerLanguage();this.state.followCustomerLanguage=true;this.state.language=this.state.fallbackTarget??'en';this.translationIntent++;this.attempted=undefined;this.suppressed=undefined;
+    if(!collecting){this.customerResolutionTimer=undefined;return;}
+    this.customerResolutionTimer=setTimeout(()=>{this.customerResolutionTimer=undefined;if(this.closed||generation!==this.customerResolutionGeneration||this.state.customerLanguageResolution?.status!=='collecting')return;this.state.customerLanguageResolution=unavailableCustomerLanguage();if(this.state.followCustomerLanguage!==false){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();},CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS);
+  }
   private contextChanged(){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
   private embeddedState(){return {...(this.orderWindow?{orderWindowMode:'browser' as const}:{}),...embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null),...(this.loginPopover?{loginPopover:{...this.loginPopover}}:{})};}
   private retireComposer(composer:ExternalComposer){
@@ -97,7 +114,7 @@ export class CompanionService {
   private interactionTask?:Promise<void>;
   private nativeOptions?:string;
   /** Whether an outbound translation is expected for the current draft; otherwise Enter stays with the vendor. */
-  private translationApplies(){return this.state.autoTranslate!==false&&!this.state.translationPaused&&this.state.auth==='ready'&&(this.state.followCustomerLanguage===false||isPanelTarget(this.state.customerLanguage));}
+  private translationApplies(){return this.state.autoTranslate!==false&&!this.state.translationPaused&&this.state.auth==='ready'&&(this.state.followCustomerLanguage===false||!!this.automaticTarget());}
   private syncInteractionOptions(){const external=this.external;if(!external?.setInteractionOptions)return;const options={shortcutEnabled:this.state.shortcutEnabled!==false,enterSend:this.state.outboundMode==='send'&&this.translationApplies()},key=JSON.stringify(options);if(key===this.nativeOptions)return;this.nativeOptions=key;void external.setInteractionOptions(options).catch(()=>{if(this.external===external)this.nativeOptions=undefined;});}
   private retireInteractions(){this.stopInteraction?.();this.stopInteraction=undefined;this.stopInvalidation?.();this.stopInvalidation=undefined;this.nativeOptions=undefined;this.interactionRefresh=false;this.interactionTask=undefined;}
   private interaction(event:NativeInteraction,external:ExternalComposer){
@@ -142,13 +159,18 @@ export class CompanionService {
   private stopTimer(){if(this.autoTimer)clearTimeout(this.autoTimer);this.autoTimer=undefined;}
   private schedule(delay=this.pendingSend?0:AUTO_TRANSLATE_DELAY_MS){
     const capture=this.captured,key=this.signature();
-    if(this.state.followCustomerLanguage!==false&&!isPanelTarget(this.state.customerLanguage))return;
+    if(this.state.followCustomerLanguage!==false&&!this.automaticTarget())return;
     if(this.closed||!this.foreground||!this.state.autoTranslate||this.state.translationPaused||this.state.auth!=='ready'||capture?.source!=='verified-editor'||!capture.snapshot.isPlainText||capture.snapshot.composing||!capture.snapshot.text.trim()||key===this.attempted||key===this.suppressed)return;
     if(this.autoTimer){this.state.phase='waiting';return;}
     this.state.phase='waiting';
     this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.busy||this.externalConnecting){this.schedule(this.pendingSend?25:AUTO_TRANSLATE_DELAY_MS);return;}this.attempted=key;void this.translate(this.state.language,key);},delay);
   }
-  async setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}){
+  async setTranslationOptions(options:{fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}){
+    if(options.fallbackTarget!==undefined){
+      if(!isPanelTarget(options.fallbackTarget))throw new Error('INVALID_FALLBACK_TARGET');await this.translationOptionsStarting;
+      try{await this.translationOptionsStore?.save({fallbackTarget:options.fallbackTarget});}catch{const error=new Error('TRANSLATION_OPTIONS_SAVE_FAILED');this.fail(error);throw error;}
+      if(this.closed)return;const previous=this.automaticTarget();this.state.fallbackTarget=options.fallbackTarget;if(this.state.followCustomerLanguage!==false&&previous!==this.automaticTarget()){this.invalidateLanguage();this.applyAutomaticTarget();}this.state.error=null;
+    }
     if(options.outboundMode!==undefined){if(!isOutboundMode(options.outboundMode))throw new Error('INVALID_OUTBOUND_MODE');if(options.outboundMode!==this.state.outboundMode){this.clearPendingSend();this.state.outboundMode=options.outboundMode;}}
     if(options.shortcutEnabled!==undefined){if(typeof options.shortcutEnabled!=='boolean')throw new Error('INVALID_SHORTCUT_OPTION');this.state.shortcutEnabled=options.shortcutEnabled;}
     if(options.language!==undefined&&!isPanelTarget(options.language))throw new Error('INVALID_LANGUAGE');
@@ -157,20 +179,21 @@ export class CompanionService {
     if(options.autoTranslate!==undefined&&options.autoTranslate!==this.state.autoTranslate){this.clearPendingSend();this.translationIntent++;this.invalidate();this.state.autoTranslate=options.autoTranslate;this.attempted=undefined;}
     this.schedule();this.publish();
   }
-  async reportCustomerLanguage(language:string,conversationKey:string){
-    if(!/^(unknown|zh|en|ja|ko|ar|ru|el|th|es|fr|de|pt|it|vi|id|ms)$/.test(language)||conversationKey!==this.context()||!this.external||!this.state.messageSurface?.active)return;
+  async reportCustomerLanguage(language:string,conversationKey:string,resolution?:CustomerLanguageResolution){
+    if(!isCustomerLanguage(language)||resolution!==undefined&&!isCustomerLanguageResolution(resolution,language)||conversationKey!==this.context()||!this.external||!this.state.messageSurface?.active)return;
     if(!await this.waitForObservation())return;await this.acquireEditor();
     const epoch=this.epoch,customerContext=this.verifiedCustomerContext;
-    try{const capture=await this.capture();if(epoch!==this.epoch||this.closed)return;this.adopt(capture);if(conversationKey!==this.context(capture)||customerContext!==undefined&&customerContext!==this.customerContext(capture)){this.publish();return;}if(language==='unknown'&&this.state.customerLanguage!=='unknown'||language===this.state.customerLanguage){this.publish();return;}this.state.customerLanguage=language;if(this.state.followCustomerLanguage!==false){this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;if(isPanelTarget(language))this.state.language=language;this.schedule();}this.publish();}catch(error){if(epoch===this.epoch&&!this.closed)this.fail(error,true);}finally{this.setBusy(false);}
+    try{const capture=await this.capture();if(epoch!==this.epoch||this.closed)return;this.adopt(capture);if(conversationKey!==this.context(capture)||customerContext!==undefined&&customerContext!==this.customerContext(capture)){this.publish();return;}clearTimeout(this.customerResolutionTimer);this.customerResolutionTimer=undefined;const previousLanguage=this.state.customerLanguage,previousStatus=this.state.customerLanguageResolution?.status;this.state.customerLanguageResolution=resolution?structuredClone(resolution):language==='unknown'?unavailableCustomerLanguage():resolveCustomerLanguage(language,emptyLanguageCounts());this.state.customerLanguage=language;if(this.state.followCustomerLanguage!==false&&(previousLanguage!==language||previousStatus!==this.state.customerLanguageResolution.status)){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();}catch(error){if(epoch===this.epoch&&!this.closed)this.fail(error,true);}finally{this.setBusy(false);}
   }
-  async followCustomerLanguage(){this.state.followCustomerLanguage=true;this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;if(isPanelTarget(this.state.customerLanguage))this.state.language=this.state.customerLanguage;this.schedule();this.publish();}
+  async followCustomerLanguage(){if(this.state.followCustomerLanguage!==false)return;this.clearPendingSend();this.state.followCustomerLanguage=true;this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.applyAutomaticTarget();this.schedule();this.publish();}
   async cancelTranslation(){this.clearPendingSend();this.translationIntent++;this.pausedContext=this.customerContext();this.state.translationPaused=true;this.invalidate();this.state.phase='idle';this.state.error=null;this.publish();}
   async resumeTranslation(){this.translationIntent++;this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;this.invalidate();this.state.phase='idle';this.schedule();this.publish();}
 
   private sessionError:string|null=null;
   private sourceFailure=false;
   private surfaceMeasurementRevision=0;
-  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:never,private orderWindow?:OrderWindowPort){
+  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort){
+    this.translationOptionsStarting=(translationOptionsStore?.load()??Promise.resolve({fallbackTarget:'en' as const})).then(options=>{if(this.closed)return;const previous=this.automaticTarget();this.state.fallbackTarget=options.fallbackTarget;if(this.state.followCustomerLanguage!==false&&previous!==this.automaticTarget()){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();}).catch(error=>{if(!this.closed)this.fail(error);});
     this.psim=sessionFactory(identity=>{
       const sessionIdentity=identity?.accountScope;
       if(sessionIdentity!==undefined&&this.sessionIdentity!==undefined&&sessionIdentity!==this.sessionIdentity){this.contextChanged();this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;}
@@ -210,7 +233,7 @@ export class CompanionService {
   reportBrowserFailure(code:'BROWSER_PLACEMENT_FAILED'|'BROWSER_CLEANUP_UNCONFIRMED'|'BROWSER_SPACE_TOO_SMALL'){this.fail(new Error(code));}
   setWindowState(window:WindowState|null){
     if(this.closed)return;
-    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.loginPopover=undefined;this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();}
+    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.loginPopover=undefined;this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage(false);this.clearOrder();}
     if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectionAbort?.abort();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
@@ -240,6 +263,7 @@ export class CompanionService {
     this.surfaceMeasurementRevision++;
     if(capture.source==='verified-editor'){
       const customerContext=this.customerContext(capture);
+      if(this.verifiedCustomerContext===undefined)this.resetCustomerLanguage();
       const context=JSON.stringify([this.context(capture),capture.snapshot.editorIdentity,capture.snapshot.composerId,capture.snapshot.documentGeneration]);
       if(this.verifiedCustomerContext!==undefined&&this.verifiedCustomerContext!==customerContext)this.contextChanged();
       else if(this.verifiedContext!==undefined&&this.verifiedContext!==context){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.clearOrder();this.onContextChanged();}
@@ -309,8 +333,9 @@ export class CompanionService {
     let intent=this.translationIntent;
     await this.sessionStarting;
     if(intent!==this.translationIntent||!this.foreground||this.state.translationPaused)return;
+    await this.translationOptionsStarting;
     if(!automaticSignature&&target!==this.state.language)await this.setTranslationOptions({language:target});
-    if(this.state.followCustomerLanguage!==false&&!isPanelTarget(this.state.customerLanguage))return;
+    if(this.state.followCustomerLanguage!==false&&!this.automaticTarget())return;
     // Authentication may publish a newly recovered identity and revoke old reviews.
     // Complete that step before creating this translation's epoch, so a manual retry survives recovery.
     intent=this.translationIntent;const intendedWindow=this.state.targetInstanceId,expectedCustomerContext=this.verifiedCustomerContext;
@@ -466,5 +491,5 @@ export class CompanionService {
     try{await this.psim.logout();this.state.auth='needs_login';this.state.accountScope='unknown';this.state.phase='idle';this.state.error=null;this.publish();}
     catch(error){this.state.auth='failed';this.fail(error);}
   }
-  async dispose(){this.loginPopover=undefined;this.closed=true;this.connectionAbort?.abort();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
+  async dispose(){this.loginPopover=undefined;this.closed=true;clearTimeout(this.customerResolutionTimer);this.customerResolutionGeneration++;this.connectionAbort?.abort();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
 }

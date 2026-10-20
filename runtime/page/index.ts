@@ -1,6 +1,7 @@
 import {matchesPageConversation} from './conversation';
-import {customerLanguage} from './language';
+import {customerLanguageEvidence} from './language';
 import type {PanelState} from '../../src/shared/workbench';
+import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../../src/shared/customer-language';
 import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
 import {createOperatorOverlay,operatorFrameURL,OPERATOR_FRAME_ID,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
 import {createOutboundPanel,PANEL_HOST_ID,type OutboundPanel,type PanelBridge} from './outbound-panel';
@@ -8,52 +9,61 @@ export {TSIM_OPERATOR_ORIGIN};
 export const CUSTOMER_SCAN_DEBOUNCE_MS=300;
 export const CUSTOMER_REPORT_RETRY_MS=1000;
 export const CUSTOMER_REPORT_MAX_ATTEMPTS=4;
+/** After the quick retry window, retain progress at a bounded background rate. */
+export const CUSTOMER_REPORT_RECOVERY_MS=30000;
+export const CUSTOMER_ORIGINALS_LOAD_WINDOW_MS=1500;
 export interface PageGeometry {x:number;y:number;width:number;height:number;viewportWidth:number;viewportHeight:number;devicePixelRatio:number}
 export interface PageFeatures {update(state:PanelState):void;boundary():true;geometry():PageGeometry;dispose():void;readonly overlay:OperatorOverlay;readonly panel:OutboundPanel|undefined}
 /** Production workbench: explicit order queries open the original TSim page. */
 export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge;state?:PanelState;origin?:string;prewarmDelayMs?:number}={}):PageFeatures{
-  const view=document.defaultView!;let disposed=false,state=options.state,conversation:string|null|undefined;
+  const view=document.defaultView!;let disposed=false,state=options.state,conversation:string|null|undefined,originalsDeadline=0;
   const overlay=createOperatorOverlay(document,{origin:options.origin,prewarmDelayMs:options.prewarmDelayMs});
   let browserOrderRequested=false;
   const closeBrowserOrder=()=>{if(!browserOrderRequested)return;browserOrderRequested=false;void options.bridge?.invoke('closeOrder',[]).catch(()=>{});};
   const bound=()=>!!state&&matchesPageConversation(document,state.conversationKey);
   const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>{if(!bound()){overlay.close();return;}if(state?.orderWindowMode==='browser'){browserOrderRequested=true;void options.bridge!.invoke('openOrder',[{identifier,identifierType:identifierType??inferIdentifierType(identifier)??'order_number',conversationKey:state.conversationKey}]).catch(()=>{});}else overlay.open({identifier,identifierType});}}):undefined;
   let renderedBound:boolean|undefined;
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(!currentBound){overlay.close();closeBrowserOrder();}if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false},sendPending:false});};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(!currentBound){overlay.close();closeBrowserOrder();}if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
-  type CustomerReport={signature:string;key:string;lang:string;attempts:number;done:boolean;attempt:number};
+  type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
   let customerTimer:number|undefined,retryTimer:number|undefined,customerReport:CustomerReport|undefined;
   const clearRetry=()=>{view.clearTimeout(retryTimer);retryTimer=undefined;};
-  const reflected=(report:CustomerReport)=>report.lang!=='unknown'&&state?.conversationKey===report.key&&state.followCustomer.lang===report.lang;
+  const reflected=(report:CustomerReport)=>state?.conversationKey===report.key&&state.followCustomer.lang===report.lang&&(!state.followCustomer.resolution||sameCustomerLanguageResolution(state.followCustomer.resolution,report.resolution));
   const active=(report:CustomerReport)=>!disposed&&customerReport===report&&state?.conversationKey===report.key&&bound();
   const retry=(report:CustomerReport)=>{
     clearRetry();
-    if(!active(report)||report.done||report.attempts>=CUSTOMER_REPORT_MAX_ATTEMPTS)return;
-    retryTimer=view.setTimeout(()=>{retryTimer=undefined;if(active(report)&&document.visibilityState!=='hidden')sendCustomer(report);},CUSTOMER_REPORT_RETRY_MS);
+    if(!active(report)||report.done||document.visibilityState==='hidden')return;
+    const delay=report.attempts>=CUSTOMER_REPORT_MAX_ATTEMPTS?CUSTOMER_REPORT_RECOVERY_MS:CUSTOMER_REPORT_RETRY_MS;
+    retryTimer=view.setTimeout(()=>{retryTimer=undefined;if(active(report)&&document.visibilityState!=='hidden')sendCustomer(report);},delay);
   };
   const sendCustomer=(report:CustomerReport)=>{
     if(!active(report)||document.visibilityState==='hidden')return;
     if(reflected(report)){report.done=true;clearRetry();return;}
-    report.attempts++;const attempt=++report.attempt;
+    report.attempts=Math.min(report.attempts+1,CUSTOMER_REPORT_MAX_ATTEMPTS);const attempt=++report.attempt;
     // A missing binding reply also gets a bounded retry. A stale completion
     // cannot acknowledge or restart the newer attempt/conversation.
     retry(report);
-    void options.bridge!.invoke('customerLanguage',[{lang:report.lang,conversationKey:report.key}]).then(()=>{
+    void options.bridge!.invoke('customerLanguage',[{lang:report.lang,conversationKey:report.key,resolution:report.resolution}]).then(()=>{
       if(!active(report)||report.attempt!==attempt)return;
-      // Unknown observations intentionally preserve a known service language,
-      // so their successful acknowledgement is enough; known ones need state.
-      if(report.lang==='unknown'||reflected(report)){report.done=true;clearRetry();}
+      // The bridge can accept an invocation while the service rejects its stale
+      // binding. Every observation needs matching state, including unknown.
+      if(reflected(report)){report.done=true;clearRetry();}
     },()=>{if(active(report)&&report.attempt===attempt&&!report.done)retry(report);});
   };
   const scanCustomer=()=>{
     customerTimer=undefined;
     if(disposed||document.visibilityState==='hidden'||!state?.conversationKey||!options.bridge||!bound())return;
-    const lang=customerLanguage(document),key=state.conversationKey,signature=JSON.stringify([key,lang]);
-    if(customerReport?.signature!==signature){clearRetry();customerReport={signature,key,lang,attempts:0,done:false,attempt:0};}
+    const evidence=customerLanguageEvidence(document);
+    if(!evidence.sampleCount&&state.followCustomer.resolution?.status==='collecting'&&Date.now()<originalsDeadline){customerTimer=view.setTimeout(scanCustomer,originalsDeadline-Date.now());return;}
+    const lang=evidence.language,key=state.conversationKey,resolution=resolveCustomerLanguage(lang,{sampleCount:evidence.sampleCount,evidenceCount:evidence.evidenceCount,recognizedCount:evidence.recognizedCount}),signature=JSON.stringify([key,lang,resolution]);
+    if(customerReport?.signature!==signature){clearRetry();customerReport={signature,key,lang,resolution,attempts:0,done:false,attempt:0};}
     const report=customerReport;
     if(reflected(report)){report.done=true;clearRetry();return;}
-    if(report.done||report.attempts>=CUSTOMER_REPORT_MAX_ATTEMPTS||retryTimer!==undefined)return;
+    if(report.done||retryTimer!==undefined)return;
+    // Visibility/binding recovery must not turn an exhausted quick window into
+    // a new burst. DOM activity cannot reset the report's retry budget either.
+    if(report.attempts>=CUSTOMER_REPORT_MAX_ATTEMPTS){retry(report);return;}
     sendCustomer(report);
   };
   // A throttle guarantees progress while scrolling/rendering continuously.
@@ -63,14 +73,14 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   const orderObserver=new view.MutationObserver(mutations=>{if(disposed||document.visibilityState==='hidden'||mutations.every(m=>{const target=m.target.nodeType===1?m.target as Element:m.target.parentElement;const changed=[...m.addedNodes,...m.removedNodes];return isOwned(target)||changed.length>0&&changed.every(n=>n.nodeType===1&&isOwned(n as Element));}))return;renderCurrent(true);if(orderTimer===undefined)orderTimer=view.setTimeout(syncOrder,150);scheduleCustomer();});
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','src']});syncOrder();}
   function update(next:PanelState){
-    if(disposed)return;const previousLanguage=state?.followCustomer.lang;state=next;
+    if(disposed)return;const previousLanguage=JSON.stringify(state?.followCustomer);state=next;
     // Close the order page on conversation change.
     if(conversation!==undefined&&conversation!==next.conversationKey){overlay.close();closeBrowserOrder();}
     orderObservation?.setConversationKey(next.conversationKey);
-    if(conversation!==next.conversationKey){conversation=next.conversationKey;clearRetry();customerReport=undefined;scheduleCustomer();}
-    else if(previousLanguage!==next.followCustomer.lang){
+    if(conversation!==next.conversationKey){conversation=next.conversationKey;originalsDeadline=Date.now()+CUSTOMER_ORIGINALS_LOAD_WINDOW_MS;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);customerTimer=undefined;scheduleCustomer();}
+    else if(previousLanguage!==JSON.stringify(next.followCustomer)){
       if(customerReport&&reflected(customerReport)){customerReport.done=true;clearRetry();}
-      else if(customerReport?.done&&customerReport.lang!=='unknown'){customerReport=undefined;}
+      else if(customerReport?.done){customerReport=undefined;}
       scheduleCustomer();
     }
     renderCurrent();

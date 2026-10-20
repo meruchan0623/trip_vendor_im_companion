@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "start": "electron .",
     "package:win": "npm run build:native && npm run build && electron-builder --win portable --x64",
+    "package:windows:injector": "node scripts/package-windows-injector.mjs",
     "build:browser-bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File native/browser-bridge/build.ps1",
     "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/windows/build.ps1",
     "build:native:mac": "bash native/macos/build.sh",
@@ -25,8 +26,7 @@
     "prepare:mac:arm64": "node scripts/prepare-macos-arm64.mjs",
     "package:mac:app": "npm run build:native:mac && npm run build && install-electron && electron-builder --mac --arm64",
     "clean:mac": "node scripts/clean-macos-build.mjs",
-    "inject:mac": "node scripts/inject-macos-official.mjs",
-    "package:windows:injector": "node scripts/package-windows-injector.mjs"
+    "inject:mac": "node scripts/inject-macos-official.mjs"
   },
   "dependencies": {
     "react": "19.3.0",
@@ -37,9 +37,11 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "eld": "2.1.0",
     "electron": "44.7.2",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
+    "tinyld": "1.3.4",
     "typescript": "7.0.2",
     "vite": "8.3.4"
   },
@@ -55,6 +57,7 @@
       "dist/**/*",
       "dist-electron/main.cjs",
       "dist-electron/preload.cjs",
+      "licenses/**/*",
       "package.json"
     ],
     "win": {

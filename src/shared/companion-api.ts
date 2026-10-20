@@ -1,5 +1,6 @@
 import type { NativeWindow } from './types';
 import type { OutboundMode, PanelTarget } from './workbench';
+import type {CustomerLanguageResolution} from './customer-language';
 export interface SurfaceRect {x:number;y:number;width:number;height:number}
 export interface MessageSurface {active:boolean;composerRect:SurfaceRect|null;toolbarRect:SurfaceRect|null}
 export interface OrderViewport {width:number;height:number;dpr:number;clientOffset?:{x:number;y:number}}
@@ -9,7 +10,7 @@ export interface StandaloneState {
   auth:'ready'|'needs_login'|'connecting'|'failed'; accountScope:string;
   draft:{text:string;canReplace:boolean}|null; preview:string|null;
   phase:'idle'|'reading'|'translating'|'ready'|'stale'|'failed'|'replaced'|'waiting'|'replacing';
-  customerLanguage?:string; followCustomerLanguage?:boolean;
+  customerLanguage?:string; followCustomerLanguage?:boolean; customerLanguageResolution?:CustomerLanguageResolution; fallbackTarget?:PanelTarget;
   autoTranslate?:boolean; shortcutEnabled?:boolean; translationPaused?:boolean;
   /** `send`: Enter sends the reviewed translation; `replace`: Enter is left to the vendor and translations only replace the draft. */
   outboundMode?:OutboundMode; sendPending?:boolean;
@@ -27,7 +28,7 @@ export interface StandaloneAPI {
   bindWindow(id:string):Promise<void>; unbindWindow():Promise<void>;
   startClient():Promise<void>;
   connectComposer():Promise<void>; readDraft():Promise<void>;
-  setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}):Promise<void>;
+  setTranslationOptions(options:{fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}):Promise<void>;
   cancelTranslation():Promise<void>; resumeTranslation():Promise<void>;
   translate(target:PanelTarget):Promise<void>; replaceDraft():Promise<void>;
   openLogin():Promise<void>; logout():Promise<void>;

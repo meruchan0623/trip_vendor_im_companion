@@ -1,4 +1,4 @@
-import type {OutboundBody,OutboundResponse,PsimIdentity} from '../src/shared/workbench';
+import {WORKBENCH_TARGETS,type OutboundBody,type OutboundResponse,type PsimIdentity} from '../src/shared/workbench';
 export const PSIM_API_ORIGIN='https://csapi.tsim.tech';
 const READ_PATHS=new Set(['/agent/profile','/agent/package-query/dataplan-list','/agent/package-query/detail','/agent/package-query/live-detail']);
 const POST_PATHS=new Set(['/agent/login','/agent/auth/refresh','/agent/logout','/agent/translate','/agent/package-query/perform']);
@@ -115,7 +115,7 @@ export class OwnedPsimService {
   }
   async translate(body:OutboundBody,identity:PsimIdentity,signal:AbortSignal):Promise<OutboundResponse>{
     const current=this.identity();if(!current||current.accountScope!==identity.accountScope||current.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');
-    if(body.purpose!=='outbound'||body.source_lang!=='zh'||typeof body.text!=='string'||!body.text.trim()||body.text.length>20000||!/^[-a-z0-9]{1,100}$/.test(body.draft_request_id)||typeof body.composer_content_version!=='string'||body.composer_content_version.length>25000||!['zh','en','ja','ko','es','fr','de','ru','pt','it','ar','th','vi','id','ms','zh-TW'].includes(body.target_lang))throw fail('INVALID_OUTBOUND_REQUEST');
+    if(body.purpose!=='outbound'||body.source_lang!=='zh'||typeof body.text!=='string'||!body.text.trim()||body.text.length>20000||!/^[-a-z0-9]{1,100}$/.test(body.draft_request_id)||typeof body.composer_content_version!=='string'||body.composer_content_version.length>25000||!WORKBENCH_TARGETS.includes(body.target_lang))throw fail('INVALID_OUTBOUND_REQUEST');
     const result=await this.request('POST','/agent/translate',body,signal);if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');const data=result?.data;
     if(result?.success!==true||typeof data?.translated_text!=='string'||!data.translated_text.trim()||data.translated_text.length>50000||data.draft_request_id!==body.draft_request_id||data.composer_content_version!==body.composer_content_version)throw fail('OUTBOUND_ECHO_MISMATCH');
     return{success:true,data:{translated_text:data.translated_text,draft_request_id:data.draft_request_id,composer_content_version:data.composer_content_version}};

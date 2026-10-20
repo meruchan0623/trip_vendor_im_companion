@@ -1,3 +1,6 @@
+import {join} from 'node:path';
+import {homedir} from 'node:os';
+import {FileTranslationOptionsStore} from '../electron/translation-options-store';
 import { NativeAdapter, type WindowState } from '../electron/native-adapter';
 import {ProfileBrowser,profileOrderWindow} from '../electron/profile-browser';
 import { CompanionService } from '../electron/companion-service';
@@ -77,7 +80,7 @@ process.on('SIGINT',()=>{void shutdown();});process.on('SIGTERM',()=>{void shutd
 process.on('uncaughtException',()=>{process.stderr.write('HOST_UNCAUGHT_EXCEPTION\n');void shutdown();});
 process.on('unhandledRejection',()=>{process.stderr.write('HOST_UNHANDLED_REJECTION\n');void shutdown();});
 if(process.platform==='win32'||process.platform==='darwin')orderBrowser=new ProfileBrowser(native,()=>null,code=>service?.reportBrowserFailure(code));
-service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('LOGIN_URL_REJECTED');emit('hostOpenLogin',{url});},()=>{},process.argv.includes('--smoke-test')?{enabled:false}:{},true,undefined,undefined,orderBrowser?profileOrderWindow(orderBrowser,()=>latest?.bounds??null):undefined);
+service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('LOGIN_URL_REJECTED');emit('hostOpenLogin',{url});},()=>{},process.argv.includes('--smoke-test')?{enabled:false}:{},true,undefined,new FileTranslationOptionsStore(join(process.env.APPDATA??join(homedir(),'.config'),'trip_vendor_im_companion','translation-options.json')),orderBrowser?profileOrderWindow(orderBrowser,()=>latest?.bounds??null):undefined);
 service.onState(()=>publish());resident=new ResidentConnection(native,async()=>{});
 native.start();publish(true);
 emit('hostReady',{runtime:'node',customerSend:'user-enter'});

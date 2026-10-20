@@ -1,6 +1,7 @@
 import {isLoginPopoverId} from '../src/shared/owned-login';
 import {randomUUID,randomBytes} from 'node:crypto';
 import {isOrderWindowIntent, isOutboundMode,isPanelTarget} from '../src/shared/workbench';
+import {isCustomerLanguageReport} from '../src/shared/customer-language';
 import type {NativeInteraction,NativeInteractionOptions,NativePoll} from './native-composer';
 import type {PanelState,VerifiedComposerSnapshot} from '../src/shared/workbench';
 import {approvedImTargets,chooseActiveImTarget,observeImTarget,sameTargetInventory} from './target-selection';
@@ -60,7 +61,8 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       switch(value.action){
         case 'setEnabled':if(args.length!==1||typeof args[0]!=='boolean')throw new Error('INVALID_ACTION');break;
         case 'setTarget':if(args.length!==1||!plain('lang,source')||arg!.source!=='manual'||!isPanelTarget(arg!.lang))throw new Error('INVALID_ACTION');break;
-        case 'customerLanguage':if(args.length!==1||!plain('conversationKey,lang')||typeof arg!.lang!=='string'||!/^(unknown|zh|en|ja|ko|ar|ru|el|th|es|fr|de|pt|it|vi|id|ms)$/.test(arg!.lang)||typeof arg!.conversationKey!=='string'||arg!.conversationKey.length>1024)throw new Error('INVALID_ACTION');break;
+        case 'setFallbackTarget':if(args.length!==1||!isPanelTarget(args[0]))throw new Error('INVALID_ACTION');break;
+        case 'customerLanguage':if(args.length!==1||!isCustomerLanguageReport(arg))throw new Error('INVALID_ACTION');break;
         case 'followCustomer':case 'retry':case 'openLogin':case 'logout':case 'cancel':case 'resume':if(args.length)throw new Error('INVALID_ACTION');break;
         case 'openOrder':if(args.length!==1||!isOrderWindowIntent(args[0]))throw new Error('INVALID_ACTION');break;
         case 'closeOrder':if(args.length)throw new Error('INVALID_ACTION');break;

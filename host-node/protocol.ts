@@ -8,19 +8,19 @@ import { stateErrorCode } from './diagnostics';
 
 export const MAX_LINE_BYTES=262144;
 const actions=['status','refreshSession','openLogin','logout','connect','disconnect','pause','resume','startClient','quit','updateSettings','followCustomerLanguage'] as const;
-export interface HostAction {protocolVersion:'1.0';type:'hostAction';requestId:string;payload:{action:typeof actions[number];options?:{language?:StandaloneState['language'];autoTranslate?:boolean;shortcutEnabled?:boolean}}}
+export interface HostAction {protocolVersion:'1.0';type:'hostAction';requestId:string;payload:{action:typeof actions[number];options?:{fallbackTarget?:StandaloneState['language'];language?:StandaloneState['language'];autoTranslate?:boolean;shortcutEnabled?:boolean}}}
 const record=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 export function parseHostAction(v:unknown):HostAction|null {
   if(!record(v)||v.protocolVersion!=='1.0'||v.type!=='hostAction'||typeof v.requestId!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(v.requestId)||!record(v.payload)||!actions.includes(v.payload.action as any))return null;
   if(Object.keys(v).some(k=>!['protocolVersion','type','requestId','payload'].includes(k))||Object.keys(v.payload).some(k=>!['action','options'].includes(k)))return null;
   const o=v.payload.options;
   if(v.payload.action==='updateSettings'){
-    if(!record(o)||Object.keys(o).some(k=>!['language','autoTranslate','shortcutEnabled'].includes(k))||o.language!==undefined&&!isPanelTarget(o.language)||o.autoTranslate!==undefined&&typeof o.autoTranslate!=='boolean'||o.shortcutEnabled!==undefined&&typeof o.shortcutEnabled!=='boolean')return null;
+    if(!record(o)||Object.keys(o).some(k=>!['fallbackTarget','language','autoTranslate','shortcutEnabled'].includes(k))||o.fallbackTarget!==undefined&&!isPanelTarget(o.fallbackTarget)||o.language!==undefined&&!isPanelTarget(o.language)||o.autoTranslate!==undefined&&typeof o.autoTranslate!=='boolean'||o.shortcutEnabled!==undefined&&typeof o.shortcutEnabled!=='boolean')return null;
   }else if(o!==undefined)return null;
   return v as unknown as HostAction;
 }
 /** Explicit projection: native tray never receives draft, preview, identity or credentials. */
-export function stateProjection(s:StandaloneState,orderStatus:string){return {attached:s.attached,auth:s.auth,phase:s.phase,composerSource:s.composerSource,nativeStatus:/^[a-z_]{1,80}$/.test(s.nativeStatus)?s.nativeStatus:'unknown',translationPaused:!!s.translationPaused,hasPreview:!!s.preview,language:s.language,autoTranslate:!!s.autoTranslate,shortcutEnabled:!!s.shortcutEnabled,followCustomerLanguage:s.followCustomerLanguage!==false,errorCode:stateErrorCode(s.error),orderStatus:['idle','loading','ready','failed','empty'].includes(orderStatus)?orderStatus:'unknown'};}
+export function stateProjection(s:StandaloneState,orderStatus:string){return {attached:s.attached,auth:s.auth,phase:s.phase,composerSource:s.composerSource,nativeStatus:/^[a-z_]{1,80}$/.test(s.nativeStatus)?s.nativeStatus:'unknown',translationPaused:!!s.translationPaused,hasPreview:!!s.preview,language:s.language,fallbackTarget:s.fallbackTarget??'en',customerLanguageResolution:s.customerLanguageResolution,autoTranslate:!!s.autoTranslate,shortcutEnabled:!!s.shortcutEnabled,followCustomerLanguage:s.followCustomerLanguage!==false,errorCode:stateErrorCode(s.error),orderStatus:['idle','loading','ready','failed','empty'].includes(orderStatus)?orderStatus:'unknown'};}
 
 /** Bound allocation before newline; readline alone does not impose a memory limit. */
 export class BoundedJsonLines {

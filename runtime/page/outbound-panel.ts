@@ -7,8 +7,8 @@ export const CHAT_AREA_SELECTOR='.im_detail.inform-con > .chat_area';
 export const INPUT_SELECTOR='.chat_area-input';
 export const EDITOR_SELECTOR='.tiptap.ProseMirror.chat-editor[contenteditable="true"]';
 export const REATTACH_DEBOUNCE_MS=100;
-export const TARGET_LABELS:Record<typeof PANEL_TARGETS[number],string>={en:'English',ja:'日本語',ko:'한국어',th:'ไทย',vi:'Tiếng Việt',id:'Bahasa Indonesia',ms:'Bahasa Melayu',es:'Español',fr:'Français',de:'Deutsch',ru:'Русский',ar:'العربية','zh-TW':'繁體中文',pt:'Português',it:'Italiano'};
-const LANGUAGE_NAMES:Record<string,string>={zh:'中文',en:'英语',ja:'日语',ko:'韩语',th:'泰语',ar:'阿拉伯语',ru:'俄语',el:'希腊语',vi:'越南语',es:'西班牙语',fr:'法语',de:'德语',pt:'葡萄牙语',it:'意大利语',id:'印尼语',ms:'马来语','zh-TW':'繁体中文'};
+export const TARGET_LABELS:Record<typeof PANEL_TARGETS[number],string>={en:'English',ja:'日本語',ko:'한국어',th:'ไทย',vi:'Tiếng Việt',id:'Bahasa Indonesia',ms:'Bahasa Melayu',es:'Español',fr:'Français',de:'Deutsch',ru:'Русский',ar:'العربية','zh-TW':'繁體中文',pt:'Português',it:'Italiano',tr:'Türkçe'};
+const LANGUAGE_NAMES:Record<string,string>={zh:'中文',en:'英语',ja:'日语',ko:'韩语',th:'泰语',ar:'阿拉伯语',ru:'俄语',el:'希腊语',vi:'越南语',es:'西班牙语',fr:'法语',de:'德语',pt:'葡萄牙语',it:'意大利语',id:'印尼语',ms:'马来语','zh-TW':'繁体中文',tr:'土耳其语'};
 type Tone='ok'|'warn'|'bad'|'busy'|'muted';
 const STATUS:Record<PanelState['status'],[string,Tone]|null>={unavailable:['编辑器未就绪','warn'],idle:null,translating:['翻译中','busy'],ready:['译文就绪','ok'],stale:['待更新','busy'],failed:['翻译失败','bad'],needs_login:null};
 export const PANEL_HINT='替换后仍需您在原客户端手动发送';
@@ -69,12 +69,15 @@ kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padd
 .callout{display:flex;align-items:center;gap:10px;padding:10px 12px;font-size:12.5px;color:var(--ink-2)}
 .callout svg{width:16px;height:16px}.callout p{margin:0;flex:1;overflow-wrap:anywhere}
 .callout[data-tone="info"] svg{color:var(--accent)}.callout[data-tone="warn"] svg{color:var(--warn)}.callout[data-tone="bad"] svg{color:var(--bad)}
+.callout.inline{gap:6px;padding:7px 12px 0;font-size:11.5px;color:var(--warn)}.callout.inline svg{width:13px;height:13px}
+.callout.inline .outline{height:auto;padding:0;border:0;background:none;color:var(--accent);font-weight:600}.callout.inline .outline:hover{text-decoration:underline}
 .solid{height:28px;padding:0 12px;border-radius:7px;background:var(--accent);color:#fff;font-weight:600}
 .outline{height:28px;padding:0 12px;border-radius:7px;border:1px solid var(--line);background:#fff;color:var(--ink)}
 .pop{position:fixed;z-index:2147483002;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(15,23,42,.16),0 2px 6px rgba(15,23,42,.06);padding:6px;animation:rise .12s ease-out}
 @keyframes rise{from{opacity:0;transform:translateY(4px)}}
 .pop.login-popover{display:flex;flex-direction:column;width:320px;padding:0;overflow:hidden}.login-top{flex:none;display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-bottom:1px solid var(--line);color:var(--ink-2);font-size:12px;font-weight:600}.login-frame{display:block;flex:1;min-height:0;width:100%;height:0;border:0;background:#fff}
 .pop.languages{width:340px}.pop.query{width:300px;padding:10px}.pop.menu{width:236px}
+.fallback-settings{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px;font-size:12px}.fallback-settings small{flex-basis:100%;color:var(--muted)}.fallback-target{margin-left:auto;max-width:180px;font:inherit;border:1px solid #d7dce3;border-radius:5px;padding:4px;background:#fff;color:#263241}
 .pop h5{margin:0 2px 8px;font-size:11px;font-weight:600;color:var(--ink-3)}
 .option{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:7px;text-align:left;white-space:normal}
 .option:hover:not(:disabled){background:#f1f3f7}
@@ -119,7 +122,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   bar.append(toggle,title,lang,badge,make('span','spacer'),find,order,more);
   // Body: one card that shows either the preview, a skeleton or a callout.
   const body=make('div','body'),card=make('div','card'),stalebar=make('div','stalebar','草稿已修改，等待更新译文'),preview=make('div','preview'),skeleton=make('div','skeleton');preview.setAttribute('aria-live','polite');skeleton.append(make('i'),make('i'));
-  const callout=make('div','callout'),calloutIcon=make('span'),calloutText=make('p'),login=button('solid login','登录 TSim'),resume=button('outline','恢复翻译'),retryFailed=button('outline','重试');calloutIcon.style.display='contents';callout.append(calloutIcon,calloutText,login,resume,retryFailed);
+  const callout=make('div','callout'),calloutIcon=make('span'),calloutText=make('p'),login=button('solid login','登录 TSim'),resume=button('outline','恢复翻译'),retryFailed=button('outline','重试'),chooseFallback=button('outline fallback-action','修改兜底语言');calloutIcon.style.display='contents';callout.append(calloutIcon,calloutText,login,resume,retryFailed,chooseFallback);
   const foot=make('div','foot'),meta=make('span','meta'),source=make('span'),hint=make('span','hint',PANEL_HINT),buttons=make('div','buttons');meta.append(source,hint);
   const retry=button('ghost','','重新翻译'),copy=button('ghost','','复制译文'),replace=button('primary');retry.append(icon('retry'),make('span','','重试'));copy.append(icon('copy'),make('span','','复制'));retry.setAttribute('aria-label','重试');copy.setAttribute('aria-label','复制译文');
   const mac=/Mac|iPhone|iPad|iPod/i.test(view.navigator.platform||view.navigator.userAgent);
@@ -130,7 +133,10 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   const languages=make('div','pop languages'),follow=button('option follow'),followText=make('span'),followLabel=make('span','','跟随客户语言'),followLang=make('small');languages.setAttribute('role','listbox');languages.setAttribute('aria-label','目标语言');follow.setAttribute('role','option');followText.append(followLabel,followLang);follow.append(followText);
   const search=make('div','search'),searchInput=make('input'),grid=make('div','grid');searchInput.placeholder='搜索语言';searchInput.setAttribute('aria-label','搜索语言');search.append(icon('search'),searchInput);
   const options=PANEL_TARGETS.map(target=>{const option=button('option');option.setAttribute('role','option');option.dataset.lang=target;option.append(LANGUAGE_NAMES[target]??target,' ',make('small','',TARGET_LABELS[target]));grid.append(option);return option;});
-  languages.append(follow,make('div','separator'),search,grid);
+  const fallbackSettings=make('label','fallback-settings'),fallbackSelect=make('select','fallback-target');fallbackSelect.setAttribute('aria-label','兜底语言');
+  fallbackSettings.append(make('span','','兜底语言'),fallbackSelect,make('small','','无法确定客户语言时使用，非识别结果'));
+  for(const target of PANEL_TARGETS){const option=make('option');option.value=target;option.textContent=LANGUAGE_NAMES[target]??target;fallbackSelect.append(option);}
+  languages.append(follow,fallbackSettings,make('div','separator'),search,grid);
   const query=make('div','pop query'),queryForm=make('form','field'),queryInput=make('input'),queryButton=button('','查询'),queryNote=make('div','note');queryButton.type='submit';query.setAttribute('role','dialog');query.setAttribute('aria-label','查询其他订单');
   queryInput.type='text';queryInput.placeholder='输入订单 ID 或其他标识';queryInput.setAttribute('aria-label','明确输入或选择要查询的标识');queryInput.maxLength=100;queryInput.autocomplete='off';queryForm.append(queryInput,queryButton);query.append(make('h5','','查询其他订单'),queryForm,queryNote);
   const menu=make('div','pop menu'),pause=button('option'),pauseIcon=make('span'),pauseText=make('span'),disable=button('option');menu.setAttribute('role','menu');pauseIcon.style.display='contents';pause.append(pauseIcon,pauseText);disable.append(icon('power'),'关闭出站翻译');const modeLabel=make('div','label','Enter 键行为'),modes=([['send','Enter 直接发送','未出译文时等待译文后发送'],['replace','替换模式','Enter 保持原样，译文需手动替换']] as const).map(([mode,label,detail])=>{const option=button('option mode');option.setAttribute('role','menuitemradio');option.dataset.mode=mode;const text=make('span');text.append(make('span','',label),make('small','',detail));option.append(text);return option;});
@@ -192,6 +198,8 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   find.addEventListener('mousedown',()=>{const selection=document.getSelection()?.toString().trim();if(selection&&ORDER_RE.test(selection))queryInput.value=selection;});
   find.addEventListener('click',()=>toggleOpen('query'));
   follow.addEventListener('click',()=>{setOpen(null);act('followCustomer');});
+  chooseFallback.addEventListener('click',()=>setOpen('languages'));
+  fallbackSelect.addEventListener('change',()=>{const requested=fallbackSelect.value;fallbackSelect.value=state.fallbackTarget??'en';act('setFallbackTarget',[requested]);});
   for(const option of options)option.addEventListener('click',()=>{setOpen(null);act('setTarget',[{lang:option.dataset.lang,source:'manual'}]);});
   searchInput.addEventListener('input',filterLanguages);
   searchInput.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();options.find(option=>!option.hidden)?.click();}});
@@ -228,20 +236,23 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     anchor=input;
     const editors=input.querySelectorAll<HTMLElement>(EDITOR_SELECTOR);bindEditor(editors.length===1?editors[0]:undefined);return true;
   }
-  const showCallout=(tone:'info'|'warn'|'bad',name:keyof typeof ICONS,text:string,action?:HTMLButtonElement)=>{callout.hidden=false;callout.dataset.tone=tone;calloutIcon.replaceChildren(icon(name));calloutText.textContent=text;for(const item of [login,resume,retryFailed])item.hidden=item!==action;};
+  const showCallout=(tone:'info'|'warn'|'bad',name:keyof typeof ICONS,text:string,action?:HTMLButtonElement,inline=false)=>{callout.hidden=false;callout.classList.toggle('inline',inline);callout.dataset.tone=tone;calloutIcon.replaceChildren(icon(name));calloutText.textContent=text;for(const item of [login,resume,retryFailed,chooseFallback])item.hidden=item!==action;};
   function render(next:PanelState){
     state=next;if(disposed)return;const on=state.enabled,paused=!!state.translationPaused;
     if(!on&&open==='languages')setOpen(null);
     panel.classList.toggle('off',!on);toggle.setAttribute('aria-checked',String(on));toggle.title=on?'关闭出站翻译':'开启出站翻译';toggle.setAttribute('aria-label',toggle.title);lang.hidden=!on;more.hidden=false;disable.disabled=!on;
     // Language chip and list.
-    const following=state.followCustomer.following,customer=state.followCustomer.lang,customerName=LANGUAGE_NAMES[customer??'']??(customer==='unknown'||!customer?'待识别':customer);
+    const following=state.followCustomer.following,customer=state.followCustomer.lang,resolution=state.followCustomer.resolution,collecting=resolution?.status==='collecting',fallback=following&&resolution?.status==='fallback',customerName=LANGUAGE_NAMES[customer??'']??(customer==='unknown'||!customer?'未识别':customer);
     const supported=!!customer&&PANEL_TARGETS.includes(customer as typeof PANEL_TARGETS[number]),targetName=LANGUAGE_NAMES[state.target]??state.target;
+    const fallbackName=LANGUAGE_NAMES[state.fallbackTarget??'en']??state.fallbackTarget??'英语';fallbackSelect.value=state.fallbackTarget??'en';
+    const reasons={'no-originals':'未获取到可判断语言的客户原文','no-majority':'客户原文语言没有唯一多数','unrecognized':'客户原文不足以确认语言','unsupported':`客户语言（${customerName}）暂不支持自动翻译`,'source-unavailable':'客户原文采集暂不可用'};
+    const fallbackHint=fallback&&resolution.status==='fallback'?`${reasons[resolution.reason]}。当前使用${fallbackName}兜底（非识别结果）；识别明确后自动跟随客户语言。`:'';
     langText.replaceChildren();
     if(following&&customer==='zh')langText.append(make('b','','中文客户'));
-    else{const shown=following?(supported?customerName:'待定'):targetName;langText.append('中文 ',make('span','arrow','→'),' ',make('b','',shown));}
-    langTag.textContent=following?'自动':'手动';langTag.classList.toggle('manual',!following);
-    lang.title=following?`自动跟随客户语言：${customerName}`:`手动目标：${targetName}；客户语言：${customerName}`;
-    follow.setAttribute('aria-selected',String(following));followLang.textContent=`当前识别：${customerName}${customer==='zh'?'（无需翻译）':''}`;
+    else{const shown=following?(fallback?`${fallbackName} · 兜底（非识别）`:supported?customerName:collecting?'正在识别':'选择目标语言'):targetName;langText.append('中文 ',make('span','arrow','→'),' ',make('b','',shown));}
+    langTag.textContent=following?(fallback?'':'自动'):'手动';langTag.classList.toggle('manual',!following);
+    lang.title=following?(fallback?fallbackHint:`自动跟随客户语言：${customerName}`):`手动目标：${targetName}；客户语言：${customerName}`;
+    follow.setAttribute('aria-selected',String(following));followLang.textContent=`当前识别：${customerName}${customer==='zh'?'（无需翻译）':''}${fallback?'；使用配置的兜底语言':''}`;
     for(const option of options)option.setAttribute('aria-selected',String(!following&&option.dataset.lang===state.target));
     pauseIcon.replaceChildren(icon(paused?'play':'pause'));pauseText.textContent=paused?'恢复翻译':'暂停翻译';pause.disabled=!on||state.auth==='connecting';
     accountLogin.textContent='打开浏览器 TSim_CS';accountLogout.disabled=state.auth==='needs_login'||state.auth==='connecting';
@@ -252,23 +263,25 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     // Card content.
     const text=state.preview??'',stale=!!text&&(state.status==='stale'||state.status==='translating');
     callout.hidden=true;preview.hidden=skeleton.hidden=foot.hidden=stalebar.hidden=true;
-    const automaticHint=following&&!text?(customer==='zh'?'客户使用中文，无需翻译；如需翻译，请在左上角手动选择语言':!customer||customer==='unknown'?'客户语言待识别，请等待客户发送消息，或手动选择目标语言':!supported?`客户语言（${customerName}）暂不支持自动翻译，请手动选择目标语言`:''):'';
+    const automaticHint=following&&!text&&!fallback?(customer==='zh'?'客户使用中文，无需翻译；如需翻译，请在左上角手动选择语言':collecting?'正在采集客户原文，完成后自动确定目标或使用配置的兜底语言':!customer||customer==='unknown'?'当前服务未提供语言识别状态，请手动选择目标语言':!supported?`客户语言（${customerName}）暂不支持自动翻译，请手动选择目标语言`:''):'';
     if(state.auth==='connecting'){skeleton.hidden=foot.hidden=false;source.textContent='正在连接 TSim 登录服务，请稍候';}
     else if(state.auth==='needs_login')showCallout('info','lock','请先登录 TSim_CS 的 Edge / Chrome 页面，助手自动复用登录，无需重复输入密码',login);
     else if(state.auth==='failed')showCallout('bad','alert',state.error||'登录服务连接失败，请稍后重试');
     else if(paused)showCallout('warn','pause','翻译已暂停，草稿不会发送到翻译服务',resume);
+    else if(state.error?.includes('兜底语言'))showCallout('bad','alert',state.error,chooseFallback);
     else if(automaticHint)showCallout(customer==='zh'?'info':'warn','info',automaticHint);
     else if(state.status==='failed')showCallout('bad','alert',`翻译失败：${state.error??'未知错误'}`,retryFailed);
     else if(state.status==='unavailable')showCallout('warn','alert','未找到可用的回复编辑器，请点击回复框后重试');
-    else if(state.status==='translating'&&!text){skeleton.hidden=foot.hidden=false;source.textContent=`正在翻译为${following?customerName:targetName}…`;}
+    else if(state.status==='translating'&&!text){skeleton.hidden=foot.hidden=false;source.textContent=`正在翻译为${fallback?`${fallbackName}（兜底，非识别结果）`:following?customerName:targetName}…`;}
     else{
       preview.hidden=foot.hidden=false;stalebar.hidden=!stale;
       preview.textContent=text||'输入中文后自动生成译文预览';preview.classList.toggle('empty',!text);preview.classList.toggle('stale',stale);
-      source.textContent=text?(following?`根据客户最近消息识别为${customerName} · `:`手动指定${targetName} · `):'';
+      source.textContent=text?(following?(fallback?`${fallbackName}兜底 · 非识别结果 · `:`根据客户最近消息识别为${customerName} · `):`手动指定${targetName} · `):'';
     }
+    if(fallbackHint&&state.auth==='ready'&&!paused&&state.status!=='failed'&&state.status!=='unavailable'&&!state.error?.includes('兜底语言'))showCallout('warn','info',fallbackHint,chooseFallback,!preview.hidden);
     hint.hidden=!text||stale;
     const usable=ready();card.classList.toggle('ready',usable);copy.disabled=!usable;replace.disabled=!usable;
-    retry.disabled=retryFailed.disabled=following&&!supported||paused||!on||state.busy||state.auth!=='ready'||!state.draft?.text.trim()||state.status==='translating';
+    retry.disabled=retryFailed.disabled=following&&!supported&&!fallback||paused||!on||state.busy||state.auth!=='ready'||!state.draft?.text.trim()||state.status==='translating';
     // Order controls.
     renderLogin(state.loginPopover);
     find.disabled=!!unavailableReason;find.title=unavailableReason??'查询其他订单';queryInput.disabled=queryButton.disabled=!!unavailableReason;

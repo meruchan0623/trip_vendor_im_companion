@@ -5,6 +5,7 @@ import { createInterface, type Interface as ReadlineInterface } from 'node:readl
 import { NativeAdapter, type WindowState } from './native-adapter';
 import {ProfileBrowser,profileOrderWindow} from './profile-browser';
 import { CompanionService } from './companion-service';
+import {FileTranslationOptionsStore} from './translation-options-store';
 import { startExternalClient } from './external-composer';
 import { lockContents, lockLocalSession } from './security';
 import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
@@ -126,7 +127,7 @@ function setupIPC():void {
   });
   handle('bind-window',async value=>{if(typeof value!=='string'||!/^\d+:\d+:\d+$/.test(value))throw new Error('INVALID_TARGET');await resident!.connect(async()=>value);});
   handle('unbind-window',()=>resident!.disconnect());handle('connect-composer',()=>service.connectComposer());handle('read-draft',()=>service.readDraft());
-  handle('translation-options',value=>{if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('INVALID_OPTIONS');const options=value as {language?:unknown;autoTranslate?:unknown;shortcutEnabled?:unknown};if(Object.keys(options).some(key=>!['language','autoTranslate','shortcutEnabled'].includes(key))||options.language!==undefined&&!isPanelTarget(options.language)||options.autoTranslate!==undefined&&typeof options.autoTranslate!=='boolean'||options.shortcutEnabled!==undefined&&typeof options.shortcutEnabled!=='boolean')throw new Error('INVALID_OPTIONS');return service.setTranslationOptions(options as {language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean});});
+  handle('translation-options',value=>{if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('INVALID_OPTIONS');const options=value as {fallbackTarget?:unknown;language?:unknown;autoTranslate?:unknown;shortcutEnabled?:unknown};if(Object.keys(options).some(key=>!['fallbackTarget','language','autoTranslate','shortcutEnabled'].includes(key))||options.fallbackTarget!==undefined&&!isPanelTarget(options.fallbackTarget)||options.language!==undefined&&!isPanelTarget(options.language)||options.autoTranslate!==undefined&&typeof options.autoTranslate!=='boolean'||options.shortcutEnabled!==undefined&&typeof options.shortcutEnabled!=='boolean')throw new Error('INVALID_OPTIONS');return service.setTranslationOptions(options as {fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean});});
   handle('cancel-translation',()=>service.cancelTranslation());handle('resume-translation',()=>service.resumeTranslation());
   handle('translate',value=>{if(!isPanelTarget(value))throw new Error('INVALID_TARGET_LANGUAGE');return service.translate(value);});handle('replace-draft',()=>service.replaceDraft());
   handle('open-login',()=>service.openLogin());handle('logout',()=>service.logout());
@@ -155,7 +156,7 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   if(process.platform==='win32'||process.platform==='darwin')orderBrowser=new ProfileBrowser(native,()=>null,code=>service?.reportBrowserFailure(code));
   // Both installed Windows injection and standalone Electron reuse the verified Edge/Chrome session.
   // The fallback is needed only when no supported browser profile is discoverable.
-  service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);},()=>{},smokeMode?{enabled:false}:{},true,undefined,undefined,orderBrowser?profileOrderWindow(orderBrowser,()=>latest?.bounds??null):undefined);service.onState(publish);
+  service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);},()=>{},smokeMode?{enabled:false}:{},true,undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')),orderBrowser?profileOrderWindow(orderBrowser,()=>latest?.bounds??null):undefined);service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
   // Installed Windows runs silently inside the vendor; standalone Windows retains tray settings.
