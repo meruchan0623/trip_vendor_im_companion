@@ -14,6 +14,8 @@ export interface BrowserProfileSessionOptions {
   enabled?:boolean;
   openExternal?:(url:string)=>Promise<void>;
   openProfile?:(profile:BrowserProfile,url:string)=>Promise<void>;
+  /** Invoked only after an explicit login attempt is denied, never by background polling. */
+  onAccessDenied?:()=>Promise<void>;
   discoverProfiles?:(onReadError?:(error:Error)=>void)=>Promise<BrowserProfile[]>;
   readToken?:(storageDirectory:string)=>Promise<string|null>;
   fetcher?:typeof fetch;
@@ -216,7 +218,14 @@ export class BrowserProfileSessionService {
   async openLogin():Promise<void>{
     if(this.options.enabled===false)return;if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');
     if(this.opening)return this.opening;
-    const operation=this.openLoginTarget(++this.loginIntent);this.opening=operation;
+    const intent=++this.loginIntent;
+    const operation=this.openLoginTarget(intent).catch(async error=>{
+      if(!this.closed&&intent===this.loginIntent&&error instanceof Error&&error.message==='BROWSER_SESSION_ACCESS_DENIED'){
+        // Keep the original permission failure if the OS settings app cannot be opened.
+        try{await this.options.onAccessDenied?.();}catch{/* The next explicit login can retry the guide. */}
+      }
+      throw error;
+    });this.opening=operation;
     try{await operation;}finally{if(this.opening===operation)this.opening=null;}
   }
   private async openLoginTarget(intent:number):Promise<void>{
