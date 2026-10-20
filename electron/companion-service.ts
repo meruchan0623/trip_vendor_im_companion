@@ -538,7 +538,7 @@ export class CompanionService {
     if(!isLoginPopoverId(id))throw new Error('INVALID_ACTION');
     if(this.loginPopover?.id!==id)return;this.loginPopover=undefined;this.publish();
   }
-  async openLogin(){const opening={epoch:this.connectionEpoch,generation:this.loginGeneration};this.loginOpening=opening;try{await this.psim.openLogin();}catch(error){this.fail(error);}finally{if(this.loginOpening===opening)this.loginOpening=undefined;}}
+  async openLogin(){const opening={epoch:this.connectionEpoch,generation:this.loginGeneration};this.loginOpening=opening;try{await this.psim.openLogin();}catch(error){if(!this.closed&&this.loginOpening===opening&&opening.epoch===this.connectionEpoch&&opening.generation===this.loginGeneration)this.fail(error);}finally{if(this.loginOpening===opening)this.loginOpening=undefined;}}
   async logout(){
     this.loginGeneration++;this.loginPopover=undefined;this.clearPendingSend();this.clearOrder();this.translationIntent++;this.invalidate();this.lastWritten=undefined;this.attempted=undefined;this.suppressed=undefined;this.state.auth='connecting';this.state.error=null;this.publish();
     try{await this.psim.logout();this.state.auth='needs_login';this.state.accountScope='unknown';this.state.phase='idle';this.state.error=null;this.publish();}
