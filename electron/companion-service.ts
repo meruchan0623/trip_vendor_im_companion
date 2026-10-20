@@ -113,17 +113,18 @@ export class CompanionService {
   private interactionRefresh=false;
   private interactionTask?:Promise<void>;
   private nativeOptions?:string;
+  private nativeInteractionFlags?:string;
   /** Whether an outbound translation is expected for the current draft; otherwise Enter stays with the vendor. */
   private translationApplies(){return this.state.autoTranslate!==false&&!this.state.translationPaused&&this.state.auth==='ready'&&(this.state.followCustomerLanguage===false||!!this.automaticTarget());}
-  private syncInteractionOptions(){const external=this.external;if(!external?.setInteractionOptions)return;const options={shortcutEnabled:this.state.shortcutEnabled!==false,enterSend:this.state.outboundMode==='send'&&this.translationApplies()},key=JSON.stringify(options);if(key===this.nativeOptions)return;this.nativeOptions=key;void external.setInteractionOptions(options).catch(()=>{if(this.external===external)this.nativeOptions=undefined;});}
-  private retireInteractions(){this.stopInteraction?.();this.stopInteraction=undefined;this.stopInvalidation?.();this.stopInvalidation=undefined;this.nativeOptions=undefined;this.interactionRefresh=false;this.interactionTask=undefined;}
+  private syncInteractionOptions(){const external=this.external;if(!external?.setInteractionOptions)return;const flags={shortcutEnabled:this.state.shortcutEnabled!==false,enterSend:this.foreground&&this.state.outboundMode==='send'&&this.translationApplies()},flagKey=JSON.stringify(flags);if(flagKey!==this.nativeInteractionFlags){this.nativeInteractionFlags=flagKey;this.clearPendingSend();}const options={...flags,sendGeneration:this.nativeSendGeneration},key=JSON.stringify(options);if(key===this.nativeOptions)return;this.nativeOptions=key;void external.setInteractionOptions(options).catch(()=>{if(this.external===external)this.nativeOptions=undefined;});}
+  private retireInteractions(){this.stopInteraction?.();this.stopInteraction=undefined;this.stopInvalidation?.();this.stopInvalidation=undefined;this.nativeOptions=undefined;this.nativeInteractionFlags=undefined;this.interactionRefresh=false;this.interactionTask=undefined;}
   private interaction(event:NativeInteraction,external:ExternalComposer){
     if(this.closed||external!==this.external)return;
     if(event.type==='replace-shortcut'){if(this.state.shortcutEnabled!==false&&this.state.phase==='ready'&&!this.state.translationPaused&&this.state.auth==='ready'&&this.foreground&&this.reviewed?.capture.source==='verified-editor'&&sameVerifiedDraft(this.reviewed.capture.snapshot,event.snapshot))void this.replaceDraft(event.snapshot);return;}
-    if(event.type==='send-shortcut'){void this.sendShortcut(event.snapshot);return;}
+    if(event.type==='send-shortcut'){if(event.sendGeneration===this.nativeSendGeneration)void this.sendShortcut(event.snapshot);return;}
     if(event.type!=='draft-changed')return;
     // Revoke immediately, before CDP reads or the 500 ms safety observation can finish.
-    this.clearPendingSend();this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.interactionRefresh=true;this.publish();
+    this.clearPendingSend(false);this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.interactionRefresh=true;this.publish();
     if(this.interactionTask)return;
     const task=(async()=>{while(this.interactionRefresh&&!this.closed&&this.external===external){this.interactionRefresh=false;if(!this.foreground)return;await this.acquireEditor();const epoch=this.epoch,id=this.state.targetInstanceId;try{if(this.closed||external!==this.external)continue;const capture=await this.capture();if(this.closed||external!==this.external||epoch!==this.epoch||id!==this.state.targetInstanceId)continue;this.adopt(capture);this.publish();}catch{/* The fallback observation handles source recovery. */}finally{this.setBusy(false);}}})();
     this.interactionTask=task;void task.finally(()=>{if(this.interactionTask===task)this.interactionTask=undefined;});
@@ -135,10 +136,14 @@ export class CompanionService {
   private sessionIdentity?:string;
   private reviewed?:{capture:Captured;identity:PsimIdentity;text:string};
   /** The draft the user pressed Enter on in send mode, waiting for its translation. */
-  private pendingSend?:VerifiedComposerSnapshot;
+  private pendingSend?:{snapshot:VerifiedComposerSnapshot;generation:number};
+  /** A revoked Enter stays revoked even if focus or send mode returns during an await. */
+  private sendIntentGeneration=0;
+  /** Native delivery authorization survives earlier draft-change notices in the same drain batch. */
+  private nativeSendGeneration=0;
   /** The last draft this service wrote; Enter sends it as is instead of translating it again. */
   private lastWritten?:VerifiedComposerSnapshot;
-  private clearPendingSend(){this.pendingSend=undefined;this.state.sendPending=false;}
+  private clearPendingSend(revokeNative=true){this.sendIntentGeneration++;if(revokeNative)this.nativeSendGeneration++;this.pendingSend=undefined;this.state.sendPending=false;}
   private epoch=0; private request?:AbortController; private closed=false;
   private busy=false; private foreground=false; private poll?:ReturnType<typeof setInterval>;
   private editorIdle:Promise<void>=Promise.resolve();
@@ -174,8 +179,8 @@ export class CompanionService {
     if(options.outboundMode!==undefined){if(!isOutboundMode(options.outboundMode))throw new Error('INVALID_OUTBOUND_MODE');if(options.outboundMode!==this.state.outboundMode){this.clearPendingSend();this.state.outboundMode=options.outboundMode;}}
     if(options.shortcutEnabled!==undefined){if(typeof options.shortcutEnabled!=='boolean')throw new Error('INVALID_SHORTCUT_OPTION');this.state.shortcutEnabled=options.shortcutEnabled;}
     if(options.language!==undefined&&!isPanelTarget(options.language))throw new Error('INVALID_LANGUAGE');
-    if(options.language!==undefined){this.state.followCustomerLanguage=false;}
-    if(options.language!==undefined&&options.language!==this.state.language){this.translationIntent++;this.invalidate();this.state.language=options.language;this.suppressed=undefined;this.attempted=undefined;this.state.error=null;}
+    if(options.language!==undefined){if(this.state.followCustomerLanguage!==false)this.clearPendingSend();this.state.followCustomerLanguage=false;}
+    if(options.language!==undefined&&options.language!==this.state.language){this.clearPendingSend();this.translationIntent++;this.invalidate();this.state.language=options.language;this.suppressed=undefined;this.attempted=undefined;this.state.error=null;}
     if(options.autoTranslate!==undefined&&options.autoTranslate!==this.state.autoTranslate){this.clearPendingSend();this.translationIntent++;this.invalidate();this.state.autoTranslate=options.autoTranslate;this.attempted=undefined;}
     this.schedule();this.publish();
   }
@@ -195,6 +200,8 @@ export class CompanionService {
   constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort){
     this.translationOptionsStarting=(translationOptionsStore?.load()??Promise.resolve({fallbackTarget:'en' as const})).then(options=>{if(this.closed)return;const previous=this.automaticTarget();this.state.fallbackTarget=options.fallbackTarget;if(this.state.followCustomerLanguage!==false&&previous!==this.automaticTarget()){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();}).catch(error=>{if(!this.closed)this.fail(error);});
     this.psim=sessionFactory(identity=>{
+      // Enter authorizes one review under the current login, never a later session.
+      this.clearPendingSend();
       const sessionIdentity=identity?.accountScope;
       if(sessionIdentity!==undefined&&this.sessionIdentity!==undefined&&sessionIdentity!==this.sessionIdentity){this.contextChanged();this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;}
       if(sessionIdentity!==undefined)this.sessionIdentity=sessionIdentity;
@@ -237,7 +244,7 @@ export class CompanionService {
     if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectionAbort?.abort();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
-    this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
+    this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
   invalidate(){this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
   private fail(error:unknown,sourceFailure=false){this.clearPendingSend();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
@@ -381,8 +388,28 @@ export class CompanionService {
   private async sendShortcut(snapshot:VerifiedComposerSnapshot){
     if(this.closed||!this.foreground||this.state.outboundMode!=='send'||!snapshot.isPlainText)return;
     // Translation off, paused or not applicable, or the draft is already our translation: send it unchanged, as the vendor would.
-    if(!this.translationApplies()||this.lastWritten&&sameVerifiedDraft(this.lastWritten,snapshot)){await this.sendAsIs(snapshot);return;}
-    this.pendingSend=snapshot;this.state.sendPending=true;
+    const generation=this.sendIntentGeneration;
+    if(!this.translationApplies()||this.lastWritten&&sameVerifiedDraft(this.lastWritten,snapshot)){await this.sendAsIs(snapshot,generation);return;}
+    this.pendingSend={snapshot,generation};this.state.sendPending=true;
+    // Native Enter can arrive before the preceding input's CDP capture. Keep its
+    // intent visible while refreshing; scheduling against the old empty draft
+    // would otherwise clear the intent before that capture can adopt the text.
+    const current=()=>!this.closed&&this.foreground&&this.state.outboundMode==='send'&&generation===this.sendIntentGeneration;
+    const capturedMatches=()=>this.captured?.source==='verified-editor'&&sameVerifiedDraft(this.captured.snapshot,snapshot);
+    if(!capturedMatches()){
+      this.publish();await this.interactionTask;
+      if(!current()||!await this.waitForObservation()||!current())return;
+      if(!capturedMatches()){
+        await this.acquireEditor();
+        try{
+          if(!current())return;const capture=await this.capture();if(!current())return;
+          this.adopt(capture);
+          if(!current())return;
+          if(!capturedMatches()){this.clearPendingSend();this.publish();return;}
+        }catch(error){if(current())this.fail(error,true);return;}finally{this.setBusy(false);}
+      }
+    }
+    if(!current())return;
     const reviewed=this.reviewed;
     if(this.state.phase==='ready'&&reviewed?.capture.source==='verified-editor'&&sameVerifiedDraft(reviewed.capture.snapshot,snapshot)){await this.flushPendingSend();return;}
     // An in-flight request flushes the pending send when it completes.
@@ -391,23 +418,25 @@ export class CompanionService {
   }
   private async flushPendingSend(){
     const pending=this.pendingSend,reviewed=this.reviewed;if(!pending||this.state.phase!=='ready')return;
-    this.clearPendingSend();
-    if(!reviewed||reviewed.capture.source!=='verified-editor'||!sameVerifiedDraft(reviewed.capture.snapshot,pending)){this.publish();return;}
-    await this.replaceDraft(pending,'send');
+    // Consume the queued intent without revoking its in-progress authorization.
+    this.pendingSend=undefined;this.state.sendPending=false;
+    if(pending.generation!==this.sendIntentGeneration||!reviewed||reviewed.capture.source!=='verified-editor'||!sameVerifiedDraft(reviewed.capture.snapshot,pending.snapshot)){this.publish();return;}
+    await this.replaceDraft(pending.snapshot,'send',pending.generation);
   }
-  private async sendAsIs(snapshot:VerifiedComposerSnapshot){
+  private async sendAsIs(snapshot:VerifiedComposerSnapshot,generation:number){
     if(!await this.waitForObservation()||!this.foreground)return;
     await this.acquireEditor();const epoch=this.epoch;
     try{
       const external=this.external;if(!external?.send)throw new Error('SEND_UNAVAILABLE');
       const current=await this.capture();if(epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(current.source!=='verified-editor'||!sameVerifiedDraft(current.snapshot,snapshot)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
       if(!current.snapshot.isPlainText)throw new Error('WRITE_UNAVAILABLE');
-      await external.send(current.snapshot,()=>{if(this.closed||!this.foreground||epoch!==this.epoch||this.external!==external||this.state.outboundMode!=='send')throw new Error('DRAFT_CHANGED');});
+      const authorize=()=>{if(this.closed||!this.foreground||epoch!==this.epoch||this.external!==external||this.state.outboundMode!=='send'||generation!==this.sendIntentGeneration)throw new Error('DRAFT_CHANGED');};
+      await external.send(current.snapshot,()=>{authorize();return authorize;});
       this.lastWritten=undefined;
     }catch(error){this.fail(error);}finally{this.setBusy(false);}
   }
-  async replaceDraft(shortcutSnapshot?:VerifiedComposerSnapshot,intent:'replace'|'send'='replace'){
-    const allowed=()=>intent==='send'?this.state.outboundMode==='send':this.state.shortcutEnabled!==false;
+  async replaceDraft(shortcutSnapshot?:VerifiedComposerSnapshot,intent:'replace'|'send'='replace',sendGeneration=this.sendIntentGeneration){
+    const allowed=()=>intent==='send'?this.state.outboundMode==='send'&&sendGeneration===this.sendIntentGeneration:this.state.shortcutEnabled!==false;
     const shortcutReview=shortcutSnapshot?this.reviewed:undefined;
     if(shortcutSnapshot&&(!shortcutReview||shortcutReview.capture.source!=='verified-editor'||!sameVerifiedDraft(shortcutReview.capture.snapshot,shortcutSnapshot)||!allowed()||this.state.translationPaused||this.state.phase!=='ready'))return;
     if(!await this.waitForObservation()||!this.reviewed||!this.foreground)return;

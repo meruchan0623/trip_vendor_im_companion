@@ -4,8 +4,8 @@ import type {OrderEntry,MessageSurface,OrderViewport,SurfaceRect} from '../src/s
 import {collectTextRuns,findIdentifierMatches,inferIdentifierType,MESSAGE_TEXT_SELECTOR,HEADER_TEXT_SELECTOR,HEADER_ORDER} from './page/identifiers';
 const SELECTOR='.tiptap.ProseMirror.chat-editor[contenteditable="true"]';
 interface PublicEditor {view:{dom:HTMLElement;composing:boolean;focus():void};state:{doc:{content:{size:number}}};isDestroyed:boolean;isEditable:boolean;getJSON():unknown;on(type:string,handler:()=>void):unknown;off(type:string,handler:()=>void):unknown;commands:{setContent(content:unknown,emitUpdate:boolean,parseOptions:{preserveWhitespace:'full'}):boolean;setTextSelection(position:number):boolean}}
-export type NativeInteraction={type:'draft-changed'}|{type:'replace-shortcut';snapshot:VerifiedComposerSnapshot}|{type:'send-shortcut';snapshot:VerifiedComposerSnapshot};
-export interface NativeInteractionOptions {shortcutEnabled:boolean;enterSend:boolean}
+export type NativeInteraction={type:'draft-changed'}|{type:'replace-shortcut';snapshot:VerifiedComposerSnapshot}|{type:'send-shortcut';snapshot:VerifiedComposerSnapshot;sendGeneration?:number};
+export interface NativeInteractionOptions {shortcutEnabled:boolean;enterSend:boolean;sendGeneration?:number}
 export function isReplaceChord(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'>){return event.key==='Enter'&&event.altKey&&!event.shiftKey&&(event.ctrlKey!==event.metaKey);}
 /** A plain Enter, which the vendor treats as send. Shift+Enter (newline) and modified chords are left alone. */
 export function isSendKey(event:Pick<KeyboardEvent,'key'|'ctrlKey'|'altKey'|'shiftKey'|'metaKey'>){return event.key==='Enter'&&!event.altKey&&!event.shiftKey&&!event.ctrlKey&&!event.metaKey;}
@@ -111,10 +111,14 @@ export function createNativeComposer(meta:{leaseId:string;documentGeneration:num
   if(meta.bindingName!==undefined&&!/^tsim_native_[a-f0-9]{32}$/.test(meta.bindingName))throw new Error('INVALID_NATIVE_BINDING');
   let disposed=false,revision=1,scopeGeneration=1,authGeneration=0,editorNumber=0,lastConversation='',editor:PublicEditor|undefined,element:HTMLElement|undefined,composing=false;
   let lastPoll=Date.now();const watchdog=document.defaultView!.setInterval(()=>{if(Date.now()-lastPoll>=6000)dispose();},1000);
-  let ownWrite=false,writeUpdateObserved=false,contentFingerprint='',quoteFingerprint='',shortcutEnabled=false,enterSend=false,wakeQueued=false;
+  let ownWrite=false,writeUpdateObserved=false,contentFingerprint='',quoteFingerprint='',shortcutEnabled=false,enterSend=false,wakeQueued=false,sendGeneration=0,shortcutSinceFocus=false;
   const pending:NativeInteraction[]=[];
   const wake=meta.bindingName?(document.defaultView as unknown as Record<string,unknown>)[meta.bindingName]:undefined;
-  function enqueue(event:NativeInteraction){if(disposed||ownWrite||typeof wake!=='function')return;if(pending.some(item=>item.type===event.type))return;pending.push(event);if(wakeQueued)return;wakeQueued=true;queueMicrotask(()=>{wakeQueued=false;if(disposed||!pending.length)return;try{(wake as (payload:string)=>void)('wake');}catch{pending.length=0;}});}
+  function enqueue(event:NativeInteraction){if(disposed||ownWrite||typeof wake!=='function')return;
+    // Editing cancels an undelivered Enter. Only another trusted Enter may
+    // authorize the new snapshot, appended after its draft-change notice.
+    if(event.type==='draft-changed'||event.type==='send-shortcut'){const previous=pending.findIndex(item=>item.type==='send-shortcut');if(previous>=0)pending.splice(previous,1);}
+    if(pending.some(item=>item.type===event.type))return;pending.push(event);if(wakeQueued)return;wakeQueued=true;queueMicrotask(()=>{wakeQueued=false;if(disposed||!pending.length)return;try{(wake as (payload:string)=>void)('wake');}catch{pending.length=0;}});}
   // The vendor keeps citations beside the editor, not in the Tiptap document.
   const readQuote=()=>[...(element?.closest('.chat_area-input')?.querySelectorAll('.cite-container .cite-text')??[])].map(node=>node.innerHTML).join('\n');
   const syncQuote=()=>{const next=readQuote();if(next!==quoteFingerprint){quoteFingerprint=next;revision++;enqueue({type:'draft-changed'});}};
@@ -131,23 +135,26 @@ export function createNativeComposer(meta:{leaseId:string;documentGeneration:num
       // text draft is intercepted synchronously before the vendor can send it.
       let current:VerifiedComposerSnapshot;try{current=snapshot();}catch{event.preventDefault();event.stopImmediatePropagation();return;}
       if(!current.isPlainText)return;
-      event.preventDefault();event.stopImmediatePropagation();if(event.repeat)return;if(!current.composing&&current.text.trim())enqueue({type:'send-shortcut',snapshot:current});
+      event.preventDefault();event.stopImmediatePropagation();if(event.repeat)return;if(!current.composing&&current.text.trim()){shortcutSinceFocus=true;enqueue({type:'send-shortcut',snapshot:current,sendGeneration});}
     }catch{/* Unverified editors never produce send intents. */}return;}
     if(!shortcutEnabled||!isReplaceChord(event))return;try{if(!owned(event))return;
     // Consume even a repeat or unfinished IME chord so the vendor cannot treat Enter as send.
-    event.preventDefault();event.stopImmediatePropagation();if(!isReplaceIntent(event)||composing||editor!.view.composing)return;const current=snapshot();if(!current.composing)enqueue({type:'replace-shortcut',snapshot:current});
+    event.preventDefault();event.stopImmediatePropagation();if(!isReplaceIntent(event)||composing||editor!.view.composing)return;const current=snapshot();if(!current.composing){shortcutSinceFocus=true;enqueue({type:'replace-shortcut',snapshot:current});}
   }catch{/* Unverified editors never produce write intents. */}};
   document.addEventListener('keydown',keydown,true);
+  const revokeShortcuts=()=>{if(disposed)return;pending.splice(0,pending.length,...pending.filter(event=>event.type==='draft-changed'));if(shortcutSinceFocus){revision++;shortcutSinceFocus=false;}};
+  const visibility=()=>{if(document.visibilityState==='hidden')revokeShortcuts();};
+  document.defaultView!.addEventListener('blur',revokeShortcuts);document.addEventListener('visibilitychange',visibility);
   const conversation=()=>readConversationId(document);
   function bind(){const nodes=document.querySelectorAll<HTMLElement>(SELECTOR);if(nodes.length!==1||!nodes[0].isConnected||nodes[0].getClientRects().length===0)throw new Error('COMPOSER_SOURCE_UNVERIFIED');const next=(nodes[0]as HTMLElement&{editor?:PublicEditor}).editor;
     if(!next||next.isDestroyed||next.isEditable!==true||next.view?.dom!==nodes[0]||typeof next.getJSON!=='function'||typeof next.on!=='function'||typeof next.off!=='function'||typeof next.commands?.setContent!=='function')throw new Error('COMPOSER_PUBLIC_API_UNVERIFIED');
     if(editor!==next){if(editor)editor.off('update',update);element?.removeEventListener('input',input);element?.removeEventListener('compositionstart',start);element?.removeEventListener('compositionend',end);editor=next;element=nodes[0];quoteObserver.disconnect();quoteFingerprint=readQuote();const composer=element.closest('.chat_area-input');if(composer)quoteObserver.observe(composer,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['src','alt','title']});contentFingerprint=JSON.stringify(editor.getJSON());pending.length=0;editor.on('update',update);element.addEventListener('input',input);element.addEventListener('compositionstart',start);element.addEventListener('compositionend',end);composing=false;editorNumber++;scopeGeneration++;revision++;}
   }
   function snapshot():VerifiedComposerSnapshot{if(disposed)throw new Error('NATIVE_LEASE_ENDED');bind();const key=conversation();if(key!==lastConversation){lastConversation=key;scopeGeneration++;revision++;}syncQuote();const raw=editor!.getJSON(),pure=plainDoc(raw);const editorIdentity=`${meta.leaseId}:${editorNumber}`;return{text:pure?.text??'',conversationId:key,revision,scopeGeneration,authGeneration,editorIdentity,docFingerprint:JSON.stringify({doc:raw,quote:quoteFingerprint}),isPlainText:!!pure,composing:composing||editor!.view.composing===true,platformAccountScope:`merchant-document:${meta.leaseId}`,composerId:editorIdentity,documentGeneration:meta.documentGeneration};}
-  function dispose(){if(disposed)return;disposed=true;quoteObserver.disconnect();pending.length=0;document.removeEventListener('keydown',keydown,true);document.defaultView!.clearInterval(watchdog);editor?.off('update',update);element?.removeEventListener('input',input);element?.removeEventListener('compositionstart',start);element?.removeEventListener('compositionend',end);editor=undefined;element=undefined;}
+  function dispose(){if(disposed)return;disposed=true;quoteObserver.disconnect();pending.length=0;document.removeEventListener('keydown',keydown,true);document.defaultView!.removeEventListener('blur',revokeShortcuts);document.removeEventListener('visibilitychange',visibility);document.defaultView!.clearInterval(watchdog);editor?.off('update',update);element?.removeEventListener('input',input);element?.removeEventListener('compositionstart',start);element?.removeEventListener('compositionend',end);editor=undefined;element=undefined;}
   return{
     drainInteractions():NativeInteraction[]{if(disposed)throw new Error('NATIVE_LEASE_ENDED');return pending.splice(0,8);},
-    setInteractionOptions(options:NativeInteractionOptions){if(disposed||typeof options?.shortcutEnabled!=='boolean'||typeof options.enterSend!=='boolean')throw new Error('INVALID_INTERACTION_OPTIONS');shortcutEnabled=options.shortcutEnabled;enterSend=options.enterSend;pending.splice(0,pending.length,...pending.filter(event=>event.type==='draft-changed'||event.type==='replace-shortcut'&&shortcutEnabled||event.type==='send-shortcut'&&enterSend));},
+    setInteractionOptions(options:NativeInteractionOptions){const next=options?.sendGeneration??0;if(disposed||typeof options?.shortcutEnabled!=='boolean'||typeof options.enterSend!=='boolean'||!Number.isSafeInteger(next)||next<0)throw new Error('INVALID_INTERACTION_OPTIONS');if(next<sendGeneration)return;const changed=next!==sendGeneration;sendGeneration=next;shortcutEnabled=options.shortcutEnabled;enterSend=options.enterSend;pending.splice(0,pending.length,...pending.filter(event=>event.type==='draft-changed'||event.type==='replace-shortcut'&&shortcutEnabled||event.type==='send-shortcut'&&enterSend&&!changed));},
     heartbeat(){if(disposed)throw new Error('NATIVE_LEASE_ENDED');lastPoll=Date.now();},
     // Authentication rotates draft authorization, not the conversation or its language preferences.
     poll(nextAuthGeneration:number):NativePoll{if(disposed)throw new Error('NATIVE_LEASE_ENDED');lastPoll=Date.now();if(!Number.isSafeInteger(nextAuthGeneration)||nextAuthGeneration<0)throw new Error('INVALID_AUTH_GENERATION');if(nextAuthGeneration!==authGeneration){authGeneration=nextAuthGeneration;revision++;}const messageSurface=messageSurfaceGeometry(document),orderViewport={width:document.defaultView!.innerWidth,height:document.defaultView!.innerHeight,dpr:document.defaultView!.devicePixelRatio||1};if(!messageSurface.active)return{writeVerified:false,messageSurface,orderEntries:[],orderViewport,reason:'MESSAGE_PAGE_INACTIVE'};try{return{snapshot:snapshot(),writeVerified:true,messageSurface,orderEntries:[],orderViewport,orderFrame:orderFrameGeometry(document)};}catch(error){return{writeVerified:false,messageSurface:inactiveSurface(),orderEntries:[],orderViewport,reason:error instanceof Error&&/^[A-Z_]+$/.test(error.message)?error.message:'COMPOSER_UNAVAILABLE'};}},
