@@ -83,6 +83,7 @@ export class BrowserProfileSessionService {
   private closed=false;
   private syncing:Promise<void>|null=null;
   private opening:Promise<void>|null=null;
+  private loginIntent=0;
   private active=new Set<AbortController>();
   private poll:ReturnType<typeof setInterval>|null=null;
   private backgroundPolling:boolean;
@@ -215,11 +216,27 @@ export class BrowserProfileSessionService {
   async openLogin():Promise<void>{
     if(this.options.enabled===false)return;if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');
     if(this.opening)return this.opening;
-    const operation=this.openLoginTarget();this.opening=operation;
+    const operation=this.openLoginTarget(++this.loginIntent);this.opening=operation;
     try{await operation;}finally{if(this.opening===operation)this.opening=null;}
   }
-  private async openLoginTarget():Promise<void>{
+  private async openLoginTarget(intent:number):Promise<void>{
     const wasSuspended=this.suspended;
+    // Reconnect to an existing website login before opening another login page.
+    // An already connected user can still explicitly open the bound browser to manage it.
+    if(!this.current){
+      this.suspended=false;
+      try{
+        await this.sync();
+        if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');
+        if(intent!==this.loginIntent||this.suspended)throw new Error('AUTH_CHANGED');
+        if(this.current){this.updatePolling();return;}
+      }catch(error){
+        if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');
+        if(intent!==this.loginIntent||this.suspended)throw new Error('AUTH_CHANGED');
+        // Confirmed auth loss needs the website; network/storage failures keep their specific error.
+        if(!(error instanceof Error&&['PSIM_LOGIN_REQUIRED','PROFILE_UNVERIFIED'].includes(error.message))){this.suspended=wasSuspended;this.updatePolling();throw error;}
+      }
+    }
     this.suspended=true;this.updatePolling();this.revoke();
     const generation=this.generation;
     const assertCurrent=()=>{if(this.closed)throw new Error('BROWSER_SESSION_DISPOSED');if(generation!==this.generation)throw new Error('AUTH_CHANGED');};
@@ -285,6 +302,6 @@ export class BrowserProfileSessionService {
     if(listed.result.length>20)fields.push({label:'展示范围',value:`共 ${listed.result.length} 个套餐，当前展示前 20 个`});
     await check();return{identifier,found:listed.result.length>0,fields};
   }
-  async logout():Promise<void>{this.suspended=true;this.updatePolling();this.revoke();this.binding=null;this.setStatus('needs_login');}
-  dispose(){if(this.closed)return;this.closed=true;this.updatePolling();this.revoke();this.binding=null;}
+  async logout():Promise<void>{this.loginIntent++;this.suspended=true;this.updatePolling();this.revoke();this.binding=null;this.setStatus('needs_login');}
+  dispose(){if(this.closed)return;this.loginIntent++;this.closed=true;this.updatePolling();this.revoke();this.binding=null;}
 }

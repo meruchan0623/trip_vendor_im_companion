@@ -260,10 +260,10 @@ export function SettingsPanel({ api, state, busy, perform }: BaseProps) {
         </div>
         {state.auth === "ready" && <p className="account-scope">{state.accountScope}</p>}
         <div className="button-row">
-          <button className="secondary" disabled={!api || busy} onClick={() => api && void perform(() => api.openLogin())}>登录 / 切换 TSim 账户</button>
-          {state.auth === "ready" && <button className="text-button" disabled={!api || busy} onClick={() => api && void perform(() => api.logout())}>退出 TSim 并清除登录态</button>}
+          <button className="secondary" disabled={!api || busy} onClick={() => api && void perform(() => api.openLogin())}>打开浏览器 TSim_CS</button>
+          {state.auth === "ready" && <button className="text-button" disabled={!api || busy} onClick={() => api && void perform(() => api.logout())}>断开助手会话</button>}
         </div>
-        <p className="hint">登录态在本机加密保存，重启后自动恢复；退出会清除保存的会话。</p>
+        <p className="hint">自动复用本机 Edge / Chrome 的 TSim_CS 登录，无需在助手重复输入密码。断开仅停止助手复用，不退出浏览器账号；点击打开后可重新连接。</p>
       </section>
     </>
   );

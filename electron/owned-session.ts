@@ -13,6 +13,7 @@ export class PersistentSessionService {
   private pollingWanted=false;
   private poll:ReturnType<typeof setInterval>|undefined;
   private syncing:Promise<void>|undefined;
+  private loginServerGeneration=0;
   private loginServer:ReturnType<typeof startOwnedLoginServer>|undefined;
   constructor(changed:(identity:PsimIdentity|null)=>void,private options:BrowserProfileSessionOptions,store:OwnedSessionStore){
     this.service=new OwnedPsimService(options.fetcher,identity=>{if(!this.closed){changed(identity);if(!identity)this.publish('connecting');}},store);
@@ -55,26 +56,34 @@ export class PersistentSessionService {
     if(this.closed)throw new Error('OWNED_SERVICE_CLOSED');
     if(!this.options.openExternal)throw new Error('BROWSER_LOGIN_OPENER_REQUIRED');
     if(!this.loginServer){
+      const generation=++this.loginServerGeneration;
+      const current=()=>!this.closed&&generation===this.loginServerGeneration;
+      const authorized=()=>{if(!current())throw new Error('OWNED_LOGIN_REVOKED');};
       const facade:OwnedLoginService={
-        identity:()=>this.identity(),
-        login:async(username,password)=>{this.suspended=false;this.setBackgroundPolling(this.pollingWanted);this.publish('connecting');try{const identity=await this.service.login(username,password);if(!this.suspended)this.publish('ready');return identity;}catch(error){if(!this.suspended)this.failure(error);throw error;}},
-        logout:()=>this.logout(),
-        refresh:async()=>{try{const identity=await this.service.refresh();if(!this.suspended)this.publish('ready');return identity;}catch(error){if(!this.suspended)this.failure(error);throw error;}},
+        identity:()=>current()?this.identity():null,
+        login:async(username,password)=>{authorized();this.suspended=false;this.setBackgroundPolling(this.pollingWanted);this.publish('connecting');try{const identity=await this.service.login(username,password);authorized();if(!this.suspended)this.publish('ready');return identity;}catch(error){if(current()&&!this.suspended)this.failure(error);throw error;}},
+        logout:async()=>{authorized();await this.logout();},
+        refresh:async()=>{authorized();try{const identity=await this.service.refresh();authorized();if(!this.suspended)this.publish('ready');return identity;}catch(error){if(current()&&!this.suspended)this.failure(error);throw error;}},
         dispose:()=>{},
       };
-      this.loginServer=startOwnedLoginServer(facade,{persistent:true});
-      this.loginServer.catch(()=>{this.loginServer=undefined;});
+      const starting=startOwnedLoginServer(facade,{persistent:true,embedded:true});this.loginServer=starting;
+      void starting.catch(()=>{if(this.loginServer===starting)this.loginServer=undefined;});
     }
-    const server=await this.loginServer;
-    if(this.closed)return;
+    const starting=this.loginServer,generation=this.loginServerGeneration,server=await starting;
+    if(this.closed||generation!==this.loginServerGeneration||this.loginServer!==starting)return;
     await this.options.openExternal(server.loginURL);
   }
+
   async logout(){
-    this.suspended=true;const wanted=this.pollingWanted;this.setBackgroundPolling(false);this.pollingWanted=wanted;
-    try{await this.service.logout();}finally{if(this.suspended)this.publish('needs_login');}
+    this.suspended=true;++this.loginServerGeneration;const previous=this.loginServer;this.loginServer=undefined;
+    const wanted=this.pollingWanted;this.setBackgroundPolling(false);this.pollingWanted=wanted;
+    // Revoke the owned service immediately; closing a server that is still starting must not delay logout.
+    const logout=this.service.logout(),closing=previous?.then(server=>server.close()).catch(()=>{});
+    try{await Promise.all([logout,closing]);}finally{if(this.suspended)this.publish('needs_login');}
   }
   async dispose(){
-    if(this.closed)return;this.closed=true;this.setBackgroundPolling(false);this.service.dispose();
-    const server=await this.loginServer?.catch(()=>undefined);await server?.close();
+    if(this.closed)return;this.closed=true;++this.loginServerGeneration;const previous=this.loginServer;this.loginServer=undefined;
+    this.setBackgroundPolling(false);this.service.dispose();
+    const server=await previous?.catch(()=>undefined);await server?.close();
   }
 }

@@ -1,4 +1,5 @@
-import { isOutboundMode, isPanelTarget, type OutboundMode, type PanelState, type PanelTarget } from '../src/shared/workbench';
+import {isLoginPopoverId} from '../src/shared/owned-login';
+import { isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, type OutboundMode, type PanelState, type PanelTarget } from '../src/shared/workbench';
 import type { StandaloneState } from '../src/shared/companion-api';
 
 /** The only state sent to the vendor renderer. Authentication credentials stay in the host. */
@@ -9,6 +10,8 @@ export function embeddedPanelState(state:StandaloneState,conversationKey:string|
 
 export interface EmbeddedActions {
   getState():StandaloneState;
+  openOrder?(intent:OrderWindowIntent):Promise<void>;
+  closeOrder?():Promise<void>;
   setTranslationOptions(options:{language?:PanelTarget;autoTranslate?:boolean;outboundMode?:OutboundMode}):Promise<void>;
   reportCustomerLanguage(language:string,conversationKey:string):Promise<void>;
   followCustomerLanguage():Promise<void>;
@@ -17,6 +20,8 @@ export interface EmbeddedActions {
   cancelTranslation():Promise<void>;
   resumeTranslation():Promise<void>;
   openLogin():Promise<void>;
+  closeLogin(id:string):Promise<void>;
+  logout():Promise<void>;
 }
 
 /** Fixed intents only: the renderer cannot supply text, snapshots, URLs or a send action. */
@@ -32,7 +37,11 @@ export async function invokeEmbeddedAction(service:EmbeddedActions,action:string
     case 'apply':if(args.length!==1||!object('mode')||record.mode!=='replace')break;await service.replaceDraft();return;
     case 'setOutboundMode':if(args.length!==1||!isOutboundMode(value))break;await service.setTranslationOptions({outboundMode:value});return;
     case 'retry':if(args.length)break;await service.translate(service.getState().language);return;
+    case 'closeLogin':if(args.length!==1||!isLoginPopoverId(value))break;await service.closeLogin(value);return;
+    case 'openOrder':if(args.length!==1||!isOrderWindowIntent(value)||!service.openOrder)break;await service.openOrder(value);return;
+    case 'closeOrder':if(args.length||!service.closeOrder)break;await service.closeOrder();return;
     case 'openLogin':if(args.length)break;await service.openLogin();return;
+    case 'logout':if(args.length)break;await service.logout();return;
     case 'cancel':if(args.length)break;await service.cancelTranslation();return;
     case 'resume':if(args.length)break;await service.resumeTranslation();return;
   }

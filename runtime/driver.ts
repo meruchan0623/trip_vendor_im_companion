@@ -1,5 +1,6 @@
+import {isLoginPopoverId} from '../src/shared/owned-login';
 import {randomUUID,randomBytes} from 'node:crypto';
-import {isOutboundMode,isPanelTarget} from '../src/shared/workbench';
+import {isOrderWindowIntent, isOutboundMode,isPanelTarget} from '../src/shared/workbench';
 import type {NativeInteraction,NativeInteractionOptions,NativePoll} from './native-composer';
 import type {PanelState,VerifiedComposerSnapshot} from '../src/shared/workbench';
 import {approvedImTargets,chooseActiveImTarget,observeImTarget,sameTargetInventory} from './target-selection';
@@ -60,7 +61,10 @@ export class LiveRuntimeDriver implements RuntimeDriver {
         case 'setEnabled':if(args.length!==1||typeof args[0]!=='boolean')throw new Error('INVALID_ACTION');break;
         case 'setTarget':if(args.length!==1||!plain('lang,source')||arg!.source!=='manual'||!isPanelTarget(arg!.lang))throw new Error('INVALID_ACTION');break;
         case 'customerLanguage':if(args.length!==1||!plain('conversationKey,lang')||typeof arg!.lang!=='string'||!/^(unknown|zh|en|ja|ko|ar|ru|el|th|es|fr|de|pt|it|vi|id|ms)$/.test(arg!.lang)||typeof arg!.conversationKey!=='string'||arg!.conversationKey.length>1024)throw new Error('INVALID_ACTION');break;
-        case 'followCustomer':case 'retry':case 'openLogin':case 'cancel':case 'resume':if(args.length)throw new Error('INVALID_ACTION');break;
+        case 'followCustomer':case 'retry':case 'openLogin':case 'logout':case 'cancel':case 'resume':if(args.length)throw new Error('INVALID_ACTION');break;
+        case 'openOrder':if(args.length!==1||!isOrderWindowIntent(args[0]))throw new Error('INVALID_ACTION');break;
+        case 'closeOrder':if(args.length)throw new Error('INVALID_ACTION');break;
+        case 'closeLogin':if(args.length!==1||!isLoginPopoverId(args[0]))throw new Error('INVALID_ACTION');break;
         case 'apply':if(args.length!==1||!plain('mode')||arg!.mode!=='replace')throw new Error('INVALID_ACTION');break;
         case 'setOutboundMode':if(args.length!==1||!isOutboundMode(args[0]))throw new Error('INVALID_ACTION');break;
         case 'queryOrder':if(args.length!==1||!plain('identifier')||typeof arg!.identifier!=='string'||arg!.identifier.length<1||arg!.identifier.length>128||/[\u0000-\u001f\u007f-\u009f]/.test(arg!.identifier))throw new Error('INVALID_ACTION');break;

@@ -1,18 +1,21 @@
+import {ownedLoginURL,isLoginPopoverId,type LoginPopover} from '../src/shared/owned-login';
 import { randomUUID, createHash } from 'node:crypto';
 import { BrowserProfileSessionService, type BrowserProfileSessionOptions } from './browser-profile-session';
-import { isOutboundMode, isPanelTarget, sameVerifiedDraft, type OutboundMode, type PanelTarget, type PanelOrderState, type PsimIdentity, type VerifiedComposerSnapshot } from '../src/shared/workbench';
+import { isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, sameVerifiedDraft, type OutboundMode, type PanelTarget, type PanelOrderState, type PsimIdentity, type VerifiedComposerSnapshot } from '../src/shared/workbench';
 import type { StandaloneState, OrderEntry } from '../src/shared/companion-api';
 import type {NativeInteraction} from '../runtime/native-composer';
 import type { NativeAdapter, NativeDraftSnapshot, WindowState } from './native-adapter';
 import { connectExternalComposer, type ExternalComposer } from './external-composer';
 import { embeddedPanelState, invokeEmbeddedAction } from './embedded-host';
+import type {BrowserProfile} from './browser-profile-session';
+import type {OperatorSelection} from './system-browser';
 import {reportVendorProgress} from './vendor-progress';
 
 type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
 const messages:Record<string,string>={
   MESSAGE_PAGE_INACTIVE:'请先切换到旅游商家的“消息”页面并打开客户会话。',
-  PSIM_LOGIN_REQUIRED:'请点击请求登录，登录 TSim 后将自动保存会话。',
+  PSIM_LOGIN_REQUIRED:'请先在 Edge 或 Chrome 登录 TSim_CS，助手将自动复用浏览器会话。',
   SESSION_STORAGE_ENCRYPTION_UNAVAILABLE:'系统安全存储不可用，请解锁系统钥匙串后重试。',
   SESSION_STORAGE_CORRUPT:'保存的登录态无法解密，请在账户设置中重新登录。',
   SESSION_STORAGE_INVALID:'保存的登录态无效，请在账户设置中重新登录。',
@@ -38,6 +41,9 @@ const messages:Record<string,string>={
   AUTH_CHANGED:'登录账号已改变，请重新翻译。',
   BROWSER_CLEANUP_UNCONFIRMED:'订单浮层关闭状态暂未确认，请检查浏览器窗口。',
   BROWSER_PLACEMENT_FAILED:'订单浮层未能显示，请重新点击订单号。',
+  browser_accessibility_required:'请在 macOS 系统设置 → 隐私与安全性 → 辅助功能中允许旅游商家助手或 TravelMerchant.WindowHelper 控制订单窗口，然后重新查询。',
+  BROWSER_PROFILE_REQUIRED:'请先在已绑定的 Edge 或 Chrome 中登录 TSim_CS，再查询订单。',
+  ORDER_CONTEXT_CHANGED:'客户会话或登录态已变化，请重新点击订单号。',
   BROWSER_SPACE_TOO_SMALL:'订单查询空间不足，请先放大商家窗口，再打开订单。',
   NATIVE_SEND_FAILED:'未能自动发送，请确认输入框内容后再按 Enter。',
   SEND_UNAVAILABLE:'当前编辑器不支持自动发送，请切换为替换模式。',
@@ -46,7 +52,15 @@ const messages:Record<string,string>={
 export const AUTO_TRANSLATE_DELAY_MS=500;
 export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
+export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
 export class CompanionService {
+  private orderWindowGeneration=0;
+  private orderClosing:Promise<void>=Promise.resolve();
+  private invalidateOrderWindow(){++this.orderWindowGeneration;this.state.browserOpen=false;const closing=this.orderWindow?.close();if(closing)this.orderClosing=Promise.all([this.orderClosing,closing]).then(()=>{}).catch(()=>{if(!this.closed)this.reportBrowserFailure('BROWSER_CLEANUP_UNCONFIRMED');});}
+  async closeOrder(){this.invalidateOrderWindow();await this.orderClosing;this.publish();}
+  private loginPopover:LoginPopover|undefined;
+  private loginGeneration=0;
+  private loginOpening:{epoch:number;generation:number}|undefined;
   private state:StandaloneState={attached:false,targetInstanceId:null,nativeStatus:'starting',auth:'connecting',accountScope:'unknown',draft:null,preview:null,phase:'idle',error:null,language:'en',customerLanguage:'unknown',followCustomerLanguage:true,autoTranslate:true,shortcutEnabled:true,outboundMode:'send',sendPending:false,translationPaused:false,browserOpen:false,composerSource:'unavailable',orderEntries:[],orderViewport:null,messageSurface:{active:false,composerRect:null,toolbarRect:null}};
   private listeners=new Set<(state:StandaloneState)=>void>();
   private psim:SessionPort;
@@ -63,13 +77,13 @@ export class CompanionService {
   private order:PanelOrderState={identifier:'',status:'idle',error:null,fields:[]};
   private orderGeneration=0;
   private orderRequest?:AbortController;
-  private clearOrder(){++this.orderGeneration;this.orderRequest?.abort();this.orderRequest=undefined;this.order={identifier:'',status:'idle',error:null,fields:[]};}
+  private clearOrder(){this.invalidateOrderWindow();++this.orderGeneration;this.orderRequest?.abort();this.orderRequest=undefined;this.order={identifier:'',status:'idle',error:null,fields:[]};}
   private resetCustomerLanguage(){this.state.customerLanguage='unknown';this.state.followCustomerLanguage=true;this.state.language='en';this.translationIntent++;this.attempted=undefined;this.suppressed=undefined;}
   private contextChanged(){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
-  private embeddedState(){return embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null);}
+  private embeddedState(){return {...(this.orderWindow?{orderWindowMode:'browser' as const}:{}),...embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null),...(this.loginPopover?{loginPopover:{...this.loginPopover}}:{})};}
   private retireComposer(composer:ExternalComposer){
     if(this.external!==composer||this.closed)return;
-    this.translationIntent++;this.invalidate();this.captured=undefined;
+    this.loginGeneration++;this.loginPopover=undefined;this.translationIntent++;this.invalidate();this.captured=undefined;
     this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;
     this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';
     this.retireInteractions();this.external=undefined;this.nextConnectAt=Date.now()+1000;
@@ -156,7 +170,7 @@ export class CompanionService {
   private sessionError:string|null=null;
   private sourceFailure=false;
   private surfaceMeasurementRevision=0;
-  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options)){
+  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:never,private orderWindow?:OrderWindowPort){
     this.psim=sessionFactory(identity=>{
       const sessionIdentity=identity?.accountScope;
       if(sessionIdentity!==undefined&&this.sessionIdentity!==undefined&&sessionIdentity!==this.sessionIdentity){this.contextChanged();this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;}
@@ -196,7 +210,7 @@ export class CompanionService {
   reportBrowserFailure(code:'BROWSER_PLACEMENT_FAILED'|'BROWSER_CLEANUP_UNCONFIRMED'|'BROWSER_SPACE_TOO_SMALL'){this.fail(new Error(code));}
   setWindowState(window:WindowState|null){
     if(this.closed)return;
-    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();}
+    const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.loginPopover=undefined;this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();}
     if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectionAbort?.abort();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
@@ -398,6 +412,26 @@ export class CompanionService {
       this.publish();
     }catch(error){this.invalidate();this.fail(error);}finally{this.setBusy(false);}
   }
+  async openOrder(intent:OrderWindowIntent){
+    if(!isOrderWindowIntent(intent)||!this.orderWindow)throw new Error('INVALID_ACTION');
+    await this.sessionStarting;
+    const identity=this.psim.identity(),context=this.context(),target=this.state.targetInstanceId;
+    if(!identity){this.fail(new Error('PSIM_LOGIN_REQUIRED'));throw new Error('PSIM_LOGIN_REQUIRED');}
+    if(this.closed||!this.foreground||!this.external||!this.state.messageSurface?.active||intent.conversationKey!==context){if(!this.closed)this.fail(new Error('ORDER_CONTEXT_CHANGED'));throw new Error('ORDER_CONTEXT_CHANGED');}
+    this.invalidateOrderWindow();const generation=this.orderWindowGeneration;
+    const current=()=>!this.closed&&generation===this.orderWindowGeneration&&target===this.state.targetInstanceId&&context===this.context()&&this.state.messageSurface?.active===true&&this.psim.identity()?.accountScope===identity.accountScope&&this.psim.identity()?.authGeneration===identity.authGeneration;
+    try{
+      await this.psim.sync();if(!current())throw new Error('ORDER_CONTEXT_CHANGED');
+      const profile=this.psim.getBrowserProfile();if(!profile)throw new Error('BROWSER_PROFILE_REQUIRED');
+      await this.acquireEditor();try{const capture=await this.capture();if(!current())throw new Error('ORDER_CONTEXT_CHANGED');this.adopt(capture);if(!current())throw new Error('ORDER_CONTEXT_CHANGED');}finally{this.setBusy(false);}
+      await this.orderClosing;if(!current())throw new Error('ORDER_CONTEXT_CHANGED');
+      await this.orderWindow.open({identifier:intent.identifier,identifierType:intent.identifierType,requestId:randomUUID()},profile,async()=>{
+        await this.psim.sync();if(!current())return false;if(JSON.stringify(this.psim.getBrowserProfile())!==JSON.stringify(profile)){this.invalidateOrderWindow();return false;}
+        await this.acquireEditor();try{const capture=await this.capture();if(!current())return false;this.adopt(capture);return current();}finally{this.setBusy(false);}
+      });
+      if(current()){this.state.browserOpen=true;this.publish();}
+    }catch(error){if(current()){this.fail(error);throw error;}}
+  }
   async queryOrder(identifier:string){
     if(typeof identifier!=='string'||!identifier.trim()||identifier.length>128||/[\r\n\u0000]/.test(identifier))throw new Error('INVALID_ORDER_IDENTIFIER');
     await this.sessionStarting;
@@ -418,7 +452,19 @@ export class CompanionService {
     }catch(error){if(current()){const code=error instanceof Error?error.message:'';const reasons:Record<string,string>={PSIM_LOGIN_REQUIRED:'请先登录 TSim 客服后查询订单。',AUTH_CHANGED:'登录状态已变化，请重新登录后查询。',ORDER_PERMISSION_REQUIRED:'当前账号没有订单查询权限。',INVALID_ORDER_IDENTIFIER:'请输入有效的订单 ID（字母、数字、下划线或横线）。',ORDER_QUERY_FAILED:'订单服务暂时不可用，请稍后重试。',ORDER_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。'};this.order={identifier:identifier.trim(),status:'failed',fields:[],error:reasons[code]??'订单查询未完成，请检查连接后重试。'};this.publish();}}
     finally{if(this.orderRequest===request)this.orderRequest=undefined;}
   }
-  async openLogin(){try{await this.psim.openLogin();}catch(error){this.fail(error);}}
-  async logout(){try{await this.psim.logout();}catch(error){this.fail(error);}}
-  async dispose(){this.closed=true;this.connectionAbort?.abort();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.psim.dispose();}
+  async presentLogin(url:string){
+    ownedLoginURL(url);if(this.closed||this.loginOpening&&(this.loginOpening.epoch!==this.connectionEpoch||this.loginOpening.generation!==this.loginGeneration))return;
+    this.loginPopover={id:randomUUID(),url};this.publish();
+  }
+  async closeLogin(id:string){
+    if(!isLoginPopoverId(id))throw new Error('INVALID_ACTION');
+    if(this.loginPopover?.id!==id)return;this.loginPopover=undefined;this.publish();
+  }
+  async openLogin(){const opening={epoch:this.connectionEpoch,generation:this.loginGeneration};this.loginOpening=opening;try{await this.psim.openLogin();}catch(error){this.fail(error);}finally{if(this.loginOpening===opening)this.loginOpening=undefined;}}
+  async logout(){
+    this.loginGeneration++;this.loginPopover=undefined;this.clearPendingSend();this.clearOrder();this.translationIntent++;this.invalidate();this.lastWritten=undefined;this.attempted=undefined;this.suppressed=undefined;this.state.auth='connecting';this.state.error=null;this.publish();
+    try{await this.psim.logout();this.state.auth='needs_login';this.state.accountScope='unknown';this.state.phase='idle';this.state.error=null;this.publish();}
+    catch(error){this.state.auth='failed';this.fail(error);}
+  }
+  async dispose(){this.loginPopover=undefined;this.closed=true;this.connectionAbort?.abort();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
 }

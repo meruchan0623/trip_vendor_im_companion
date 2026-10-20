@@ -2,6 +2,27 @@ import {createServer} from 'node:http';
 import {randomUUID,randomBytes} from 'node:crypto';
 import {operatorURL,type OperatorSelection} from './system-browser';
 import type {Bounds} from './layout';
+import {win32,posix} from 'node:path';
+import {existsSync} from 'node:fs';
+import type {BrowserProfile} from './browser-profile-session';
+import type {OrderWindowPort} from './companion-service';
+/** Matches the native helper's installed executable and default user-data root exactly. */
+export function selectedNativeProfile(profile:BrowserProfile,env:NodeJS.ProcessEnv=process.env,exists:(path:string)=>boolean=existsSync,platform:NodeJS.Platform=process.platform):BrowserProfileSelection|null {
+  if(platform==='darwin'){
+    const home=env.HOME;if(!home||!/^(?:Default|Profile [1-9]\d*)$/.test(profile.profileDirectory))return null;
+    for(const browser of ['edge','chrome'] as const){const product=browser==='edge'?'Microsoft Edge':'Google Chrome';
+      const executable=['/Applications',posix.join(home,'Applications')].map(root=>posix.join(root,`${product}.app`,'Contents','MacOS',product)).find(exists);
+      const data=posix.join(home,'Library','Application Support',...(browser==='edge'?['Microsoft Edge']:['Google','Chrome']));
+      if(executable&&posix.resolve(profile.browserPath)===posix.resolve(executable)&&posix.resolve(profile.userDataDir)===posix.resolve(data))return{browser,profileDirectory:profile.profileDirectory};
+    }return null;
+  }
+  if(platform!=='win32'||!env.LOCALAPPDATA||!/^(?:Default|Profile [1-9]\d*)$/.test(profile.profileDirectory))return null;
+  for(const browser of ['edge','chrome'] as const){const vendor=browser==='edge'?'Microsoft':'Google',product=browser==='edge'?'Edge':'Chrome',exe=browser==='edge'?'msedge.exe':'chrome.exe';
+    const executable=[env['ProgramFiles(x86)'],env.ProgramFiles,env.LOCALAPPDATA].filter((root):root is string=>!!root).map(root=>win32.join(root,vendor,product,'Application',exe)).find(exists);
+    if(executable&&win32.resolve(profile.browserPath).toLowerCase()===win32.resolve(executable).toLowerCase()&&win32.resolve(profile.userDataDir).toLowerCase()===win32.resolve(env.LOCALAPPDATA,vendor,product,'User Data').toLowerCase())return{browser,profileDirectory:profile.profileDirectory};
+  }return null;
+}
+export function profileOrderWindow(browser:ProfileBrowser,getBounds:()=>Bounds|null):OrderWindowPort {return{async open(selection,profile,authorize){const selected=selectedNativeProfile(profile),target=getBounds();if(!selected)throw new Error('BROWSER_PROFILE_REQUIRED');if(!target)throw new Error('TARGET_REQUIRED');const width=Math.max(320,Math.round(target.width*.9)),height=Math.max(240,Math.round(target.height*.9));await browser.open(selection,{x:Math.round(target.x+(target.width-width)/2),y:Math.round(target.y+(target.height-height)/2),width,height},false,{profile:selected,validate:authorize});if(!browser.isOpen)throw new Error('ORDER_CONTEXT_CHANGED');},close:()=>browser.close()};}
 export interface BrowserProfileSelection {browser:'edge'|'chrome';profileDirectory:string}
 interface ProfileNativePort {
   launchProfileBrowser(options:{launchId:string;browserKind:'edge'|'chrome';profileDirectory:string;bootstrapURL:string}):Promise<void>;
@@ -41,6 +62,7 @@ export class ProfileBrowser {
   private queue:Promise<unknown>=Promise.resolve();private pending:{bounds:Bounds;visible:boolean;restackId?:number}|null=null;
   private restackSequence=0;
   private applied='';private placing=false;
+  get isOpen():boolean{return this.adopted&&!!this.lease;}
   ownsGeometry(launchId:string):boolean{return this.adopted&&this.lease?.id===launchId;}
   constructor(private native:ProfileNativePort,private getProfile:()=>BrowserProfileSelection|null|Promise<BrowserProfileSelection|null>,private failed:(code:'BROWSER_PLACEMENT_FAILED'|'BROWSER_CLEANUP_UNCONFIRMED')=>void=code=>console.error(code)){}
   private async retire():Promise<void>{
@@ -52,26 +74,31 @@ export class ProfileBrowser {
     // Keep the nonce page reachable so the native cancelled-lease watch can recognize late windows.
     const timer=setTimeout(()=>{void lease.bootstrap.close();},65000);timer.unref();this.failed('BROWSER_CLEANUP_UNCONFIRMED');
   }
-  async open(selection:OperatorSelection,bounds:Bounds,maximized=false):Promise<void>{
+  async open(selection:OperatorSelection,bounds:Bounds,maximized=false,options:{profile?:BrowserProfileSelection;authorize?:()=>boolean;validate?:()=>Promise<boolean>}={}):Promise<void>{
     const destination=operatorURL(selection),generation=++this.generation;this.adopted=false;
+    const authorized=()=>generation===this.generation&&(options.authorize?.()??true);
     const operation=this.queue.then(async()=>{
-      await this.retire();if(generation!==this.generation)return;
-      const profile=await this.getProfile();if(!validProfile(profile))throw new Error('BROWSER_PROFILE_REQUIRED');
+      await this.retire();if(!authorized())return;
+      const profile=options.profile??await this.getProfile();if(!authorized())return;if(!validProfile(profile))throw new Error('BROWSER_PROFILE_REQUIRED');
       const id=randomUUID(),target=new URL(destination);target.searchParams.set('companionLease',id);
       const bootstrap=await startProfileBootstrap(id,target.href);this.lease={id,bootstrap};
       try{
+        if(!authorized()){await this.retire();return;}
         await this.native.launchProfileBrowser({launchId:id,browserKind:profile.browser,profileDirectory:profile.profileDirectory,bootstrapURL:bootstrap.url});
+        if(!authorized()){await this.retire();return;}
+        const current=this.lease!;current.heartbeat=setInterval(()=>{void this.native.heartbeatProfileBrowser(id).catch(()=>{if(this.lease===current)this.handleLost();});},2000);current.heartbeat.unref();
         const deadline=Date.now()+10000;
-        for(;;){if(generation!==this.generation){await this.retire();return;}try{await this.native.adoptProfileBrowser(id);break;}catch(error){if(!(error instanceof Error)||error.message!=='browser_window_pending'||Date.now()>=deadline)throw error;await pause(150);}}
-        if(generation!==this.generation){await this.retire();return;}
+        for(;;){if(!authorized()){await this.retire();return;}try{await this.native.adoptProfileBrowser(id);break;}catch(error){if(!(error instanceof Error)||error.message!=='browser_window_pending'||Date.now()>=deadline)throw error;await pause(150);}}
+        if(!authorized()){await this.retire();return;}
         this.adopted=true;this.pending={bounds:{...bounds},visible:false};await this.native.placeBrowser({...this.pending,maximized});this.applied=JSON.stringify(this.pending);
-        if(generation!==this.generation){await this.retire();return;}
+        if(!authorized()){await this.retire();return;}
+        if((options.validate&&!await options.validate())||!authorized()){await this.retire();return;}
         bootstrap.release();
         // Independent window: show once, then let Windows own movement and sizing.
         await this.native.placeBrowser({bounds:{...bounds},visible:true});
-        if(generation!==this.generation){await this.retire();return;}
+        if(!authorized()){await this.retire();return;}
         this.pending={bounds:{...bounds},visible:true};this.applied=JSON.stringify(this.pending);
-        const current=this.lease!;current.heartbeat=setInterval(()=>{void this.native.heartbeatProfileBrowser(id).catch(()=>{if(this.lease===current)this.handleLost();});},2000);current.heartbeat.unref();
+
       }catch(error){await this.retire();if(generation===this.generation)throw error;}
     });this.queue=operation.catch(()=>{});await operation;
   }

@@ -1,4 +1,5 @@
 import { NativeAdapter, type WindowState } from '../electron/native-adapter';
+import {ProfileBrowser,profileOrderWindow} from '../electron/profile-browser';
 import { CompanionService } from '../electron/companion-service';
 import { ResidentConnection } from '../electron/resident-connection';
 import { startExternalClient } from '../electron/external-composer';
@@ -10,6 +11,7 @@ import { getHeapStatistics } from 'node:v8';
 console.log=(...args:unknown[])=>{const line=safeDiagnostic(args);if(line)process.stderr.write(line+'\n');};
 let quitting=false,service:CompanionService|undefined,resident:ResidentConnection|undefined;
 let latest:WindowState|null=null,lastState='';
+let orderBrowser:ProfileBrowser|undefined;
 const send=(value:unknown)=>{
   if(process.stdout.destroyed)return;
   const line=JSON.stringify(value)+'\n';
@@ -24,7 +26,7 @@ const native=new NativeAdapter('',state=>{
   const changed=previous?.targetInstanceId!==state?.targetInstanceId;
   if(changed||previous?.visible!==state?.visible||previous?.minimized!==state?.minimized||previous?.foreground!==state?.foreground||previous?.groupForeground!==state?.groupForeground)service?.setWindowState(state);
   if(changed&&state)void service?.connectComposer().catch(()=>{});
-},status=>service?.setNativeStatus(status),undefined,undefined,undefined,()=>resident?.notifyTargetAvailable(),()=>transport);
+},status=>service?.setNativeStatus(status),()=>{orderBrowser?.handleLost();void service?.closeOrder();},measurement=>{if(measurement.closed&&orderBrowser?.ownsGeometry(measurement.launchId))void service?.closeOrder();},undefined,()=>resident?.notifyTargetAvailable(),()=>transport);
 function publish(force=false){if(!service||quitting)return;const state=stateProjection(service.getState(),service.getOrderStatus());const encoded=JSON.stringify(state);if(!force&&encoded===lastState)return;lastState=encoded;emit('hostState',state);}
 let shuttingDown:Promise<void>|undefined;
 let memoryTimer:ReturnType<typeof setInterval>|undefined;
@@ -74,7 +76,8 @@ process.stdout.on('error',()=>{void shutdown();});
 process.on('SIGINT',()=>{void shutdown();});process.on('SIGTERM',()=>{void shutdown();});
 process.on('uncaughtException',()=>{process.stderr.write('HOST_UNCAUGHT_EXCEPTION\n');void shutdown();});
 process.on('unhandledRejection',()=>{process.stderr.write('HOST_UNHANDLED_REJECTION\n');void shutdown();});
-service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('LOGIN_URL_REJECTED');emit('hostOpenLogin',{url});},()=>{},process.argv.includes('--smoke-test')?{enabled:false}:{},true);
+if(process.platform==='win32'||process.platform==='darwin')orderBrowser=new ProfileBrowser(native,()=>null,code=>service?.reportBrowserFailure(code));
+service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('LOGIN_URL_REJECTED');emit('hostOpenLogin',{url});},()=>{},process.argv.includes('--smoke-test')?{enabled:false}:{},true,undefined,undefined,orderBrowser?profileOrderWindow(orderBrowser,()=>latest?.bounds??null):undefined);
 service.onState(()=>publish());resident=new ResidentConnection(native,async()=>{});
 native.start();publish(true);
 emit('hostReady',{runtime:'node',customerSend:'user-enter'});

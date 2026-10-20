@@ -1,3 +1,4 @@
+import type {LoginPopover} from './owned-login';
 /** C-end consumer workbench outbound contract; no send capability is represented. */
 export const OUTBOUND_CONTRACT_VERSION='deepseek:outbound:v1' as const;
 export const WORKBENCH_TARGETS=['zh','en','ja','ko','es','fr','de','ru','pt','it','ar','th','vi','id','ms','zh-TW'] as const;
@@ -32,7 +33,9 @@ export type PanelStatus='unavailable'|'idle'|'translating'|'ready'|'stale'|'fail
 export type PanelAuth='ready'|'needs_login'|'connecting'|'failed';
 export interface PanelOrderState {identifier:string;status:'idle'|'loading'|'ready'|'empty'|'failed';error:string|null;fields:ReadOnlyOrderField[]}
 /** Node -> page state. Text only; no credentials, tokens or editor handles. */
-export interface PanelState {translationPaused?:boolean;order?:PanelOrderState;auth:PanelAuth;conversationKey:string|null;draft:{text:string;composing:boolean}|null;enabled:boolean;target:PanelTarget;followCustomer:{lang:string|null;following:boolean;manualEnabled:boolean};status:PanelStatus;preview:string|null;error:string|null;busy:boolean;outboundMode?:OutboundMode;sendPending?:boolean}
+export interface OrderWindowIntent {identifier:string;identifierType:'order_number'|'iccid'|'eiccid';conversationKey:string}
+export function isOrderWindowIntent(value:unknown):value is OrderWindowIntent {if(!value||typeof value!=='object'||Array.isArray(value))return false;const v=value as Record<string,unknown>;return Object.keys(v).sort().join(',')==='conversationKey,identifier,identifierType'&&typeof v.identifier==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v.identifier)&&['order_number','iccid','eiccid'].includes(String(v.identifierType))&&typeof v.conversationKey==='string'&&v.conversationKey.length>0&&v.conversationKey.length<=2048;}
+export interface PanelState {orderWindowMode?:'browser';loginPopover?:LoginPopover;translationPaused?:boolean;order?:PanelOrderState;auth:PanelAuth;conversationKey:string|null;draft:{text:string;composing:boolean}|null;enabled:boolean;target:PanelTarget;followCustomer:{lang:string|null;following:boolean;manualEnabled:boolean};status:PanelStatus;preview:string|null;error:string|null;busy:boolean;outboundMode?:OutboundMode;sendPending?:boolean}
 export type PanelApplyMode='replace';
 export type OutboundMode='send'|'replace';
 export const isOutboundMode=(value:unknown):value is OutboundMode=>value==='send'||value==='replace';

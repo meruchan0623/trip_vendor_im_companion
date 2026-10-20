@@ -1,11 +1,10 @@
-import { app, clipboard, BrowserWindow, ipcMain, screen, shell, Tray, Menu, nativeImage, safeStorage, type IpcMainInvokeEvent } from 'electron';
+import { app, clipboard, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, type IpcMainInvokeEvent } from 'electron';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { NativeAdapter, type WindowState } from './native-adapter';
+import {ProfileBrowser,profileOrderWindow} from './profile-browser';
 import { CompanionService } from './companion-service';
-import { PersistentSessionService } from './owned-session';
-import { SecureSessionStore } from './secure-session-store';
 import { startExternalClient } from './external-composer';
 import { lockContents, lockLocalSession } from './security';
 import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
@@ -35,6 +34,7 @@ console.error=(...args:unknown[])=>{diagnostics?.consoleError(args);hostError(..
 diagnostics?.lifecycle('start',process.pid);
 const localFile=join(__dirname,'../dist/index.html');
 let panel:BrowserWindow|undefined,tray:Tray|undefined,native:NativeAdapter,service:CompanionService,resident:ResidentConnection|undefined;
+let orderBrowser:ProfileBrowser|undefined;
 let latest:WindowState|null=null,quitting=false,cleaned=false,panelIntent=0;
 let panelLoad:{window:BrowserWindow;promise:Promise<void>}|undefined;
 let lastPublished='';
@@ -73,7 +73,7 @@ function publish(state=service.getState()):void {
   if(panel&&!panel.isDestroyed())panel.webContents.send('standalone:state-event',state);
 }
 function nativeHandle(window:BrowserWindow):string {const value=window.getNativeWindowHandle();return value.length>=8?value.readBigUInt64LE().toString():value.readUInt32LE().toString();}
-function registerSettings():void {if(process.platform==='win32')void native?.setCompanionWindows(panel&&!panel.isDestroyed()?[nativeHandle(panel)]:[]).catch(()=>{});}
+function registerSettings():void {if(process.platform==='win32')void native?.setCompanionWindows((panel&&!panel.isDestroyed()?[panel]:[]).map(nativeHandle)).catch(()=>{});}
 function hideSettings():void {++panelIntent;const previous=panel;panel=undefined;if(previous&&!previous.isDestroyed())previous.destroy();registerSettings();}
 async function openSettings():Promise<void> {
   if(quitting||silentVendorRuntime)return;
@@ -151,8 +151,11 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   if(ownerPID!==undefined)await adoptVendorOwner(ownerPID);
   if(quitting)return;
   diagnostics?.lifecycle('ready',process.pid,ownerPID);
-  native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},undefined,undefined,undefined,()=>resident?.notifyTargetAvailable());
-  service=new CompanionService(native,url=>shell.openExternal(url),()=>{},smokeMode?{enabled:false}:{},true,(changed,options)=>new PersistentSessionService(changed,options,new SecureSessionStore(join(app.getPath('userData'),'auth','tsim-session.enc'),safeStorage)));service.onState(publish);
+  native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},()=>{orderBrowser?.handleLost();void service?.closeOrder();},measurement=>{if(measurement.closed&&orderBrowser?.ownsGeometry(measurement.launchId))void service?.closeOrder();},undefined,()=>resident?.notifyTargetAvailable());
+  if(process.platform==='win32'||process.platform==='darwin')orderBrowser=new ProfileBrowser(native,()=>null,code=>service?.reportBrowserFailure(code));
+  // Both installed Windows injection and standalone Electron reuse the verified Edge/Chrome session.
+  // The fallback is needed only when no supported browser profile is discoverable.
+  service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);},()=>{},smokeMode?{enabled:false}:{},true,undefined,undefined,orderBrowser?profileOrderWindow(orderBrowser,()=>latest?.bounds??null):undefined);service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
   // Installed Windows runs silently inside the vendor; standalone Windows retains tray settings.

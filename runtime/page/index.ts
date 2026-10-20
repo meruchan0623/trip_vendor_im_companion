@@ -1,7 +1,7 @@
 import {matchesPageConversation} from './conversation';
 import {customerLanguage} from './language';
 import type {PanelState} from '../../src/shared/workbench';
-import {startOrderObservation,isOwned} from './identifiers';
+import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
 import {createOperatorOverlay,operatorFrameURL,OPERATOR_FRAME_ID,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
 import {createOutboundPanel,PANEL_HOST_ID,type OutboundPanel,type PanelBridge} from './outbound-panel';
 export {TSIM_OPERATOR_ORIGIN};
@@ -14,10 +14,12 @@ export interface PageFeatures {update(state:PanelState):void;boundary():true;geo
 export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge;state?:PanelState;origin?:string;prewarmDelayMs?:number}={}):PageFeatures{
   const view=document.defaultView!;let disposed=false,state=options.state,conversation:string|null|undefined;
   const overlay=createOperatorOverlay(document,{origin:options.origin,prewarmDelayMs:options.prewarmDelayMs});
-  const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>overlay.open({identifier,identifierType})}):undefined;
+  let browserOrderRequested=false;
+  const closeBrowserOrder=()=>{if(!browserOrderRequested)return;browserOrderRequested=false;void options.bridge?.invoke('closeOrder',[]).catch(()=>{});};
   const bound=()=>!!state&&matchesPageConversation(document,state.conversationKey);
+  const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>{if(!bound()){overlay.close();return;}if(state?.orderWindowMode==='browser'){browserOrderRequested=true;void options.bridge!.invoke('openOrder',[{identifier,identifierType:identifierType??inferIdentifierType(identifier)??'order_number',conversationKey:state.conversationKey}]).catch(()=>{});}else overlay.open({identifier,identifierType});}}):undefined;
   let renderedBound:boolean|undefined;
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false},sendPending:false});};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(!currentBound){overlay.close();closeBrowserOrder();}if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false},sendPending:false});};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;attempts:number;done:boolean;attempt:number};
@@ -63,7 +65,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   function update(next:PanelState){
     if(disposed)return;const previousLanguage=state?.followCustomer.lang;state=next;
     // Close the order page on conversation change.
-    if(conversation!==undefined&&conversation!==next.conversationKey)overlay.close();
+    if(conversation!==undefined&&conversation!==next.conversationKey){overlay.close();closeBrowserOrder();}
     orderObservation?.setConversationKey(next.conversationKey);
     if(conversation!==next.conversationKey){conversation=next.conversationKey;clearRetry();customerReport=undefined;scheduleCustomer();}
     else if(previousLanguage!==next.followCustomer.lang){
@@ -73,10 +75,12 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     }
     renderCurrent();
   }
-  const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;clearRetry();if(document.visibilityState!=='hidden'){syncOrder();scheduleCustomer();}};document.addEventListener('visibilitychange',onVisibility);
+  const closeOnEscape=(event:KeyboardEvent)=>{if(event.key==='Escape')closeBrowserOrder();};view.addEventListener('keydown',closeOnEscape,true);
+  const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;clearRetry();if(document.visibilityState!=='hidden'){renderCurrent(true);syncOrder();scheduleCustomer();}};document.addEventListener('visibilitychange',onVisibility);
   if(state)update(state);
   return{update,overlay,panel,
     boundary(){
+      renderCurrent(true);
       if(panel){
         const own=document.getElementById(PANEL_HOST_ID);
         // A verified document may precede login/conversation rendering. Absence
@@ -93,6 +97,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;closeBrowserOrder();view.removeEventListener('keydown',closeOnEscape,true);disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
   };
 }
