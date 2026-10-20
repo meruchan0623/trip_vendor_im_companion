@@ -1,4 +1,7 @@
-import { app, clipboard, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, type IpcMainInvokeEvent } from 'electron';
+import { app, clipboard, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, shell, safeStorage, type IpcMainInvokeEvent } from 'electron';
+import {PersistentSessionService} from './owned-session';
+import {SecureSessionStore} from './secure-session-store';
+import {OwnedLoginWindow} from './owned-login-window';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
@@ -34,6 +37,7 @@ console.error=(...args:unknown[])=>{diagnostics?.consoleError(args);hostError(..
 diagnostics?.lifecycle('start',process.pid);
 const localFile=join(__dirname,'../dist/index.html');
 let panel:BrowserWindow|undefined,tray:Tray|undefined,native:NativeAdapter,service:CompanionService,resident:ResidentConnection|undefined;
+let ownedLogin:OwnedLoginWindow|undefined;
 let latest:WindowState|null=null,quitting=false,cleaned=false,panelIntent=0;
 let panelLoad:{window:BrowserWindow;promise:Promise<void>}|undefined;
 let lastPublished='';
@@ -128,7 +132,7 @@ function setupIPC():void {
   handle('translation-options',value=>{if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('INVALID_OPTIONS');const options=value as {fallbackTarget?:unknown;language?:unknown;autoTranslate?:unknown;shortcutEnabled?:unknown};if(Object.keys(options).some(key=>!['fallbackTarget','language','autoTranslate','shortcutEnabled'].includes(key))||options.fallbackTarget!==undefined&&!isPanelTarget(options.fallbackTarget)||options.language!==undefined&&!isPanelTarget(options.language)||options.autoTranslate!==undefined&&typeof options.autoTranslate!=='boolean'||options.shortcutEnabled!==undefined&&typeof options.shortcutEnabled!=='boolean')throw new Error('INVALID_OPTIONS');return service.setTranslationOptions(options as {fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean});});
   handle('cancel-translation',()=>service.cancelTranslation());handle('resume-translation',()=>service.resumeTranslation());
   handle('translate',value=>{if(!isPanelTarget(value))throw new Error('INVALID_TARGET_LANGUAGE');return service.translate(value);});handle('replace-draft',()=>service.replaceDraft());
-  handle('open-login',()=>service.openLogin());handle('logout',()=>service.logout());
+  handle('open-login',()=>service.openLogin());handle('logout',()=>{ownedLogin?.close();return service.logout();});
   handle('copy-translation',()=>{const state=service.getState();if(state.auth!=='ready'||state.phase!=='ready'||!state.preview)throw new Error('PREVIEW_STALE');clipboard.writeText(state.preview);});
   handle('open-translation',openSettings);handle('open-settings',openSettings);
   handle('open-order',()=>{throw new Error('USE_EMBEDDED_ORDER_PANEL');});handle('close-order',()=>{});
@@ -140,7 +144,7 @@ function helperPath():string {
 }
 async function cleanup():Promise<void> {
   stopOwnerWatch?.();stopOwnerWatch=undefined;disconnectVendorProgress();
-  if(cleaned)return;cleaned=true;acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();
+  if(cleaned)return;cleaned=true;acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();ownedLogin?.close();
   try{await service?.dispose();}finally{native?.stop();}
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
@@ -152,9 +156,15 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   diagnostics?.lifecycle('ready',process.pid,ownerPID);
   native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},()=>{},()=>{},undefined,()=>resident?.notifyTargetAvailable());
   // Orders open inside the merchant page on both platforms; no external browser windows are created.
-  // Both installed Windows injection and standalone Electron reuse the verified Edge/Chrome session.
-  // The fallback is needed only when no supported browser profile is discoverable.
-  service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);},()=>{},smokeMode?{enabled:false}:{},true,undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')));service.onState(publish);
+  // macOS owns its TSIM account and encrypted credentials. Windows retains its verified browser profile.
+  const ownedAccount=process.platform==='darwin';
+  if(ownedAccount)ownedLogin=new OwnedLoginWindow();
+  const sessionOptions=smokeMode?{enabled:false}:{};
+  const ownedStore=ownedAccount?new SecureSessionStore(join(app.getPath('userData'),'account','session.enc'),safeStorage):undefined;
+  service=new CompanionService(native,async url=>{
+    if(ownedAccount){await ownedLogin!.open(url);return;}
+    if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);
+  },()=>{},sessionOptions,true,ownedStore?(changed,options)=>new PersistentSessionService(changed,{...options,embeddedLogin:false,closeLogin:()=>ownedLogin?.close()},ownedStore):undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')));service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
   // Installed Windows runs silently inside the vendor; standalone Windows retains tray settings.

@@ -1,6 +1,6 @@
 import { access, readdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { join,posix } from 'node:path';
+import { join } from 'node:path';
 import { readTsimToken } from './chromium-tsim-storage';
 import { WORKBENCH_TARGETS, type OperatorSessionGrant, type OutboundBody, type OutboundResponse, type PsimIdentity } from '../src/shared/workbench';
 
@@ -31,7 +31,7 @@ const storage=(profile:BrowserProfile)=>join(profile.userDataDir,profile.profile
 const profileKey=(profile:BrowserProfile)=>JSON.stringify([profile.browserPath,profile.userDataDir,profile.profileDirectory]);
 const sessionReadError=(error:unknown):Error=>new Error(['EACCES','EPERM'].includes((error as NodeJS.ErrnoException)?.code??'')?'BROWSER_SESSION_ACCESS_DENIED':'BROWSER_SESSION_STORAGE_INVALID');
 const exists=async(path:string)=>{try{await access(path);return true;}catch(error){if((error as NodeJS.ErrnoException)?.code==='ENOENT')return false;throw sessionReadError(error);}};
-/** Launch the same browser profile whose localStorage will be verified, on both desktop platforms. */
+/** Windows only: launch the browser profile whose localStorage will be verified. */
 export async function openBrowserProfile(profile:BrowserProfile,url:string):Promise<void>{
   if(url!==LOGIN_URL)throw new Error('BROWSER_LOGIN_URL_INVALID');
   await new Promise<void>((resolve,reject)=>{
@@ -41,11 +41,8 @@ export async function openBrowserProfile(profile:BrowserProfile,url:string):Prom
   });
 }
 function browserInstalls(env:NodeJS.ProcessEnv,platform:NodeJS.Platform):{executables:string[];userDataDir:string}[]{
-  if(platform==='darwin'){
-    // macOS paths are POSIX regardless of the host running the tests.
-    const home=env.HOME;if(!home)return [];
-    return [{app:'Microsoft Edge',data:['Microsoft Edge']},{app:'Google Chrome',data:['Google','Chrome']}].map(browser=>({executables:['/Applications',posix.join(home,'Applications')].map(root=>posix.join(root,`${browser.app}.app`,'Contents','MacOS',browser.app)),userDataDir:posix.join(home,'Library','Application Support',...browser.data)}));
-  }
+  // macOS never enumerates another application's profile or login storage.
+  if(platform==='darwin')return [];
   const local=env.LOCALAPPDATA;if(!local)return [];
   return [{parts:['Microsoft','Edge'],exe:['Microsoft','Edge','Application','msedge.exe']},{parts:['Google','Chrome'],exe:['Google','Chrome','Application','chrome.exe']}].map(browser=>({executables:[env['ProgramFiles(x86)'],env.ProgramFiles,local].filter((root):root is string=>!!root).map(root=>join(root,...browser.exe)),userDataDir:join(local,...browser.parts,'User Data')}));
 }

@@ -3,6 +3,7 @@ import { startOwnedLoginServer, type OwnedLoginService } from '../host/auth-serv
 import type { BrowserProfileSessionOptions, BrowserSessionStatus } from './browser-profile-session';
 import type { OutboundBody, PsimIdentity } from '../src/shared/workbench';
 
+export interface OwnedSessionOptions extends BrowserProfileSessionOptions {embeddedLogin?:boolean;closeLogin?:()=>void}
 /** Desktop-owned account. Only encrypted persistence and the loopback login page handle credentials. */
 export class PersistentSessionService {
   private service:OwnedPsimService;
@@ -15,7 +16,7 @@ export class PersistentSessionService {
   private syncing:Promise<void>|undefined;
   private loginServerGeneration=0;
   private loginServer:ReturnType<typeof startOwnedLoginServer>|undefined;
-  constructor(changed:(identity:PsimIdentity|null)=>void,private options:BrowserProfileSessionOptions,store:OwnedSessionStore){
+  constructor(changed:(identity:PsimIdentity|null)=>void,private options:OwnedSessionOptions,store:OwnedSessionStore){
     this.service=new OwnedPsimService(options.fetcher,identity=>{if(!this.closed){changed(identity);if(!identity)this.publish('connecting');}},store);
     this.setBackgroundPolling(options.backgroundPolling!==false);
   }
@@ -67,7 +68,7 @@ export class PersistentSessionService {
         refresh:async()=>{authorized();try{const identity=await this.service.refresh();authorized();if(!this.suspended)this.publish('ready');return identity;}catch(error){if(current()&&!this.suspended)this.failure(error);throw error;}},
         dispose:()=>{},
       };
-      const starting=startOwnedLoginServer(facade,{persistent:true,embedded:true});this.loginServer=starting;
+      const starting=startOwnedLoginServer(facade,{persistent:true,embedded:this.options.embeddedLogin!==false});this.loginServer=starting;
       void starting.catch(()=>{if(this.loginServer===starting)this.loginServer=undefined;});
     }
     const starting=this.loginServer,generation=this.loginServerGeneration,server=await starting;
@@ -76,6 +77,7 @@ export class PersistentSessionService {
   }
 
   async logout(){
+    this.options.closeLogin?.();
     this.suspended=true;++this.loginServerGeneration;const previous=this.loginServer;this.loginServer=undefined;
     const wanted=this.pollingWanted;this.setBackgroundPolling(false);this.pollingWanted=wanted;
     // Revoke the owned service immediately; closing a server that is still starting must not delay logout.
@@ -84,6 +86,7 @@ export class PersistentSessionService {
   }
   async dispose(){
     if(this.closed)return;this.closed=true;++this.loginServerGeneration;const previous=this.loginServer;this.loginServer=undefined;
+    this.options.closeLogin?.();
     this.setBackgroundPolling(false);this.service.dispose();
     const server=await previous?.catch(()=>undefined);await server?.close();
   }

@@ -268,7 +268,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     follow.setAttribute('aria-selected',String(following));followLang.textContent=`当前识别：${customerName}${customer==='zh'?'（无需翻译）':''}${fallback?'；使用配置的兜底语言':''}`;
     for(const option of options)option.setAttribute('aria-selected',String(!following&&option.dataset.lang===state.target));
     pauseIcon.replaceChildren(icon(paused?'play':'pause'));pauseText.textContent=paused?'恢复翻译':'暂停翻译';pause.disabled=!on||state.auth==='connecting';
-    accountLogin.textContent='打开浏览器 TSim_CS';accountLogout.disabled=state.auth==='needs_login'||state.auth==='connecting';
+    accountLogin.textContent=state.sessionMode==='owned'?'在应用内登录 TSim':'打开浏览器 TSim_CS';accountLogout.textContent=state.sessionMode==='owned'?'退出 TSim 账号':'断开助手会话';accountLogout.disabled=state.auth==='needs_login'||state.auth==='connecting';
     const mode=state.outboundMode??'send';for(const option of modes)option.setAttribute('aria-checked',String(option.dataset.mode===mode));hint.textContent=mode==='send'?SEND_HINT:PANEL_HINT;
     // Status badge.
     const status:[string,Tone]|null=notice?[notice,noticeTone]:!on?null:state.auth==='connecting'?['正在连接…','busy']:state.auth==='needs_login'?['需登录','warn']:state.auth==='failed'?['连接失败','bad']:paused?['翻译已暂停','warn']:state.sendPending?['译文生成后自动发送','busy']:STATUS[state.status];
@@ -281,7 +281,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     callout.hidden=true;preview.hidden=skeleton.hidden=foot.hidden=true;meta.classList.remove('stale');
     const automaticHint=following&&!text&&!fallback?(customer==='zh'?'客户使用中文，无需翻译；如需翻译，请在左上角手动选择语言':collecting?'正在采集客户原文，完成后自动确定目标或使用配置的兜底语言':!customer||customer==='unknown'?'当前服务未提供语言识别状态，请手动选择目标语言':!supported?`客户语言（${customerName}）暂不支持自动翻译，请手动选择目标语言`:''):'';
     if(state.auth==='connecting'){skeleton.hidden=foot.hidden=false;source.textContent='正在连接 TSim 登录服务，请稍候';}
-    else if(state.auth==='needs_login')showCallout('info','lock','请先登录 TSim_CS 的 Edge / Chrome 页面，助手自动复用登录，无需重复输入密码',login);
+    else if(state.auth==='needs_login')showCallout('info','lock',state.sessionMode==='owned'?'请在助手内登录 TSim 账号，登录后即可翻译与查询订单':'请先登录 TSim_CS 的 Edge / Chrome 页面，助手自动复用登录，无需重复输入密码',login);
     else if(state.auth==='failed')showCallout('bad','alert',state.error||'登录服务连接失败，请稍后重试');
     else if(paused)showCallout('warn','pause','翻译已暂停，草稿不会发送到翻译服务',resume);
     else if(state.error?.includes('兜底语言'))showCallout('bad','alert',state.error,chooseFallback);

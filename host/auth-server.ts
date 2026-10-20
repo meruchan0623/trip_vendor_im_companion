@@ -20,7 +20,7 @@ function page(csrf:string,nonce:string,authenticated:boolean,persistent:boolean,
   return`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TSim 助手登录</title><style nonce="${nonce}">
 *{box-sizing:border-box}body{font:14px system-ui;background:${embedded?'#fff':'#f5f7fb'};color:#172b4d;margin:0 auto;max-width:420px;padding:${embedded?'16px':'24px'}}h1{font-size:21px;letter-spacing:-.4px;margin:0 0 10px}form{display:grid;gap:12px;margin-top:16px}label{display:grid;gap:7px;font-size:13px;font-weight:600}[hidden]{display:none!important}input,button{width:100%;font:inherit;padding:11px 12px;border:1px solid #ccd7e8;border-radius:9px}input{background:#fff;color:#172b4d;outline:none}input:focus{border-color:#3a5bd9;box-shadow:0 0 0 3px #3a5bd918}button{background:#3a5bd9;color:white;cursor:pointer;font-weight:600}button:disabled{opacity:.6;cursor:wait}p{line-height:1.7;color:#64748b;margin:0}#status{min-height:24px;margin-top:14px;font-size:13px}.secondary{background:transparent;color:#344563;margin-top:10px}
 </style><h1 id="heading">${authenticated?'切换 TSim 账号':'登录 TSim 账号'}</h1>
-<p id="intro">登录用于助手翻译。${persistent?'登录态加密保存，下次启动自动恢复；':''}不会保存密码。</p>
+<p id="intro">登录用于助手翻译与订单查询。${persistent?'登录态加密保存，下次启动自动恢复；':''}不会保存密码。</p>
 <form><label>TSim 账号<input name="username" autocomplete="username" autofocus required maxlength="200"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="4096"></label><button type="submit">登录并返回客户端</button></form>
 <p role="status" aria-live="polite" id="status"></p><button type="button" class="secondary" id="switch-account" hidden>切换账号</button>
 <script nonce="${nonce}">

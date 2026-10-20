@@ -8,6 +8,7 @@ export interface OrderEntry {identifier:string;identifierType:'order_number'|'ic
 export interface StandaloneState {
   attached:boolean; targetInstanceId:string|null; nativeStatus:string;
   auth:'ready'|'needs_login'|'connecting'|'failed'; accountScope:string;
+  sessionMode?:'owned'|'browser';
   draft:{text:string;canReplace:boolean}|null; preview:string|null;
   phase:'idle'|'reading'|'translating'|'ready'|'stale'|'failed'|'replaced'|'waiting'|'replacing';
   customerLanguage?:string; followCustomerLanguage?:boolean; customerLanguageResolution?:CustomerLanguageResolution; fallbackTarget?:PanelTarget;

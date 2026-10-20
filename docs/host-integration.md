@@ -2,13 +2,13 @@
 
 ## 默认会话链路
 
-Electron 与轻量宿主使用 `CompanionService → BrowserProfileSessionService → chromium-tsim-storage`，只读 Edge/Chrome 默认数据目录中精确官方 origin 的 `agent_token`，通过固定 `https://csapi.tsim.tech/agent/profile` 接口核验身份及权限。支持 `Default`、`Profile N`，拒绝隐身、自定义目录及不稳定或不支持的存储格式。
+Windows Electron 与轻量宿主使用 `CompanionService → BrowserProfileSessionService → chromium-tsim-storage`，只读 Edge/Chrome 默认数据目录中精确官方 origin 的 `agent_token`，通过固定 `https://csapi.tsim.tech/agent/profile` 接口核验身份及权限。支持 `Default`、`Profile N`，拒绝隐身、自定义目录及不稳定或不支持的存储格式。
 
 令牌只保留在宿主内存，不进入客服页面、IPC 状态、日志或新持久文件。首次扫描选中可核验的配置后保持绑定；该配置失效不会静默改用其他账号。网页撤销、令牌轮转、身份或权限变化会作废旧译文和待发送动作。网络、目录权限和格式错误单独显示，不冒充未登录。
 
 「登录 TSim」先恢复已有会话，确实没有登录才打开官方登录页。「打开浏览器 TSim_CS」使用已绑定配置；「断开助手会话」只停止复用，重启后仍可再次恢复浏览器登录。
 
-兼容持久会话实现仍位于 `owned-session.ts`、`secure-session-store.ts` 和 `host/auth-server.ts`。其本机表单通过隔离 iframe、随机能力及 CSRF 保护，不向父页面提供凭据；当前默认桌面入口使用浏览器会话。
+macOS 默认使用独立持久会话，实现位于 `owned-session.ts`、`secure-session-store.ts` 和 `host/auth-server.ts`。登录表单在助手独立窗口内展示，使用随机能力及 CSRF 保护；凭据不进入商家页面。会话以系统加密能力持久化，退出时清除。macOS 不创建外部浏览器配置绑定，订单使用已验证的只读接口在助手面板展示。
 
 ## 翻译与草稿授权
 

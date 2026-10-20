@@ -7,12 +7,13 @@ import type { OperatorSessionGrant } from '../src/shared/workbench';
 /** The only state sent to the vendor renderer. Authentication credentials stay in the host. */
 export function embeddedPanelState(state:StandaloneState,conversationKey:string|null=null):PanelState {
   const status:PanelState['status']=state.auth==='needs_login'?'needs_login':state.auth==='failed'?'failed':state.auth==='connecting'?'unavailable':!state.attached||state.composerSource!=='verified-editor'?'unavailable':state.phase==='ready'?'ready':state.phase==='translating'?'translating':state.phase==='stale'?'stale':state.phase==='failed'?'failed':'idle';
-  return {auth:state.auth,conversationKey:state.messageSurface?.active?conversationKey:null,draft:state.draft?{text:state.draft.text,composing:!state.draft.canReplace}:null,enabled:state.autoTranslate!==false,target:state.language,fallbackTarget:state.fallbackTarget??'en',followCustomer:{lang:state.customerLanguage??'unknown',following:state.followCustomerLanguage!==false,manualEnabled:false,resolution:state.customerLanguageResolution},status,preview:state.preview,error:state.error,busy:['reading','replacing','translating'].includes(state.phase),translationPaused:state.translationPaused===true,outboundMode:state.outboundMode??'send',sendPending:state.sendPending===true};
+  return {auth:state.auth,sessionMode:state.sessionMode,conversationKey:state.messageSurface?.active?conversationKey:null,draft:state.draft?{text:state.draft.text,composing:!state.draft.canReplace}:null,enabled:state.autoTranslate!==false,target:state.language,fallbackTarget:state.fallbackTarget??'en',followCustomer:{lang:state.customerLanguage??'unknown',following:state.followCustomerLanguage!==false,manualEnabled:false,resolution:state.customerLanguageResolution},status,preview:state.preview,error:state.error,busy:['reading','replacing','translating'].includes(state.phase),translationPaused:state.translationPaused===true,outboundMode:state.outboundMode??'send',sendPending:state.sendPending===true};
 }
 
 export interface EmbeddedActions {
   getState():StandaloneState;
   openOrder?(intent:OrderWindowIntent):Promise<void>;
+  queryOrder?(identifier:string,conversationKey?:string):Promise<void>;
   operatorSession?(intent:OrderWindowIntent):Promise<OperatorSessionGrant>;
   closeOrder?():Promise<void>;
   setTranslationOptions(options:{fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;outboundMode?:OutboundMode}):Promise<void>;
@@ -43,6 +44,7 @@ export async function invokeEmbeddedAction(service:EmbeddedActions,action:string
     case 'retry':if(args.length)break;await service.translate(service.getState().language);return;
     case 'closeLogin':if(args.length!==1||!isLoginPopoverId(value))break;await service.closeLogin(value);return;
     case 'openOrder':if(args.length!==1||!isOrderWindowIntent(value)||!service.openOrder)break;await service.openOrder(value);return;
+    case 'queryOrder':if(args.length!==1||!isOrderWindowIntent(value)||!service.queryOrder||service.getState().sessionMode!=='owned')break;await service.queryOrder(value.identifier,value.conversationKey);return;
     case 'operatorSession':if(args.length!==1||!isOrderWindowIntent(value)||!service.operatorSession)break;return service.operatorSession(value);
     case 'closeOrder':if(args.length||!service.closeOrder)break;await service.closeOrder();return;
     case 'openLogin':if(args.length)break;await service.openLogin();return;

@@ -15,12 +15,13 @@ import {reportVendorProgress} from './vendor-progress';
 
 type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
+const ORDER_FAILURES:Record<string,string>={PSIM_LOGIN_REQUIRED:'请先登录 TSim 账号后查询订单。',AUTH_CHANGED:'登录状态已变化，请重新登录后查询。',ORDER_PERMISSION_REQUIRED:'当前 TSim 账号没有订单查询权限。',INVALID_ORDER_IDENTIFIER:'请输入有效的订单 ID（字母、数字、下划线或横线）。',ORDER_QUERY_FAILED:'订单服务暂时不可用，请稍后重试。',ORDER_LIST_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_DETAIL_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',INVALID_READ_IDENTIFIER:'订单服务返回了无法识别的结果，请稍后重试。',SERVICE_RESPONSE_TOO_LARGE:'订单结果过大，无法在助手内显示。'};
 const messages:Record<string,string>={
   TRANSLATION_OPTIONS_READ_FAILED:'无法读取兜底语言设置，请重新选择并保存。',
   TRANSLATION_OPTIONS_INVALID:'兜底语言设置无效，请重新选择并保存。',
   TRANSLATION_OPTIONS_SAVE_FAILED:'兜底语言保存失败，仍保留原设置，请重试。',
   MESSAGE_PAGE_INACTIVE:'请先切换到旅游商家的“消息”页面并打开客户会话。',
-  PSIM_LOGIN_REQUIRED:'请先在 Edge 或 Chrome 登录 TSim_CS，助手将自动复用浏览器会话。',
+  PSIM_LOGIN_REQUIRED:process.platform==='darwin'?'请先在助手内登录 TSim 账号，再使用翻译与订单查询。':'请先在 Edge 或 Chrome 登录 TSim_CS，助手将自动复用浏览器会话。',
   SESSION_STORAGE_ENCRYPTION_UNAVAILABLE:'系统安全存储不可用，请解锁系统钥匙串后重试。',
   SESSION_STORAGE_CORRUPT:'保存的登录态无法解密，请在账户设置中重新登录。',
   SESSION_STORAGE_INVALID:'保存的登录态无效，请在账户设置中重新登录。',
@@ -31,7 +32,7 @@ const messages:Record<string,string>={
   PSIM_SESSION_SAVE_FAILED:'登录态保存失败，请检查本机存储后重试。',
   PSIM_SESSION_CLEAR_FAILED:'登录态清除失败，请检查本机存储后重试。',
   BROWSER_BRIDGE_UNAVAILABLE:'未读取到浏览器 TSim 会话，请确认已在 Edge 或 Chrome 登录。',
-  BROWSER_SESSION_ACCESS_DENIED:'系统阻止读取浏览器登录态。请在系统隐私设置中允许旅游商家助手访问浏览器数据，再重试。',
+  BROWSER_SESSION_ACCESS_DENIED:'系统阻止读取浏览器登录态。请检查浏览器数据的访问权限，再重试。',
   SERVICE_UNAVAILABLE:'暂时无法核验 TSim 登录态，请检查网络后重试。',
   BROWSER_SESSION_STORAGE_INVALID:'浏览器会话数据暂不可读，请稍后重试。',
   BROWSER_SESSION_TIMEOUT:'TSim 会话核验超时，请稍后重试。',
@@ -63,7 +64,7 @@ export class CompanionService {
   private orderWindowGeneration=0;
   private orderClosing:Promise<void>=Promise.resolve();
   private invalidateOrderWindow(){++this.orderWindowGeneration;this.state.browserOpen=false;const closing=this.orderWindow?.close();if(closing)this.orderClosing=Promise.all([this.orderClosing,closing]).then(()=>{}).catch(()=>{if(!this.closed)this.reportBrowserFailure('BROWSER_CLEANUP_UNCONFIRMED');});}
-  async closeOrder(){this.invalidateOrderWindow();await this.orderClosing;this.publish();}
+  async closeOrder(){if(this.state.sessionMode==='owned')this.clearOrder();else this.invalidateOrderWindow();await this.orderClosing;this.publish();}
   private loginPopover:LoginPopover|undefined;
   private loginGeneration=0;
   private loginOpening:{epoch:number;generation:number}|undefined;
@@ -209,6 +210,7 @@ export class CompanionService {
   private sourceFailure=false;
   private surfaceMeasurementRevision=0;
   constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort){
+    this.state.sessionMode=process.platform==='darwin'?'owned':'browser';
     this.translationOptionsStarting=(translationOptionsStore?.load()??Promise.resolve({fallbackTarget:'en' as const})).then(options=>{if(this.closed)return;const previous=this.automaticTarget();this.state.fallbackTarget=options.fallbackTarget;if(this.state.followCustomerLanguage!==false&&previous!==this.automaticTarget()){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();}).catch(error=>{if(!this.closed)this.fail(error);});
     this.psim=sessionFactory(identity=>{
       // Enter authorizes one review under the current login, never a later session.
@@ -521,24 +523,31 @@ export class CompanionService {
     const grant=this.psim.operatorGrant(identity);if(!grant)throw new Error('AUTH_CHANGED');
     return grant;
   }
-  async queryOrder(identifier:string){
+  async queryOrder(identifier:string,conversationKey?:string){
     if(typeof identifier!=='string'||!identifier.trim()||identifier.length>128||/[\r\n\u0000]/.test(identifier))throw new Error('INVALID_ORDER_IDENTIFIER');
+    const requestedGeneration=this.orderGeneration;
     await this.sessionStarting;
+    if(requestedGeneration!==this.orderGeneration||conversationKey!==undefined&&conversationKey!==this.context())throw new Error('ORDER_CONTEXT_CHANGED');
     if(this.closed||!this.foreground||!this.external||this.captured?.source!=='verified-editor'||!this.state.messageSurface?.active)throw new Error('MESSAGE_PAGE_REQUIRED');
-    this.clearOrder();const generation=this.orderGeneration,context=this.context(),identity=this.psim.identity(),request=new AbortController();
-    if(!identity)throw new Error('PSIM_LOGIN_REQUIRED');
-    this.orderRequest=request;this.order={identifier:identifier.trim(),status:'loading',fields:[],error:null};this.publish();
+    this.clearOrder();const generation=this.orderGeneration,context=this.context(),identity=this.psim.identity(),request=new AbortController(),value=identifier.trim();
+    // A missing login is an order outcome the panel can explain, not a rejected page intent.
+    if(!identity){this.order={identifier:value,status:'failed',fields:[],error:ORDER_FAILURES.PSIM_LOGIN_REQUIRED};this.publish();return;}
+    this.orderRequest=request;this.order={identifier:value,status:'loading',fields:[],error:null};this.publish();
+    // The page bridge only waits for acceptance; results arrive through published state.
+    void this.runOrderQuery(value,generation,context,identity,request);
+  }
+  private async runOrderQuery(identifier:string,generation:number,context:string,identity:PsimIdentity,request:AbortController){
     const current=()=>!this.closed&&!request.signal.aborted&&generation===this.orderGeneration&&context===this.context()&&this.psim.identity()?.authGeneration===identity.authGeneration&&this.psim.identity()?.accountScope===identity.accountScope;
     try{
       if(!await this.waitForObservation()||!current())return;
       await this.acquireEditor();
       try{const capture=await this.capture();if(!current())return;this.adopt(capture);this.publish();if(!current())return;}finally{this.setBusy(false);}
-      const result=await this.psim.queryOriginalIdentifier(identifier.trim(),request.signal);
+      const result=await this.psim.queryOriginalIdentifier(identifier,request.signal);
       if(!current())return;
       await this.acquireEditor();
       try{const capture=await this.capture();if(!current())return;this.adopt(capture);this.publish();if(!current())return;}finally{this.setBusy(false);}
       this.order={identifier:result.identifier,status:result.found?'ready':'empty',fields:result.fields,error:null};this.publish();
-    }catch(error){if(current()){const code=error instanceof Error?error.message:'';const reasons:Record<string,string>={PSIM_LOGIN_REQUIRED:'请先登录 TSim 客服后查询订单。',AUTH_CHANGED:'登录状态已变化，请重新登录后查询。',ORDER_PERMISSION_REQUIRED:'当前账号没有订单查询权限。',INVALID_ORDER_IDENTIFIER:'请输入有效的订单 ID（字母、数字、下划线或横线）。',ORDER_QUERY_FAILED:'订单服务暂时不可用，请稍后重试。',ORDER_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。'};this.order={identifier:identifier.trim(),status:'failed',fields:[],error:reasons[code]??'订单查询未完成，请检查连接后重试。'};this.publish();}}
+    }catch(error){if(current()){const code=error instanceof Error?error.message:'';this.order={identifier,status:'failed',fields:[],error:ORDER_FAILURES[code]??(/^PSIM_HTTP_(?:401|423)$/.test(code)?ORDER_FAILURES.AUTH_CHANGED:'订单查询未完成，请检查网络连接后重试。')};this.publish();}}
     finally{if(this.orderRequest===request)this.orderRequest=undefined;}
   }
   async presentLogin(url:string){

@@ -12,8 +12,8 @@ export function validWorkbenchAction(action:unknown,args:unknown[]):boolean{
     case 'setFallbackTarget':return args.length===1&&isPanelTarget(args[0]);
     case 'customerLanguage':return args.length===1&&isCustomerLanguageReport(arg);
     case 'followCustomer':case 'retry':case 'openLogin':case 'logout':case 'cancel':case 'resume':case 'closeOrder':return args.length===0;
-    case 'openOrder':case 'operatorSession':return args.length===1&&isOrderWindowIntent(args[0]);
-    case 'queryOrder':return args.length===1&&plain('identifier')&&typeof arg!.identifier==='string'&&arg!.identifier.length>=1&&arg!.identifier.length<=128&&!/[\u0000-\u001f\u007f-\u009f]/.test(arg!.identifier);
+    // Browser and owned order modes share one intent shape, bound to the visible conversation.
+    case 'openOrder':case 'queryOrder':case 'operatorSession':return args.length===1&&isOrderWindowIntent(args[0]);
     case 'closeLogin':return args.length===1&&isLoginPopoverId(args[0]);
     case 'apply':return args.length===1&&plain('mode')&&arg!.mode==='replace';
     case 'setOutboundMode':return args.length===1&&isOutboundMode(args[0]);
