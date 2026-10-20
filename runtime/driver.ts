@@ -1,7 +1,5 @@
-import {isLoginPopoverId} from '../src/shared/owned-login';
 import {randomUUID,randomBytes} from 'node:crypto';
-import {isOrderWindowIntent, isOutboundMode,isPanelTarget} from '../src/shared/workbench';
-import {isCustomerLanguageReport} from '../src/shared/customer-language';
+import {validWorkbenchAction} from './workbench-action';
 import type {NativeInteraction,NativeInteractionOptions,NativePoll} from './native-composer';
 import type {PanelState,VerifiedComposerSnapshot} from '../src/shared/workbench';
 import {approvedImTargets,chooseActiveImTarget,observeImTarget,sameTargetInventory} from './target-selection';
@@ -56,22 +54,8 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     try{
       const value=JSON.parse(payload);
       if(!value||Object.keys(value).sort().join(',')!=='action,args,id'||typeof value.id!=='string'||!/^\d{1,10}$/.test(value.id)||!Array.isArray(value.args))throw new Error('INVALID_ACTION');
-      id=value.id;const args=value.args as unknown[],arg=args[0] as Record<string,unknown>|undefined;
-      const plain=(keys:string)=>!!arg&&typeof arg==='object'&&!Array.isArray(arg)&&Object.keys(arg).sort().join(',')===keys;
-      switch(value.action){
-        case 'setEnabled':if(args.length!==1||typeof args[0]!=='boolean')throw new Error('INVALID_ACTION');break;
-        case 'setTarget':if(args.length!==1||!plain('lang,source')||arg!.source!=='manual'||!isPanelTarget(arg!.lang))throw new Error('INVALID_ACTION');break;
-        case 'setFallbackTarget':if(args.length!==1||!isPanelTarget(args[0]))throw new Error('INVALID_ACTION');break;
-        case 'customerLanguage':if(args.length!==1||!isCustomerLanguageReport(arg))throw new Error('INVALID_ACTION');break;
-        case 'followCustomer':case 'retry':case 'openLogin':case 'logout':case 'cancel':case 'resume':if(args.length)throw new Error('INVALID_ACTION');break;
-        case 'openOrder':if(args.length!==1||!isOrderWindowIntent(args[0]))throw new Error('INVALID_ACTION');break;
-        case 'closeOrder':if(args.length)throw new Error('INVALID_ACTION');break;
-        case 'closeLogin':if(args.length!==1||!isLoginPopoverId(args[0]))throw new Error('INVALID_ACTION');break;
-        case 'apply':if(args.length!==1||!plain('mode')||arg!.mode!=='replace')throw new Error('INVALID_ACTION');break;
-        case 'setOutboundMode':if(args.length!==1||!isOutboundMode(args[0]))throw new Error('INVALID_ACTION');break;
-        case 'queryOrder':if(args.length!==1||!plain('identifier')||typeof arg!.identifier!=='string'||arg!.identifier.length<1||arg!.identifier.length>128||/[\u0000-\u001f\u007f-\u009f]/.test(arg!.identifier))throw new Error('INVALID_ACTION');break;
-        default:throw new Error('INVALID_ACTION');
-      }
+      id=value.id;const args=value.args as unknown[];
+      if(!validWorkbenchAction(value.action,args))throw new Error('INVALID_ACTION');
       await this.companionAction(value.action,args);this.current(epoch);await this.policy.respondWorkbench(id,true);
     }catch(error){diag('action-failed',{reason:reasonOf(error)});if(id&&!this.invalid)await this.policy.respondWorkbench(id,false).catch(()=>{});}
   }
