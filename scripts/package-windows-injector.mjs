@@ -7,7 +7,7 @@ import {sha256} from './lib/mac-pkg-asar.mjs';
 import {copyWindowsHelperPayload,WINDOWS_PAYLOAD_ZIP_OPTIONS} from './lib/windows-payload-profile.mjs';
 import {compressWindowsPayload} from './lib/windows-payload-archive.mjs';
 const require=createRequire(import.meta.url);
-const installerVersion='0.5.29';
+const installerVersion='0.5.30';
 if(process.platform!=='win32'||process.arch!=='x64')throw new Error('WINDOWS_X64_BUILD_HOST_REQUIRED');
 const work=resolve('work/windows-inject');
 await mkdir(work,{recursive:true});
@@ -21,6 +21,8 @@ const sdk=await access(localSdk).then(()=>localSdk,()=>process.env.TMC_DOTNET||'
 const buildEnv={...process.env,TMC_RUNTIME_PLATFORM:'win32',TMC_WINDOWS_DYNAMIC:'1'};delete buildEnv.TMC_WINDOWS_MANIFEST;
 run('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File','native/windows/build.ps1','-Dotnet',sdk],buildEnv);
 run(process.execPath,['node_modules/typescript/bin/tsc','--noEmit'],buildEnv);
+// The in-page order window logic (session handoff, warm-frame reuse) is shared with macOS; gate the payload on it.
+run(process.execPath,['tests/run-operator-overlay.mjs'],buildEnv);
 run(process.execPath,['node_modules/vite/bin/vite.js','build'],buildEnv);
 run(process.execPath,['scripts/build-electron.mjs'],buildEnv);
 if(!await access('node_modules/electron/dist/electron.exe').then(()=>true,()=>false))run(process.execPath,['node_modules/electron/install.js'],buildEnv);

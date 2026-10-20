@@ -4,7 +4,7 @@
 
 ## Windows 安装与启动
 
-当前安装器版本为 **0.5.29**，宿主版本为 `0.3.2`。本机构建产物位于 `release/旅游商家助手-0.5.29-Windows资源注入安装.exe`；发行文件不纳入 Git。
+当前安装器版本为 **0.5.30**，宿主版本为 `0.3.2`。本机构建产物位于 `release/旅游商家助手-0.5.30-Windows资源注入安装.exe`；发行文件不纳入 Git。
 
 1. 先安装旅游商家桌面版。安装器支持 Windows x64、客户端 1.2.11 起满足结构兼容检查的版本；版本号满足要求仍需通过资源核验。
 2. 打开安装器，选择实际客户端目录。默认目录、其他磁盘和当前用户安装目录均可选择。
@@ -59,7 +59,7 @@ npm run build
 npm run package:windows:injector
 ```
 
-安装器构建会生成前端、Electron 载荷、原生窗口助手及安装 EXE。`npm start` 是保留的独立开发入口，Windows 资源注入版日常使用原客户端入口。
+安装器构建会生成前端、Electron 载荷、原生窗口助手及安装 EXE，打包前先运行订单窗口检查 `node tests/run-operator-overlay.mjs`（与 macOS 共用的查询页交接及复用逻辑，不依赖平台）。`npm start` 是保留的独立开发入口，Windows 资源注入版日常使用原客户端入口。
 
 `TMC_RUNTIME_PLATFORM=win32|darwin` 控制运行时构建平台。`TMC_WINDOWS_DYNAMIC=1` 由注入安装器打包启用，运行时清单由安装现场生成，不接受外部构建清单替代。
 
@@ -80,7 +80,7 @@ npm run package:mac:injector
 
 macOS 登录使用助手自己的受保护会话。Windows 的浏览器登录方式保留。Mac 助手仅打包中文简体、中文繁体和英文 Electron 界面资源，客户语言识别与翻译目标语言不受影响。
 
-隔离登录与订单检查：`node tests/run-macos-owned-session.mjs`。原生安装事务检查见 [macOS 安装器说明](native/macos-installer/README.md)。构建成功不代表物理键盘、输入法、原客户端冷启动或真实服务验收。
+隔离登录与订单检查：`node tests/run-macos-owned-session.mjs`；页面内订单窗口检查：`node tests/run-operator-overlay.mjs`。原生安装事务检查见 [macOS 安装器说明](native/macos-installer/README.md)。构建成功不代表物理键盘、输入法、原客户端冷启动或真实服务验收。
 
 ## 实现说明
 
