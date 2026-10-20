@@ -1,18 +1,2 @@
-import {lstat,realpath,readFile,chmod} from 'node:fs/promises';
-import {join} from 'node:path';
-import {spawnSync} from 'node:child_process';
-import {digestTree} from './lib/mac-pkg-installer.mjs';
-const target='/Applications/旅游商家桌面版.app',backups='/Library/Application Support/TripVendorCompanion/backups';
-const plain=async(path,directory)=>{const s=await lstat(path);if(s.isSymbolicLink()||(directory?!s.isDirectory():!s.isFile())||await realpath(path)!==path)throw Error('UNTRUSTED_REPAIR_PATH');return s;};
-const metadata=async path=>{const stat=await plain(path,false);if(stat.size>65536)throw Error('INVALID_RECEIPT');return JSON.parse(await readFile(path,'utf8'));};
-const root=await plain(backups,true);if(root.uid!==0||(root.mode&0o077)!==0)throw Error('UNTRUSTED_BACKUPS');
-await plain(target,true);
-const marker=await metadata(join(target,'Contents/Resources/companion/install.json'));if(marker.kind!=='trip-vendor-companion-pkg-v1'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(marker.transactionId))throw Error('INVALID_MARKER');
-const receipt=await metadata(join(backups,marker.transactionId+'.json')),backup=join(backups,marker.transactionId+'.app');
-if(receipt.kind!==marker.kind||receipt.id!==marker.transactionId||receipt.targetApp!==target||receipt.state!=='installed'||receipt.payloadSha256!==marker.payloadSha256)throw Error('INVALID_RECEIPT');
-const original=await plain(backup,true);
-if(await digestTree(target)!==receipt.installedSha256||await digestTree(backup)!==receipt.originalSha256)throw Error('APPLICATION_OR_BACKUP_DRIFT');
-const mode=original.mode&0o777;if((mode&0o555)!==0o555||(mode&0o002)!==0)throw Error('UNEXPECTED_ORIGINAL_MODE');
-const verified=spawnSync('/usr/bin/codesign',['--verify','--deep','--strict',target],{stdio:'inherit'});if(verified.status!==0)throw Error('SIGNATURE_CHECK_FAILED');
-await chmod(target,mode);
-console.log(JSON.stringify({repairedApplicationRootMode:mode.toString(8),applicationContentUnchanged:true}));
+// Retired: component-by-component edits to installed clients are no longer supported.
+throw new Error('LEGACY_COMPONENT_UPDATE_DISABLED: 不再单独修改已安装客户端组件；请使用一次性 macOS 注入安装器。');

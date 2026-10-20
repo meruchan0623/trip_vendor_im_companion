@@ -65,16 +65,22 @@ npm run package:windows:injector
 
 保留的轻量 Windows 宿主通过 `npm run package:lightweight` 构建，细节见 [轻量宿主](native/resident/README.md)。浏览器扩展桥是可选兼容实现，不属于默认登录链路。
 
-Mac 直接注入需要 Apple Silicon 构建主机及官方客户端原件：
+### macOS 一次性注入安装器
+
+用户自行重装官方客户端以清除旧的客户端修改。Codex 后续只修改本仓库并生成安装器，不直接操作已安装客户端组件。旧的 IM 启动节流和 BrowserView 重挂载修补已移除，仅保留助手入口集成。
+
+需要 Apple Silicon 构建主机及受支持的官方原件（当前为 1.2.12 / ares 1.2.15）。运行时支持已核验的内置页面及当前用户目录中的 1.2.15 / 1.2.16 页面，未知版本或文件变化会停止连接：
 
 ```sh
-node scripts/inject-macos-official.mjs --official /path/to/official.dmg
-node scripts/inject-macos-official.mjs --install-built
+node scripts/inject-macos-official.mjs --official work/mac-arm64/official-apple.dmg
+npm run package:mac:injector
 ```
 
-第一条只构建，第二条安装已构建应用。Mac 浏览器订单窗口的辅助功能授权及完整编译、实际窗口控制需在 Mac 验证；Windows 构建结果不代表 Mac 验收。
+构建仅写入工作目录及发行目录。打开生成的一次性安装器，核对 `/Applications/旅游商家桌面版.app`，完全退出客户端后手动安装；之后从原客户端入口启动。更新及卸载也由用户在安装器内操作。安装器核验目标、保留原版备份，拒绝用旧备份覆盖已被官方升级或改动的客户端。原命令的 `--install` / `--install-built` 直接安装入口已停用。
 
-仓库保留生产源码、构建脚本和使用文档；测试脚本、阶段报告、原型及过程输出已移除。构建成功不代表物理键盘、输入法、原客户端冷启动或真实服务验收。
+macOS 登录使用助手自己的受保护会话。Windows 的浏览器登录方式保留。Mac 助手仅打包中文简体、中文繁体和英文 Electron 界面资源，客户语言识别与翻译目标语言不受影响。
+
+隔离登录与订单检查：`node tests/run-macos-owned-session.mjs`。原生安装事务检查见 [macOS 安装器说明](native/macos-installer/README.md)。构建成功不代表物理键盘、输入法、原客户端冷启动或真实服务验收。
 
 ## 实现说明
 

@@ -182,10 +182,5 @@ export async function rollbackMacosCompanion({transactionPath,execute=run}){
   transaction.state='rolled-back';await writeFile(resolve(transactionPath),JSON.stringify(transaction,null,2),{mode:0o600});await rm(removed,{recursive:true,force:true});return transaction;
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  const [command='install',...args]=process.argv.slice(2),options={};
-  for(let index=0;index<args.length;index++){if(args[index]==='--packaging-only'){options['packaging-only']=true;continue;}if(!args[index].startsWith('--')||!args[index+1])throw new Error('EXPECTED_NAMED_ARGUMENT_VALUE');options[args[index].slice(2)]=args[++index];}
-  try{
-    const result=command==='install'?await installMacosCompanion({targetApp:options['target-app']||'/Applications/旅游商家桌面版.app',companionApp:options['companion-app']||'release/mac-arm64/旅游商家助手.app',preparedApp:options['prepared-app'],backupRoot:options['backup-root'],packagingOnly:options['packaging-only']===true}):command==='rollback'?await rollbackMacosCompanion({transactionPath:options.transaction}):command==='status'?JSON.parse(await readFile(options.transaction,'utf8')):null;
-    if(!result)throw new Error('USAGE install|rollback|status');console.log(JSON.stringify(result,null,2));
-  }catch(error){console.error(error.message);process.exitCode=1;}
+  throw new Error('LEGACY_DIRECT_INSTALL_DISABLED: 请使用一次性 macOS 注入安装器。');
 }

@@ -1,28 +1,22 @@
 #!/usr/bin/env node
-// Injects the companion directly into the official macOS client, without a PKG.
-//   node scripts/inject-macos-official.mjs [--official <official .dmg|.app>] [--install]
-//   node scripts/inject-macos-official.mjs --install-built
-// Without --install it only builds work/mac-inject/旅游商家桌面版.app; --install-built installs that
-// earlier build without rebuilding. Both install options replace
-// /Applications/旅游商家桌面版.app (asking for an administrator password only when the installed copy is not writable).
+// Build an injection payload in work/ only. Installation belongs to the user-operated GUI.
+// node scripts/inject-macos-official.mjs [--official <official .dmg|.app>]
 import {build} from 'esbuild';
-import {access, mkdir, readFile, rm, writeFile, mkdtemp} from 'node:fs/promises';
+import {mkdir, readFile, rm, writeFile, mkdtemp} from 'node:fs/promises';
 import {join, resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {userInfo} from 'node:os';
 import {launcherSource} from './install-macos-companion.mjs';
 import {patchVendorAsar, sha256} from './lib/mac-pkg-asar.mjs';
 import {OFFICIAL_REQUIREMENT} from './lib/mac-pkg-installer.mjs';
 import {verifyPackedMacHelper} from './lib/mac-helper-package.mjs';
 
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('APPLE_SILICON_BUILD_HOST_REQUIRED');
-const TARGET = '/Applications/旅游商家桌面版.app', APP_NAME = '旅游商家桌面版.app', HELPER = '旅游商家助手.app';
-const args = process.argv.slice(2), options = {official: 'work/mac-arm64/official-apple.dmg', install: false, build: true};
+const APP_NAME = '旅游商家桌面版.app', HELPER = '旅游商家助手.app';
+const args = process.argv.slice(2), options = {official: 'work/mac-arm64/official-apple.dmg'};
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--install') options.install = true;
-  else if (args[i] === '--install-built') { options.install = true; options.build = false; }
+  if (args[i] === '--install' || args[i] === '--install-built') throw new Error('DIRECT_INSTALL_DISABLED: 请使用一次性 macOS 注入安装器。');
   else if (args[i] === '--official' && args[i + 1] && !args[i + 1].startsWith('--')) options.official = args[++i];
-  else throw new Error('USAGE: inject-macos-official.mjs [--official <official .dmg|.app>] [--install] | --install-built');
+  else throw new Error('USAGE: inject-macos-official.mjs [--official <official .dmg|.app>]');
 }
 // Supported official build: 旅游商家桌面版 1.2.12 / ares 1.2.15 (Intel, official Team ID signature).
 const support = {
@@ -49,12 +43,6 @@ function read(command, commandArgs) {
   return result.stdout.trim();
 }
 const plist = (app, key) => read('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(app, 'Contents/Info.plist')]);
-function assertIdle() {
-  for (const line of read('/bin/ps', ['-axww', '-o', 'comm=']).split('\n')) {
-    const path = line.normalize('NFC');
-    if (path.startsWith(TARGET.normalize('NFC') + '/') || path.includes('vbk-electron-updater') || path.includes(`/${HELPER}/Contents/`)) throw new Error('QUIT_VENDOR_AND_COMPANION_FIRST: 请先完全退出旅游商家桌面版及旅游商家助手。');
-  }
-}
 async function verifyOfficial(app) {
   for (const [key, value] of Object.entries({CFBundleIdentifier: support.bundleId, CFBundleVersion: support.version, CFBundleShortVersionString: support.version, CFBundleExecutable: support.executable})) if (plist(app, key) !== value) throw new Error('UNSUPPORTED_OFFICIAL_IDENTITY ' + key);
   run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--test-requirement', OFFICIAL_REQUIREMENT, app]);
@@ -69,7 +57,6 @@ const compiled = await build({entryPoints: ['runtime/macho-fingerprint.ts'], bun
 const {fingerprintMacExecutable} = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
 const fingerprintMatches = async (app, manifest) => await fingerprintMacExecutable(join(app, 'Contents/MacOS', support.executable)) === manifest.executableSha256 && sha256(await readFile(join(app, 'Contents/Resources/app.asar'))) === manifest.asarSha256;
 let runtimeManifest;
-if (options.build) {
 await rm(work, {recursive: true, force: true}); await mkdir(work, {recursive: true});
 // 1. Copy the verified official app out of the DMG (or the given unmodified .app).
 const source = resolve(options.official);
@@ -111,53 +98,3 @@ run('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', staged]);
 run('/usr/bin/codesign', ['--verify', '--deep', '--strict', staged]);
 if (!await fingerprintMatches(staged, runtimeManifest)) throw new Error('INJECTED_FINGERPRINT_DRIFT');
 console.log(JSON.stringify({event: 'mac_inject_built', app: staged, runtimeManifest}));
-} else {
-  // Reuse an earlier build only if it still matches the fingerprint its helper was compiled for.
-  runtimeManifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  run('/usr/bin/codesign', ['--verify', '--deep', '--strict', staged]);
-  if (!await fingerprintMatches(staged, runtimeManifest)) throw new Error('BUILT_APP_FINGERPRINT_DRIFT');
-}
-
-// 4. Copy and verify on the destination volume before swapping directories. Preserve
-// the previous app and all legacy PKG state; restore the app if any swap/check fails.
-if (options.install) {
-  assertIdle();
-  const writable = await access(TARGET).then(() => read('/usr/bin/stat', ['-f', '%u', TARGET]) === String(process.getuid()), () => true);
-  const installer = join(work, 'install-transaction.cjs');
-  const entry = `
-    import {installInjectedMacApp} from './scripts/lib/mac-inject-transaction.mjs';
-    import {fingerprintMacExecutable} from './runtime/macho-fingerprint.ts';
-    import {readFile} from 'node:fs/promises';
-    import {createHash} from 'node:crypto';
-    import {spawnSync} from 'node:child_process';
-    import {join} from 'node:path';
-    const source = ${JSON.stringify(staged)}, target = ${JSON.stringify(TARGET)};
-    const manifest = ${JSON.stringify(runtimeManifest)};
-    const run = ${run.toString()};
-    const idle = () => {
-      const result = spawnSync('/bin/ps', ['-axww', '-o', 'comm='], {encoding: 'utf8'});
-      if (result.error || result.status !== 0) throw new Error('PROCESS_CHECK_FAILED');
-      for (const line of result.stdout.split('\\n')) {
-        const path = line.normalize('NFC');
-        if (path.startsWith(target.normalize('NFC') + '/') || path.includes('vbk-electron-updater') || path.includes('/旅游商家助手.app/Contents/')) throw new Error('QUIT_VENDOR_AND_COMPANION_FIRST');
-      }
-    };
-    installInjectedMacApp({source, target,
-      copy: (from, to) => run('/usr/bin/ditto', [from, to]),
-      prepare: stage => { ${writable ? '' : `run('/usr/sbin/chown', ['-R', ${JSON.stringify(userInfo().username + ':staff')}, stage]);`} },
-      beforeSwap: idle,
-      verify: async app => {
-        run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
-        const hash = createHash('sha256').update(await readFile(join(app, 'Contents/Resources/app.asar'))).digest('hex');
-        if (hash !== manifest.asarSha256 || await fingerprintMacExecutable(join(app, 'Contents/MacOS', ${JSON.stringify(support.executable)})) !== manifest.executableSha256) throw new Error('INSTALLED_FINGERPRINT_DRIFT');
-      }
-    }).then(result => console.log(JSON.stringify({event: 'mac_inject_installed', ...result}))).catch(error => { console.error(error); process.exitCode = 1; });
-  `;
-  await build({stdin: {contents: entry, resolveDir: process.cwd()}, bundle: true, platform: 'node', format: 'cjs', outfile: installer});
-  if (writable) run(process.execPath, [installer]);
-  else {
-    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-    const script = [process.execPath, installer].map(quote).join(' ');
-    run('/usr/bin/osascript', ['-e', `do shell script ${JSON.stringify(script)} with prompt "注入旅游商家助手到官方客户端" with administrator privileges`]);
-  }
-}
