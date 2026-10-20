@@ -2,6 +2,7 @@ import {isLoginPopoverId} from '../src/shared/owned-login';
 import { isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, type OutboundMode, type PanelState, type PanelTarget } from '../src/shared/workbench';
 import {isCustomerLanguageReport,type CustomerLanguageResolution} from '../src/shared/customer-language';
 import type { StandaloneState } from '../src/shared/companion-api';
+import type { OperatorSessionGrant } from '../src/shared/workbench';
 
 /** The only state sent to the vendor renderer. Authentication credentials stay in the host. */
 export function embeddedPanelState(state:StandaloneState,conversationKey:string|null=null):PanelState {
@@ -12,6 +13,7 @@ export function embeddedPanelState(state:StandaloneState,conversationKey:string|
 export interface EmbeddedActions {
   getState():StandaloneState;
   openOrder?(intent:OrderWindowIntent):Promise<void>;
+  operatorSession?(intent:OrderWindowIntent):Promise<OperatorSessionGrant>;
   closeOrder?():Promise<void>;
   setTranslationOptions(options:{fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;outboundMode?:OutboundMode}):Promise<void>;
   reportCustomerLanguage(language:string,conversationKey:string,resolution?:CustomerLanguageResolution):Promise<void>;
@@ -25,8 +27,8 @@ export interface EmbeddedActions {
   logout():Promise<void>;
 }
 
-/** Fixed intents only: the renderer cannot supply text, snapshots, URLs or a send action. */
-export async function invokeEmbeddedAction(service:EmbeddedActions,action:string,args:unknown[]):Promise<void> {
+/** Fixed intents only: the renderer cannot supply text, snapshots, URLs or a send action. Only `operatorSession` returns data. */
+export async function invokeEmbeddedAction(service:EmbeddedActions,action:string,args:unknown[]):Promise<OperatorSessionGrant|void> {
   if(!Array.isArray(args))throw new Error('INVALID_ACTION');
   const value=args[0],record=value as Record<string,unknown>;
   const object=(keys:string)=>!!value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===keys;
@@ -41,6 +43,7 @@ export async function invokeEmbeddedAction(service:EmbeddedActions,action:string
     case 'retry':if(args.length)break;await service.translate(service.getState().language);return;
     case 'closeLogin':if(args.length!==1||!isLoginPopoverId(value))break;await service.closeLogin(value);return;
     case 'openOrder':if(args.length!==1||!isOrderWindowIntent(value)||!service.openOrder)break;await service.openOrder(value);return;
+    case 'operatorSession':if(args.length!==1||!isOrderWindowIntent(value)||!service.operatorSession)break;return service.operatorSession(value);
     case 'closeOrder':if(args.length||!service.closeOrder)break;await service.closeOrder();return;
     case 'openLogin':if(args.length)break;await service.openLogin();return;
     case 'logout':if(args.length)break;await service.logout();return;

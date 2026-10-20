@@ -37,6 +37,8 @@ export type PanelStatus='unavailable'|'idle'|'translating'|'ready'|'stale'|'fail
 export type PanelAuth='ready'|'needs_login'|'connecting'|'failed';
 export interface PanelOrderState {identifier:string;status:'idle'|'loading'|'ready'|'empty'|'failed';error:string|null;fields:ReadOnlyOrderField[]}
 /** Node -> page state. Text only; no credentials, tokens or editor handles. */
+/** Agent bearer handed to the TSim operator iframe inside the merchant page. Never part of PanelState. */
+export interface OperatorSessionGrant {accessToken:string;sessionRef:string|null}
 export interface OrderWindowIntent {identifier:string;identifierType:'order_number'|'iccid'|'eiccid';conversationKey:string}
 export function isOrderWindowIntent(value:unknown):value is OrderWindowIntent {if(!value||typeof value!=='object'||Array.isArray(value))return false;const v=value as Record<string,unknown>;return Object.keys(v).sort().join(',')==='conversationKey,identifier,identifierType'&&typeof v.identifier==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v.identifier)&&['order_number','iccid','eiccid'].includes(String(v.identifierType))&&typeof v.conversationKey==='string'&&v.conversationKey.length>0&&v.conversationKey.length<=2048;}
 export interface PanelState {orderWindowMode?:'browser';loginPopover?:LoginPopover;translationPaused?:boolean;order?:PanelOrderState;auth:PanelAuth;conversationKey:string|null;draft:{text:string;composing:boolean}|null;enabled:boolean;target:PanelTarget;followCustomer:{lang:string|null;following:boolean;manualEnabled:boolean;resolution?:CustomerLanguageResolution};fallbackTarget?:PanelTarget;status:PanelStatus;preview:string|null;error:string|null;busy:boolean;outboundMode?:OutboundMode;sendPending?:boolean}

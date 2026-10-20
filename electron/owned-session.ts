@@ -21,6 +21,7 @@ export class PersistentSessionService {
   }
   identity(){return this.service.identity();}
   getBrowserProfile(){return null;}
+  operatorGrant(identity:PsimIdentity){return this.closed||this.suspended?null:this.service.operatorGrant(identity);}
   private publish(status:BrowserSessionStatus,code?:string){
     if(this.closed||this.status===status&&this.errorCode===code)return;
     this.status=status;this.errorCode=code;this.options.onStatus?.(status,code);

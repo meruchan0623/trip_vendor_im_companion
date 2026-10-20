@@ -15,7 +15,7 @@ export interface ExternalComposer {
   onInteraction?(listener:(event:NativeInteraction)=>void):()=>void;
   onInvalidated?(listener:()=>void):()=>void;
   setInteractionOptions?(options:NativeInteractionOptions):Promise<void>;
-  mountWorkbench?(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<void>):Promise<void>;
+  mountWorkbench?(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<unknown>):Promise<void>;
   updateWorkbench?(state:PanelState):Promise<void>;
   read(authGeneration:number):Promise<NativePoll>;
   renew():Promise<void>;

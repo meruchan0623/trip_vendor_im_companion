@@ -20,13 +20,12 @@ Electron 与轻量宿主使用 `CompanionService → BrowserProfileSessionServic
 
 ## 订单窗口
 
-页面通过严格 `OrderWindowIntent` 传递订单标识、类型及客户上下文。宿主重新核验账号、认证代次、浏览器配置和当前客户；`ProfileBrowser` 在该配置打开官方 `/embed/operator` 独立窗口。
+两端都在旅游商家客户端的客服页面内，以 iframe 打开 TSim_CS 官方 `/embed/operator`（`source=travel-merchant-companion&session=handoff`），不再创建外部浏览器或助手窗口。iframe 铺满页面视口，裁剪层按页面上报的卡片边界只显示查询卡片，其余区域仍可操作原页面。
 
-随机 bootstrap 标识用于认领助手创建的新窗口，不传递凭据。最终导航前再次授权；准备期间维持窗口租约。换客户、账号撤销、断开和退出均使迟到操作失效并清理自有窗口，普通草稿编辑不关闭订单。不会关闭用户原有窗口或终止共享浏览器进程。
+查询页加载后向父页面发送 `TSIM_OPERATOR_NEEDS_SESSION`（只含订单标识和 requestId）。页面经 `operatorSession` 动作把 `OrderWindowIntent` 交给宿主；宿主核对消息页在前台、当前客户会话与账号认证代次后，返回已核验的 agent 令牌（mac 为助手自有会话，Windows 为绑定浏览器配置中的令牌）。令牌只经 CDP 送入自有隔离环境，再以固定 TSim origin 投递给本次 requestId 的 iframe，不进入面板状态和日志。拒绝时页面发送 `TSIM_OPERATOR_SESSION_UNAVAILABLE`，查询页回退到自身登录页。
 
-Windows 使用 HWND、PID、创建时间和窗口租约。Mac 使用精确 AX 窗口引用，需辅助功能授权；授权撤销或 AX 超时不能视为清理成功。Mac 实际编译和窗口控制需要在目标平台验证。
+TSim_CS 查询页只接受直接父页面（`file://` 不透明 origin）对同一 requestId 的令牌，经 `/agent/profile` 核验后保存为查询页登录态；同一 agent 只更新令牌，不同账号先结束旧会话。令牌以明文保存在商家客户端为该 iframe 分配的 localStorage 中。助手未登录时点击订单先打开助手登录；换客户、账号失效或退出时关闭查询页。mac 退出助手账号会撤销服务端会话，查询页中的副本随之失效。
 
-## 启动、重连和日志
 
 Windows bootstrap 在原主入口前启用本机调试监听、启动自有助手，随后继续运行原入口。助手根据实际安装目录加载受保护清单，核验资源和当前用户进程，再建立唯一回环连接。
 

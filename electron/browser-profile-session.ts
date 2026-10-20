@@ -2,7 +2,7 @@ import { access, readdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join,posix } from 'node:path';
 import { readTsimToken } from './chromium-tsim-storage';
-import { WORKBENCH_TARGETS, type OutboundBody, type OutboundResponse, type PsimIdentity } from '../src/shared/workbench';
+import { WORKBENCH_TARGETS, type OperatorSessionGrant, type OutboundBody, type OutboundResponse, type PsimIdentity } from '../src/shared/workbench';
 
 const API='https://csapi.tsim.tech';
 const LOGIN_URL='https://csagent.tsim.tech/login';
@@ -104,6 +104,8 @@ export class BrowserProfileSessionService {
   }
   identity(){return clone(this.current);}
   getBrowserProfile():BrowserProfile|null{return this.current&&this.profile?{...this.profile}:null;}
+  /** The verified bearer for the TSim operator iframe, only while `identity` is still current. */
+  operatorGrant(identity:PsimIdentity):OperatorSessionGrant|null{return same(identity,this.current)&&this.token&&!this.suspended&&!this.closed?{accessToken:this.token,sessionRef:null}:null;}
   private publish(){try{this.changed(this.identity());}catch{/* subscriber cannot affect revocation */}}
   private revoke(){this.generation++;const hadIdentity=!!this.current;this.current=null;this.token=null;this.profile=null;for(const controller of this.active)controller.abort();this.active.clear();if(hadIdentity)this.publish();}
   private async tokenAt(profile:BrowserProfile):Promise<string|null>{

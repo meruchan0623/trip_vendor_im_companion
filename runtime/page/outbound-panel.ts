@@ -106,7 +106,7 @@ kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padd
 @media (max-height:650px){.preview{max-height:64px}}
 @media (prefers-reduced-motion:reduce){.card,.pop{animation:none}.badge::before,.meta.stale::before,.skeleton i{animation:none!important}}
 [hidden]{display:none!important}`;
-export interface PanelBridge {invoke(action:string,args?:unknown[]):Promise<void>}
+export interface PanelBridge {invoke(action:string,args?:unknown[]):Promise<unknown>}
 export interface OutboundPanel {render(state:PanelState):void;setOrder(order:string|undefined):void;attach():boolean;readonly host:HTMLElement;readonly anchor:HTMLElement|undefined;readonly editor:HTMLElement|undefined;dispose():void}
 type Popover='languages'|'query'|'menu';
 /** `openOrder` opens the TSim operator window: the detected order chip opens directly, the search button queries any other identifier. */

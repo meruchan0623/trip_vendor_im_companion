@@ -1,4 +1,4 @@
-import {WORKBENCH_TARGETS,type OutboundBody,type OutboundResponse,type PsimIdentity} from '../src/shared/workbench';
+import {WORKBENCH_TARGETS,type OperatorSessionGrant,type OutboundBody,type OutboundResponse,type PsimIdentity} from '../src/shared/workbench';
 export const PSIM_API_ORIGIN='https://csapi.tsim.tech';
 const READ_PATHS=new Set(['/agent/profile','/agent/package-query/dataplan-list','/agent/package-query/detail','/agent/package-query/live-detail']);
 const POST_PATHS=new Set(['/agent/login','/agent/auth/refresh','/agent/logout','/agent/translate','/agent/package-query/perform']);
@@ -24,7 +24,7 @@ function tokenExpiry(token:string):number|null {
 export interface OrderProjection {identifier:string;found:boolean;fields:{label:string;value:string}[];source:'旅游商家原编号（未转换）';ownership:'tsim_cs 服务端权限核验'}
 function scalar(value:unknown):string|undefined{if(typeof value==='string'&&value.length<=1000)return value;if(typeof value==='number'&&Number.isFinite(value))return String(value);return undefined;}
 function id(value:unknown):string{const text=scalar(value);if(!text||!/^[-A-Za-z0-9_]{1,128}$/.test(text))throw fail('INVALID_READ_IDENTIFIER');return text;}
-/** Runs inside the owned auth child. Neither tokens nor server response envelopes leave this process. */
+/** Runs inside the owned auth child. Server response envelopes never leave this process; the bearer leaves only via `operatorGrant`. */
 export class OwnedPsimService {
   private token:string|null=null;private sessionRef:string|null=null;private accountId:string|null=null;private permissions:string[]=[];private epoch=0;private verified=false;private closed=false;private authQueue=Promise.resolve();
   private active=new Set<AbortController>();
@@ -129,5 +129,7 @@ export class OwnedPsimService {
     for(const row of rows.slice(0,20)){const card=id(row?.card_dataplan_id);const detail=await this.request('GET',`/agent/package-query/detail?${new URLSearchParams({card_dataplan_id:card})}`,undefined,signal);const value=detail?.result??detail?.data;if(!value||typeof value!=='object')throw fail('ORDER_DETAIL_RESPONSE_INVALID');for(const key of details){const text=scalar(value[key]);if(text!==undefined)fields.push({label:key,value:text});}}
     if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');return{identifier:identifier.trim(),found:rows.length>0,fields,source:'旅游商家原编号（未转换）',ownership:'tsim_cs 服务端权限核验'};
   }
+  /** Explicit handoff to the TSim operator iframe for the same verified identity. */
+  operatorGrant(identity:PsimIdentity):OperatorSessionGrant|null{const current=this.identity();return current&&this.token&&current.accountScope===identity.accountScope&&current.authGeneration===identity.authGeneration?{accessToken:this.token,sessionRef:this.sessionRef}:null;}
   dispose(){this.closed=true;this.revision++;this.clear();}
 }

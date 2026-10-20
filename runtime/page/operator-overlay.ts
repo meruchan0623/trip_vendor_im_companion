@@ -1,4 +1,5 @@
 import type {OperatorIdentifierType,QueryIdentifierEntry} from './identifiers';
+import type {OperatorSessionGrant} from '../../src/shared/workbench';
 /** Each explicit query opens the original TSim page in a fresh browsing context. */
 /** Configurable TSim base origin; messages from any other origin are ignored. */
 export const TSIM_OPERATOR_ORIGIN='https://csagent.tsim.tech';
@@ -16,7 +17,7 @@ export type OperatorChildMessage=
   |{type:'TSIM_OPERATOR_NEEDS_LOGIN'}
   |{type:'TSIM_OPERATOR_BOUNDS';version:1;identifier:string;rect:OperatorRect}
   |{type:'TSIM_OPERATOR_CLOSE'|'TSIM_OPERATOR_LOADED'|'TSIM_OPERATOR_FOCUS';version?:1;identifier:string}
-  |{type:'TSIM_OPERATOR_NEEDS_LOGIN'|'TSIM_OPERATOR_FOCUS'|'TSIM_OPERATOR_CLOSE'|'TSIM_OPERATOR_LOADED'|'TSIM_OPERATOR_BASIC_READY';version:2;identifier:string;requestId:string}
+  |{type:'TSIM_OPERATOR_NEEDS_LOGIN'|'TSIM_OPERATOR_NEEDS_SESSION'|'TSIM_OPERATOR_FOCUS'|'TSIM_OPERATOR_CLOSE'|'TSIM_OPERATOR_LOADED'|'TSIM_OPERATOR_BASIC_READY';version:2;identifier:string;requestId:string}
   |{type:'TSIM_OPERATOR_BOUNDS';version:2;identifier:string;requestId:string;rect:OperatorRect}
   |{type:'TSIM_OPERATOR_QUERY_TERMINAL';version:2;identifier:string;requestId:string;outcome:'unavailable'|'failed'};
 function parseCapabilities(value:unknown):Capability[]|undefined|null{if(value===undefined)return undefined;if(!Array.isArray(value)||value.some(item=>!CAPABILITIES.includes(item)))return null;return new Set(value).size===value.length?value as Capability[]:null;}
@@ -31,7 +32,7 @@ export function parseOperatorChildMessage(value:unknown,current:{identifier:stri
   const base={version:2 as const,identifier:current.identifier,requestId:current.requestId};
   if(m.type==='TSIM_OPERATOR_BOUNDS'){const rect=m.rect as OperatorRect;if(!rect||!['x','y','width','height'].every(k=>typeof (rect as unknown as Record<string,unknown>)[k]==='number'&&Number.isFinite((rect as unknown as Record<string,number>)[k])))return null;return{type:m.type,...base,rect};}
   if(m.type==='TSIM_OPERATOR_QUERY_TERMINAL'&&(m.outcome==='unavailable'||m.outcome==='failed'))return{type:m.type,...base,outcome:m.outcome};
-  if(['TSIM_OPERATOR_NEEDS_LOGIN','TSIM_OPERATOR_FOCUS','TSIM_OPERATOR_CLOSE','TSIM_OPERATOR_LOADED','TSIM_OPERATOR_BASIC_READY'].includes(String(m.type)))return{type:m.type as 'TSIM_OPERATOR_CLOSE',...base};
+  if(['TSIM_OPERATOR_NEEDS_LOGIN','TSIM_OPERATOR_NEEDS_SESSION','TSIM_OPERATOR_FOCUS','TSIM_OPERATOR_CLOSE','TSIM_OPERATOR_LOADED','TSIM_OPERATOR_BASIC_READY'].includes(String(m.type)))return{type:m.type as 'TSIM_OPERATOR_CLOSE',...base};
   return null;
 }
 /** Clip a rect into the viewport; null when invalid or fully outside. */
@@ -45,7 +46,8 @@ export function operatorFrameURL(origin=TSIM_OPERATOR_ORIGIN,request?:OperatorRe
   const url=new URL('/embed/operator',origin);url.searchParams.set('source','travel-merchant-companion');
   if(!request){url.searchParams.set('mode','host');return url.href;}
   // Direct loading also works when a file:// parent cannot complete a postMessage handshake.
-  url.searchParams.set('identifier',request.identifier);if(request.identifierType)url.searchParams.set('identifierType',request.identifierType);if(UUID_RE.test(request.requestId))url.searchParams.set('requestId',request.requestId);return url.href;
+  // `session=handoff`: the page asks this parent for the companion's verified TSim session before routing to login.
+  url.searchParams.set('session','handoff');url.searchParams.set('identifier',request.identifier);if(request.identifierType)url.searchParams.set('identifierType',request.identifierType);if(UUID_RE.test(request.requestId))url.searchParams.set('requestId',request.requestId);return url.href;
 }
 export interface OperatorOverlay {open(entry:QueryIdentifierEntry):void;close():void;prewarm():void;dispose():void;readonly frame:HTMLIFrameElement|null;readonly visible:boolean;readonly active:OperatorRequest|null;readonly bounds:OperatorRect|null}
 /** Standard TSim query window: 90% of the viewport, centered (same as the agent workbench). */
@@ -59,7 +61,7 @@ export function standardOperatorRect(viewportWidth:number,viewportHeight:number)
  * own AgentWindow exactly like the agent workbench. A clipping viewport follows the reported window bounds so
  * only the window area is visible and receives input; the rest of the original page stays usable.
  */
-export function createOperatorOverlay(document:Document,options:{origin?:string;prewarmDelayMs?:number;randomUUID?:()=>string}={}):OperatorOverlay{
+export function createOperatorOverlay(document:Document,options:{origin?:string;prewarmDelayMs?:number;randomUUID?:()=>string;requestSession?:(request:OperatorRequest)=>Promise<OperatorSessionGrant>}={}):OperatorOverlay{
   const view=document.defaultView!,parsed=new URL(options.origin??TSIM_OPERATOR_ORIGIN);
   if(parsed.protocol!=='https:')throw new Error('OPERATOR_HTTPS_REQUIRED');
   const origin=parsed.origin;
@@ -100,6 +102,15 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
     switch(m.type){
       case 'TSIM_OPERATOR_CLOSE':close();break;
       case 'TSIM_OPERATOR_BOUNDS':if(clampOperatorRect(m.rect,view.innerWidth,view.innerHeight)){reported={...m.rect};layout();}break;
+      case 'TSIM_OPERATOR_NEEDS_SESSION':{
+        // The bearer is posted only to this request's frame and only to the fixed TSim origin.
+        const request=active,ownFrame=frame,reply=(value:Record<string,unknown>)=>{if(frame===ownFrame&&active===request)ownFrame.contentWindow?.postMessage({version:2,identifier:request.identifier,requestId:request.requestId,...value},origin);};
+        message('正在使用助手的 TSim 登录态打开订单…');
+        const pending=options.requestSession?options.requestSession({...request}):Promise.reject(new Error('SESSION_UNAVAILABLE'));
+        pending.then(grant=>{if(!grant||typeof grant.accessToken!=='string'||!grant.accessToken)throw new Error('SESSION_UNAVAILABLE');reply({type:'TSIM_OPERATOR_SESSION',accessToken:grant.accessToken,sessionRef:typeof grant.sessionRef==='string'?grant.sessionRef:null});},
+          ()=>{reply({type:'TSIM_OPERATOR_SESSION_UNAVAILABLE'});if(frame===ownFrame&&active===request)message('助手未能提供 TSim 登录态，请先在助手面板登录，或在下方页面登录。');});
+        break;
+      }
       case 'TSIM_OPERATOR_NEEDS_LOGIN':clearTimer();reported=null;layout();message('请在下方 TSim 页面完成登录。');break;
       case 'TSIM_OPERATOR_BASIC_READY':case 'TSIM_OPERATOR_LOADED':clearTimer();message('请在下方 TSim 页面查看订单详情。');break;
       case 'TSIM_OPERATOR_QUERY_TERMINAL':clearTimer();message('订单查询未完成，请查看下方 TSim 页面的提示。');break;

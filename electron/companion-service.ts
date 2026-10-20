@@ -1,7 +1,7 @@
 import {ownedLoginURL,isLoginPopoverId,type LoginPopover} from '../src/shared/owned-login';
 import { randomUUID, createHash } from 'node:crypto';
 import { BrowserProfileSessionService, type BrowserProfileSessionOptions } from './browser-profile-session';
-import { isCustomerLanguage, isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, sameVerifiedDraft, type OutboundMode, type PanelTarget, type PanelOrderState, type PsimIdentity, type VerifiedComposerSnapshot } from '../src/shared/workbench';
+import { isCustomerLanguage, isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, sameVerifiedDraft, type OutboundMode, type PanelTarget, type PanelOrderState, type PsimIdentity, type OperatorSessionGrant, type VerifiedComposerSnapshot } from '../src/shared/workbench';
 import type { StandaloneState, OrderEntry } from '../src/shared/companion-api';
 import type {NativeInteraction} from '../runtime/native-composer';
 import type { NativeAdapter, NativeDraftSnapshot, WindowState } from './native-adapter';
@@ -56,7 +56,7 @@ const messages:Record<string,string>={
 /** Quiet period after the last edit before an automatic outbound translation request. */
 export const AUTO_TRANSLATE_DELAY_MS=500;
 export const CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS=5000;
-export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
+export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
 export class CompanionService {
@@ -99,7 +99,8 @@ export class CompanionService {
     this.customerResolutionTimer=setTimeout(()=>{this.customerResolutionTimer=undefined;if(this.closed||generation!==this.customerResolutionGeneration||this.state.customerLanguageResolution?.status!=='collecting')return;this.state.customerLanguageResolution=unavailableCustomerLanguage();if(this.state.followCustomerLanguage!==false){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();},CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS);
   }
   private contextChanged(){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
-  private embeddedState(){return {...(this.orderWindow?{orderWindowMode:'browser' as const}:{}),...embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null),...(this.loginPopover?{loginPopover:{...this.loginPopover}}:{})};}
+  // Both platforms show the TSim operator inside the merchant page; the host only grants its session.
+  private embeddedState(){return {...embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null),...(this.loginPopover?{loginPopover:{...this.loginPopover}}:{})};}
   private retireComposer(composer:ExternalComposer){
     if(this.external!==composer||this.closed)return;
     this.loginGeneration++;this.loginPopover=undefined;this.translationIntent++;this.invalidate();this.captured=undefined;
@@ -509,6 +510,16 @@ export class CompanionService {
       });
       if(current()){this.state.browserOpen=true;this.publish();}
     }catch(error){if(current()){this.fail(error);throw error;}}
+  }
+  /** Hands the verified bearer to the in-page TSim operator for the visible conversation only. */
+  async operatorSession(intent:OrderWindowIntent):Promise<OperatorSessionGrant>{
+    if(!isOrderWindowIntent(intent))throw new Error('INVALID_ACTION');
+    await this.sessionStarting;
+    if(this.closed||!this.foreground||!this.external||this.captured?.source!=='verified-editor'||!this.state.messageSurface?.active)throw new Error('MESSAGE_PAGE_REQUIRED');
+    if(intent.conversationKey!==this.context())throw new Error('ORDER_CONTEXT_CHANGED');
+    const identity=this.psim.identity();if(!identity||this.state.auth!=='ready')throw new Error('PSIM_LOGIN_REQUIRED');
+    const grant=this.psim.operatorGrant(identity);if(!grant)throw new Error('AUTH_CHANGED');
+    return grant;
   }
   async queryOrder(identifier:string){
     if(typeof identifier!=='string'||!identifier.trim()||identifier.length>128||/[\r\n\u0000]/.test(identifier))throw new Error('INVALID_ORDER_IDENTIFIER');

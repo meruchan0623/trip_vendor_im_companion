@@ -18,7 +18,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private captures:ParentCapture[]=[];
   private nativeListeners=new Set<(event:NativeInteraction)=>void>();private nativeDraining=false;private nativeWake=false;private nativeSendGeneration=0;
   private async drainInteractions(){if(this.invalid)return;this.nativeWake=true;if(this.nativeDraining)return;this.nativeDraining=true;try{while(this.nativeWake&&!this.invalid){this.nativeWake=false;const epoch=this.epoch,events=await this.policy.drainNativeInteractions();this.current(epoch);for(const event of events){if(event?.type!=='draft-changed'&&event?.type!=='replace-shortcut'&&event?.type!=='send-shortcut')throw new Error('NATIVE_EVENTS_UNVERIFIED');if(event.type==='send-shortcut'&&event.sendGeneration!==this.nativeSendGeneration)continue;for(const listener of [...this.nativeListeners])listener(event);}}}catch(error){this.invalidate('NATIVE_EVENT_'+reasonOf(error));}finally{this.nativeDraining=false;}}
-  private companionAction?: (action:string,args:unknown[])=>Promise<void>;
+  private companionAction?: (action:string,args:unknown[])=>Promise<unknown>;
   private bindingName=`tsim_${randomBytes(16).toString('hex')}`;
   private mounted=false;private cleanup?:Promise<void>;private closing?:Promise<void>;private transportClosing?:Promise<void>;
   get parentCaptureDiagnostics(){return this.captures.map(item=>({...item}));}
@@ -56,7 +56,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       if(!value||Object.keys(value).sort().join(',')!=='action,args,id'||typeof value.id!=='string'||!/^\d{1,10}$/.test(value.id)||!Array.isArray(value.args))throw new Error('INVALID_ACTION');
       id=value.id;const args=value.args as unknown[];
       if(!validWorkbenchAction(value.action,args))throw new Error('INVALID_ACTION');
-      await this.companionAction(value.action,args);this.current(epoch);await this.policy.respondWorkbench(id,true);
+      const result=await this.companionAction(value.action,args);this.current(epoch);await this.policy.respondWorkbench(id,true,result);
     }catch(error){diag('action-failed',{reason:reasonOf(error)});if(id&&!this.invalid)await this.policy.respondWorkbench(id,false).catch(()=>{});}
   }
   private current(epoch:number){if(this.invalid||this.epoch!==epoch)throw new Error('RUNTIME_TARGET_CHANGED');}
@@ -68,7 +68,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     this.target.executionContextId=[...this.defaultContexts][0];await this.policy.verifyRenderer(candidates()[0].id);this.current(epoch);await this.policy.createOwnedWorld();this.current(epoch);// Capture listeners are optional diagnostics, not an authorization gate.
     if(options.collectParentCaptures!==false){this.captures=await this.policy.inspectParentCaptures();this.current(epoch);}
   }
-  async mountCompanion(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<void>){
+  async mountCompanion(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<unknown>){
     const epoch=this.epoch;this.current(epoch);if(this.mounted)throw new Error('ALREADY_ATTACHED');this.mounted=true;
     const stopBootstrap=this.keepBootstrapNativeLease(epoch);
     try{

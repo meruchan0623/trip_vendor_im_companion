@@ -1,6 +1,6 @@
 import {matchesPageConversation} from './conversation';
 import {customerLanguageEvidence} from './language';
-import type {PanelState} from '../../src/shared/workbench';
+import type {OperatorSessionGrant,OrderWindowIntent,PanelState} from '../../src/shared/workbench';
 import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../../src/shared/customer-language';
 import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
 import {createOperatorOverlay,operatorFrameURL,OPERATOR_FRAME_ID,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
@@ -14,16 +14,25 @@ export const CUSTOMER_REPORT_RECOVERY_MS=30000;
 export const CUSTOMER_ORIGINALS_LOAD_WINDOW_MS=1500;
 export interface PageGeometry {x:number;y:number;width:number;height:number;viewportWidth:number;viewportHeight:number;devicePixelRatio:number}
 export interface PageFeatures {update(state:PanelState):void;boundary():true;geometry():PageGeometry;dispose():void;readonly overlay:OperatorOverlay;readonly panel:OutboundPanel|undefined}
-/** Production workbench: explicit order queries open the original TSim page. */
+/** Production workbench: explicit order queries open the original TSim page inside the merchant client. */
 export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge;state?:PanelState;origin?:string;prewarmDelayMs?:number}={}):PageFeatures{
   const view=document.defaultView!;let disposed=false,state=options.state,conversation:string|null|undefined,originalsDeadline=0;
-  const overlay=createOperatorOverlay(document,{origin:options.origin,prewarmDelayMs:options.prewarmDelayMs});
-  let browserOrderRequested=false;
-  const closeBrowserOrder=()=>{if(!browserOrderRequested)return;browserOrderRequested=false;void options.bridge?.invoke('closeOrder',[]).catch(()=>{});};
+  // Both platforms: the original TSim operator inside this page, signed in with the companion's verified session.
+  const overlay=createOperatorOverlay(document,{origin:options.origin,prewarmDelayMs:options.prewarmDelayMs,requestSession:request=>{
+    const conversationKey=state?.conversationKey;
+    if(!options.bridge||!conversationKey||state?.auth!=='ready'||!bound())return Promise.reject(new Error('SESSION_UNAVAILABLE'));
+    const intent:OrderWindowIntent={identifier:request.identifier,identifierType:request.identifierType??inferIdentifierType(request.identifier)??'order_number',conversationKey};
+    return options.bridge.invoke('operatorSession',[intent]) as Promise<OperatorSessionGrant>;
+  }});
   const bound=()=>!!state&&matchesPageConversation(document,state.conversationKey);
-  const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>{if(!bound()){overlay.close();return;}if(state?.orderWindowMode==='browser'){browserOrderRequested=true;void options.bridge!.invoke('openOrder',[{identifier,identifierType:identifierType??inferIdentifierType(identifier)??'order_number',conversationKey:state.conversationKey}]).catch(()=>{});}else overlay.open({identifier,identifierType});}}):undefined;
+  const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>{
+    if(!bound()){overlay.close();return;}
+    // The operator needs the companion's account; sign in first instead of showing TSim's own login.
+    if(state!.auth!=='ready'){void options.bridge!.invoke('openLogin',[]).catch(()=>{});return;}
+    overlay.open({identifier,identifierType});
+  }}):undefined;
   let renderedBound:boolean|undefined;
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(!currentBound){overlay.close();closeBrowserOrder();}if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(!currentBound||state.auth!=='ready')overlay.close();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
@@ -75,7 +84,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   function update(next:PanelState){
     if(disposed)return;const previousLanguage=JSON.stringify(state?.followCustomer);state=next;
     // Close the order page on conversation change.
-    if(conversation!==undefined&&conversation!==next.conversationKey){overlay.close();closeBrowserOrder();}
+    if(conversation!==undefined&&conversation!==next.conversationKey)overlay.close();
     orderObservation?.setConversationKey(next.conversationKey);
     if(conversation!==next.conversationKey){conversation=next.conversationKey;originalsDeadline=Date.now()+CUSTOMER_ORIGINALS_LOAD_WINDOW_MS;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);customerTimer=undefined;scheduleCustomer();}
     else if(previousLanguage!==JSON.stringify(next.followCustomer)){
@@ -85,7 +94,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     }
     renderCurrent();
   }
-  const closeOnEscape=(event:KeyboardEvent)=>{if(event.key==='Escape')closeBrowserOrder();};view.addEventListener('keydown',closeOnEscape,true);
   const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;clearRetry();if(document.visibilityState!=='hidden'){renderCurrent(true);syncOrder();scheduleCustomer();}};document.addEventListener('visibilitychange',onVisibility);
   if(state)update(state);
   return{update,overlay,panel,
@@ -107,6 +115,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;closeBrowserOrder();view.removeEventListener('keydown',closeOnEscape,true);disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
   };
 }

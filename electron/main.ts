@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { NativeAdapter, type WindowState } from './native-adapter';
-import {ProfileBrowser,profileOrderWindow} from './profile-browser';
 import { CompanionService } from './companion-service';
 import {FileTranslationOptionsStore} from './translation-options-store';
 import { startExternalClient } from './external-composer';
@@ -35,7 +34,6 @@ console.error=(...args:unknown[])=>{diagnostics?.consoleError(args);hostError(..
 diagnostics?.lifecycle('start',process.pid);
 const localFile=join(__dirname,'../dist/index.html');
 let panel:BrowserWindow|undefined,tray:Tray|undefined,native:NativeAdapter,service:CompanionService,resident:ResidentConnection|undefined;
-let orderBrowser:ProfileBrowser|undefined;
 let latest:WindowState|null=null,quitting=false,cleaned=false,panelIntent=0;
 let panelLoad:{window:BrowserWindow;promise:Promise<void>}|undefined;
 let lastPublished='';
@@ -152,11 +150,11 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   if(ownerPID!==undefined)await adoptVendorOwner(ownerPID);
   if(quitting)return;
   diagnostics?.lifecycle('ready',process.pid,ownerPID);
-  native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},()=>{orderBrowser?.handleLost();void service?.closeOrder();},measurement=>{if(measurement.closed&&orderBrowser?.ownsGeometry(measurement.launchId))void service?.closeOrder();},undefined,()=>resident?.notifyTargetAvailable());
-  if(process.platform==='win32'||process.platform==='darwin')orderBrowser=new ProfileBrowser(native,()=>null,code=>service?.reportBrowserFailure(code));
+  native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},()=>{},()=>{},undefined,()=>resident?.notifyTargetAvailable());
+  // Orders open inside the merchant page on both platforms; no external browser windows are created.
   // Both installed Windows injection and standalone Electron reuse the verified Edge/Chrome session.
   // The fallback is needed only when no supported browser profile is discoverable.
-  service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);},()=>{},smokeMode?{enabled:false}:{},true,undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')),orderBrowser?profileOrderWindow(orderBrowser,()=>latest?.bounds??null):undefined);service.onState(publish);
+  service=new CompanionService(native,async url=>{if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);},()=>{},smokeMode?{enabled:false}:{},true,undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')));service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
   // Installed Windows runs silently inside the vendor; standalone Windows retains tray settings.

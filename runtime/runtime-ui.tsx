@@ -2,7 +2,7 @@ import {mountPageFeatures,type PageFeatures,type PageGeometry} from './page/inde
 import type {PanelState} from '../src/shared/workbench';
 import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,WINDOWS_DYNAMIC_RUNTIME,validateWindowsRuntimeBuild,validateMacRuntimeBuild,type RuntimeBuild} from './build-manifest';
 export interface RuntimeUiMetadata {leaseId:string;aresVersion:typeof VERIFIED_RUNTIME_BUILD.aresVersion;htmlSha256:string;rendererSha256:string;keyboardBoundary:'isolated-world-shadow';windowsBuild?:RuntimeBuild;macBuild?:RuntimeBuild}
-export interface RuntimeUiHandle {heartbeat(sequence:number):void;detach():Promise<void>;geometry():RuntimeGeometry;boundary():true;updateWorkbench(state:PanelState):void;respondWorkbench(id:string,ok:boolean):void}
+export interface RuntimeUiHandle {heartbeat(sequence:number):void;detach():Promise<void>;geometry():RuntimeGeometry;boundary():true;updateWorkbench(state:PanelState):void;respondWorkbench(id:string,ok:boolean,value?:unknown):void}
 export type RuntimeGeometry=PageGeometry;
 /** Factory only. Loading this runtime artifact never mounts anything by itself; the page features live in ./page. */
 export function mountRuntimeUi(metadata:RuntimeUiMetadata,document:Document=window.document,bridge?:{bindingName:string;state:PanelState}|null,options:{origin?:string;prewarmDelayMs?:number}={}):RuntimeUiHandle {
@@ -23,9 +23,9 @@ export function mountRuntimeUi(metadata:RuntimeUiMetadata,document:Document=wind
   const binding=bridge&&/^tsim_[a-f0-9]{32}$/.test(bridge.bindingName)?(view as unknown as Record<string,unknown>)[bridge.bindingName]:undefined;
   if(bridge&&typeof binding!=='function')throw new Error('OWNED_BINDING_MISSING');
   let disposed=false,lastHeartbeat=Date.now(),lastSequence=0,counter=0,features:PageFeatures|undefined,watchdog:number|undefined,detachment:Promise<void>|undefined;
-  const pending=new Map<string,{resolve:()=>void;reject:()=>void;timer:number}>();
+  const pending=new Map<string,{resolve:(value:unknown)=>void;reject:()=>void;timer:number}>();
   /** Page -> Node intents travel only through the owned CDP binding; replies come back via respondWorkbench. */
-  const invoke=(action:string,args:unknown[]=[])=>new Promise<void>((resolve,reject)=>{if(disposed||typeof binding!=='function'){reject(new Error('SERVICE_DISCONNECTED'));return;}const id=String(++counter);const timer=view.setTimeout(()=>{pending.delete(id);reject(new Error('ACTION_TIMEOUT'));},35000);pending.set(id,{resolve,reject:()=>reject(new Error('ACTION_FAILED')),timer});(binding as (value:string)=>void)(JSON.stringify({id,action,args}));});
+  const invoke=(action:string,args:unknown[]=[])=>new Promise<unknown>((resolve,reject)=>{if(disposed||typeof binding!=='function'){reject(new Error('SERVICE_DISCONNECTED'));return;}const id=String(++counter);const timer=view.setTimeout(()=>{pending.delete(id);reject(new Error('ACTION_TIMEOUT'));},35000);pending.set(id,{resolve,reject:()=>reject(new Error('ACTION_FAILED')),timer});(binding as (value:string)=>void)(JSON.stringify({id,action,args}));});
   const detach=async():Promise<void>=>{if(detachment)return detachment;disposed=true;if(watchdog!==undefined)view.clearInterval(watchdog);view.removeEventListener('pagehide',pagehide);for(const request of pending.values()){view.clearTimeout(request.timer);request.reject();}pending.clear();try{features?.dispose();}finally{features=undefined;if(document.documentElement.getAttribute('data-tsim-runtime-lease')===metadata.leaseId)document.documentElement.removeAttribute('data-tsim-runtime-lease');if(window.tsimRuntimeFactory?.mount===mountRuntimeUi)delete window.tsimRuntimeFactory;}detachment=Promise.resolve();return detachment;};
   const pagehide=()=>{void detach().catch(()=>{});};
   const boundary=():true=>{try{if(disposed||!features||document.documentElement.getAttribute('data-tsim-runtime-lease')!==metadata.leaseId)throw new Error('OWNED_FRAME_BOUNDARY_FAILED');return features.boundary();}catch{void detach().catch(()=>{});throw new Error('OWNED_FRAME_BOUNDARY_FAILED');}};
@@ -37,7 +37,7 @@ export function mountRuntimeUi(metadata:RuntimeUiMetadata,document:Document=wind
   }catch(error){void detach().catch(()=>{});throw error;}
   return{detach,boundary,
     updateWorkbench(next){boundary();features!.update(next);},
-    respondWorkbench(id,ok){const request=pending.get(id);if(!request)return;pending.delete(id);view.clearTimeout(request.timer);if(ok)request.resolve();else request.reject();},
+    respondWorkbench(id,ok,value){const request=pending.get(id);if(!request)return;pending.delete(id);view.clearTimeout(request.timer);if(ok)request.resolve(value);else request.reject();},
     geometry(){if(disposed)throw new Error('LEASE_ENDED');boundary();return features!.geometry();},
     heartbeat(sequence){if(disposed)throw new Error('LEASE_ENDED');boundary();if(!Number.isSafeInteger(sequence)||sequence<=lastSequence)throw new Error('STALE_HEARTBEAT');lastSequence=sequence;lastHeartbeat=Date.now();},
   };
