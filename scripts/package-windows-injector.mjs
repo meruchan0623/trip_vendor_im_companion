@@ -7,7 +7,7 @@ import {sha256} from './lib/mac-pkg-asar.mjs';
 import {copyWindowsHelperPayload,WINDOWS_PAYLOAD_ZIP_OPTIONS} from './lib/windows-payload-profile.mjs';
 import {compressWindowsPayload} from './lib/windows-payload-archive.mjs';
 const require=createRequire(import.meta.url);
-const installerVersion='0.5.28';
+const installerVersion='0.5.29';
 if(process.platform!=='win32'||process.arch!=='x64')throw new Error('WINDOWS_X64_BUILD_HOST_REQUIRED');
 const work=resolve('work/windows-inject');
 await mkdir(work,{recursive:true});
