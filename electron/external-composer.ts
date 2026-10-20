@@ -22,6 +22,8 @@ export interface ExternalComposer {
   replace(expected:VerifiedComposerSnapshot,text:string,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>):Promise<void>;
   /** Sends the exact verified draft through the vendor send button. Only for a user's own Enter in send mode. */
   send?(expected:VerifiedComposerSnapshot,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>):Promise<void>;
+  /** Rebuild page ownership on the same live, revalidated socket after releasing every old handle. */
+  reconnect?(signal?:AbortSignal):Promise<ExternalComposer>;
   close():Promise<void>;
 }
 /** Attaches to an already running, fingerprinted client and mounts only owned page UI. */
@@ -38,25 +40,45 @@ export async function connectExternalComposer(targetInstanceId:string,signal?:Ab
   const verifyOwner=async()=>{if('verifyHandshakeOwner'in platform)await platform.verifyHandshakeOwner(verified.process,port,verified.fingerprint);else{const process=await platform.processIdentity(pid);if(process.startedAt!==verified.process.startedAt)throw new Error('PROCESS_CHANGED');await reattachExplicitDevInstance(platform,pid,port);}};
   const verify=async()=>{current();await verifyOwner();current();};
   const transport=await connectOwnedLoopback(port,verify);mark('transport-ready');
+  const owner={transport,verifyOwner,fingerprint:verified.fingerprint,broken:false};transport.onDisconnect(()=>{owner.broken=true;});
+  return attachComposer(targetInstanceId,owner,mark,signal);
+}
+type VerifiedSocket={transport:LoopbackCDPTransport;verifyOwner:()=>Promise<void>;fingerprint:Awaited<ReturnType<typeof reattachExplicitDevInstance>>['fingerprint'];broken:boolean};
+async function attachComposer(targetInstanceId:string,owner:VerifiedSocket,mark:(stage:VendorProgressStage)=>void,signal?:AbortSignal):Promise<ExternalComposer>{
+  const {transport}=owner;
+  let lifecycle:'open'|'reconnecting'|'transferred'|'closed'='open';
+  const current=()=>{if(lifecycle!=='open'||signal?.aborted||owner.broken)throw new Error('CONNECTION_SUPERSEDED');};
   const abort=()=>{void transport.disconnect();};
   signal?.addEventListener('abort',abort,{once:true});
   let driver:LiveRuntimeDriver|undefined;
   try {
     current();
     if(typeof __RUNTIME_ARTIFACT_SOURCE__==='undefined'||typeof __RUNTIME_ARTIFACT_SHA256__==='undefined')throw new Error('RUNTIME_ARTIFACT_NOT_BUILT');
-    driver=await LiveRuntimeDriver.discover(transport,verified.fingerprint,__RUNTIME_ARTIFACT_SOURCE__,__RUNTIME_ARTIFACT_SHA256__,8000);
+    driver=await LiveRuntimeDriver.discover(transport,owner.fingerprint,__RUNTIME_ARTIFACT_SOURCE__,__RUNTIME_ARTIFACT_SHA256__,8000);current();
     mark('target-found');await driver.verifyCurrentTarget(driver.target,{collectParentCaptures:false});mark('page-verified');
     if(typeof __NATIVE_ARTIFACT_SOURCE__==='undefined'||typeof __NATIVE_ARTIFACT_SHA256__==='undefined')throw new Error('EDITOR_ARTIFACT_NOT_BUILT');
     const portAdapter=await driver.externalComposer(__NATIVE_ARTIFACT_SOURCE__,__NATIVE_ARTIFACT_SHA256__);
     mark('native-ready');current();signal?.removeEventListener('abort',abort);const owned=driver;
-    let ui:Awaited<ReturnType<LiveRuntimeDriver['mountCompanion']>>|undefined,sequence=0,closed=false;
-    const heartbeat=async()=>{if(closed)throw new Error('SERVICE_DISCONNECTED');await ui?.heartbeat(++sequence);};
-    return {targetInstanceId,onInteraction:portAdapter.onInteraction,onInvalidated:listener=>owned.watchInvalidation(owned.target,listener),setInteractionOptions:portAdapter.setInteractionOptions,
-      async mountWorkbench(state,onAction){if(closed||ui)throw new Error('WORKBENCH_ALREADY_MOUNTED');ui=await owned.mountCompanion(state,onAction);mark('panel-mounted');if(closed){await ui.detach();throw new Error('SERVICE_DISCONNECTED');}},
-      async updateWorkbench(state){if(closed)return;await ui?.publish(state);},
+    let ui:Awaited<ReturnType<LiveRuntimeDriver['mountCompanion']>>|undefined,sequence=0;
+    const heartbeat=async()=>{current();await ui?.heartbeat(++sequence);};
+    return {targetInstanceId,onInteraction:listener=>{current();return portAdapter.onInteraction(listener);},onInvalidated:listener=>{current();return owned.watchInvalidation(owned.target,listener);},setInteractionOptions:async options=>{current();await portAdapter.setInteractionOptions(options);},
+      async mountWorkbench(state,onAction){current();if(ui)throw new Error('WORKBENCH_ALREADY_MOUNTED');ui=await owned.mountCompanion(state,onAction);current();mark('panel-mounted');},
+      async updateWorkbench(state){current();await ui?.publish(state);},
       async read(authGeneration){await heartbeat();return portAdapter.read(authGeneration);},
-      async renew(){await heartbeat();await portAdapter.renew();},replace:portAdapter.replace,send:portAdapter.send,
-      async close(){if(closed)return;closed=true;signal?.removeEventListener('abort',abort);try{await ui?.detach();}finally{await owned.disconnect();}},
+      async renew(){await heartbeat();await portAdapter.renew();},replace:async(...args)=>{current();return portAdapter.replace(...args);},send:async(...args)=>{current();return portAdapter.send(...args);},
+      async reconnect(nextSignal){
+        current();lifecycle='reconnecting';const nextCurrent=()=>{if(lifecycle!=='reconnecting'||nextSignal?.aborted||owner.broken)throw new Error('CONNECTION_SUPERSEDED');};
+        const started=Date.now(),markNext=(stage:VendorProgressStage|'complete')=>console.log(JSON.stringify({event:'composer-reconnect',stage,elapsedMs:Date.now()-started,at:new Date().toISOString()}));markNext('start');
+        const cancel=()=>{void transport.disconnect();};nextSignal?.addEventListener('abort',cancel,{once:true});
+        try{
+          await owned.releaseForReconnect();nextCurrent();await owner.verifyOwner();nextCurrent();
+          const next=await attachComposer(targetInstanceId,owner,markNext,nextSignal);
+          try{nextCurrent();await owner.verifyOwner();nextCurrent();}catch(error){await next.close();throw error;}
+          lifecycle='transferred';markNext('complete');return next;
+        }catch(error){lifecycle='closed';await transport.disconnect();throw error;}
+        finally{nextSignal?.removeEventListener('abort',cancel);}
+      },
+      async close(){if(lifecycle==='closed'||lifecycle==='transferred')return;lifecycle='closed';signal?.removeEventListener('abort',abort);await owned.disconnect();},
     };
   }catch(error){signal?.removeEventListener('abort',abort);if(driver)await driver.disconnect().catch(()=>{});else await transport.disconnect().catch(()=>{});throw error;}
 }

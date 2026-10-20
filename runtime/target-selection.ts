@@ -32,6 +32,8 @@ export async function observeImTarget(transport:CDPTransport,target:ImTargetCand
     const attached=await transport.send('Target.attachToTarget',{targetId:target.targetId,flatten:true}) as any;
     if(typeof attached?.sessionId!=='string'||!attached.sessionId)throw new Error('INVALID_SESSION');
     session=attached.sessionId;
+    // Resource content is available only after Page has been enabled on this new session.
+    await transport.send('Page.enable',{},session);
     const tree=await transport.send('Page.getFrameTree',{},session) as any,frame=tree?.frameTree?.frame;
     if(!frame||typeof frame.id!=='string'||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
     const resource=await transport.send('Page.getResourceContent',{frameId:frame.id,url:frame.url},session) as any;

@@ -42,6 +42,7 @@ export class RuntimeCDPPolicy {
   private installed=false;private uiObjectId:string|undefined;private nativeObjectId:string|undefined;
   private bindingName?:string;private nativeBindingName?:string;
   private navigation?:{targetId:string;session:string;frameId:string;contextId:number};
+  private navigationCleanupFailed=false;
   get session(){return this.sessionId;}
   get context(){return this.isolatedContextId;}
   get nativeReady(){return !!this.nativeObjectId;}
@@ -151,7 +152,7 @@ export class RuntimeCDPPolicy {
           stage='ISOLATED_WORLD';const world=await this.transport.send('Page.createIsolatedWorld',{frameId:frame.id,worldName:`tsim-nav-${this.target.contextNonce}`,grantUniveralAccess:false},navSession) as any;current();
           if(!Number.isSafeInteger(world?.executionContextId)||world.executionContextId<=0)throw new Error('INVALID_CONTEXT');
           this.navigation={targetId:matches[0].targetId,session:navSession,frameId:frame.id,contextId:world.executionContextId};
-        }catch(error){await this.transport.send('Target.detachFromTarget',{sessionId:navSession}).catch(()=>{});throw error;}
+        }catch(error){await this.transport.send('Target.detachFromTarget',{sessionId:navSession}).catch(()=>{this.navigationCleanupFailed=true;});throw error;}
       }
       stage='VERIFY_FRAME';const nav=this.navigation!,tree=await this.transport.send('Page.getFrameTree',{},nav.session) as any;current();
       if(tree?.frameTree?.frame?.id!==nav.frameId||!sameFileURL(tree?.frameTree?.frame?.url,NAV_URL))throw new Error('MESSAGE_NAVIGATION_UNVERIFIED');
@@ -161,7 +162,7 @@ export class RuntimeCDPPolicy {
       return value;
     }catch(error){await this.detachNavigation();if(error instanceof Error&&error.message==='CDP_COMMAND_REJECTED')throw new Error(`MESSAGE_NAV_${stage}_REJECTED`);throw error;}
   }
-  private async detachNavigation(){const nav=this.navigation;this.navigation=undefined;if(nav)await this.transport.send('Target.detachFromTarget',{sessionId:nav.session}).catch(()=>{});}
+  private async detachNavigation(strict=false){const nav=this.navigation;this.navigation=undefined;if(nav)try{await this.transport.send('Target.detachFromTarget',{sessionId:nav.session});}catch(error){this.navigationCleanupFailed=true;if(strict)throw error;}}
   async readRightOrderEntries(geometry:NonNullable<NativePoll['orderFrame']>):Promise<OrderEntry[]>{
     if(!this.isolatedContextId)throw new Error('ISOLATED_WORLD_REQUIRED');
     const tree=await this.owned('Page.getFrameTree',{}),frames:any[]=[];
@@ -217,15 +218,14 @@ export class RuntimeCDPPolicy {
   async geometry():Promise<RuntimeGeometry>{if(!this.uiObjectId)throw new Error('RUNTIME_NOT_MOUNTED');const result=await this.owned('Runtime.callFunctionOn',{objectId:this.uiObjectId,functionDeclaration:'function(){return this.geometry();}',returnByValue:true});const value=result?.result?.value;if(result?.exceptionDetails||!value||Object.keys(value).length!==7||!['x','y','width','height','viewportWidth','viewportHeight','devicePixelRatio'].every(key=>typeof value[key]==='number'&&Number.isFinite(value[key]))||value.width<0||value.height<0||value.devicePixelRatio<=0)throw new Error('INVALID_OWNED_GEOMETRY');return value;}
   async detachUi(){const objectId=this.uiObjectId;this.uiObjectId=undefined;if(!objectId||!this.sessionId)return;const result=await this.owned('Runtime.callFunctionOn',{objectId,functionDeclaration:'async function(){await this.detach();return true;}',returnByValue:true,awaitPromise:true});if(result?.exceptionDetails||result?.result?.value!==true)throw new Error('RUNTIME_DETACH_FAILED');}
   async detachSession():Promise<void>{
-    await this.detachNavigation();
+    let failure:unknown=this.navigationCleanupFailed?new Error('NAVIGATION_DETACH_FAILED'):undefined;try{await this.detachNavigation(true);}catch(error){failure??=error;}
     const session=this.sessionId,native=this.nativeObjectId,names=[this.nativeBindingName,this.bindingName].filter((name):name is string=>!!name);
     this.nativeObjectId=undefined;this.nativeBindingName=undefined;this.bindingName=undefined;
     // Clear local handles first and always attempt every cleanup even if the document or binding vanished.
     this.generation++;this.sessionId=undefined;this.isolatedContextId=undefined;this.installed=false;this.uiObjectId=undefined;
-    if(!session)return;
-    let failure:unknown;
+    if(!session){if(failure)throw failure;return;}
     for(const name of names){try{await this.transport.send('Runtime.removeBinding',{name},session);}catch(error){failure??=error;}}
-    if(native){try{await this.transport.send('Runtime.callFunctionOn',{objectId:native,functionDeclaration:'function(){this.dispose();}',returnByValue:true},session);}catch(error){failure??=error;}}
+    if(native){try{const result=await this.transport.send('Runtime.callFunctionOn',{objectId:native,functionDeclaration:'function(){this.dispose();return true;}',returnByValue:true},session) as any;if(result?.exceptionDetails||result?.result?.value!==true)throw new Error('NATIVE_DISPOSE_FAILED');}catch(error){failure??=error;}}
     try{await this.transport.send('Runtime.releaseObjectGroup',{objectGroup:this.target.contextNonce},session);}catch(error){failure??=error;}
     try{await this.transport.send('Target.detachFromTarget',{sessionId:session});}catch(error){failure??=error;}
     if(failure)throw failure;

@@ -20,7 +20,10 @@ export class LoopbackCDPTransport implements EventCDPTransport {
       const request=this.pending.get(value.id);if(!request)return;if(value.sessionId!==request.sessionId){this.fail();return;}this.pending.delete(value.id);clearTimeout(request.timer);
       const elapsedMs=Date.now()-request.started;if(elapsedMs>=250)console.log(JSON.stringify({event:'cdp-slow-command',method:request.method,elapsedMs}));
       // Do not include upstream exception/error text which may contain business data.
-      if(value.error||!('result' in value))request.reject(new Error('CDP_COMMAND_REJECTED'));else request.resolve(value.result);
+      if(value.error||!('result' in value)){
+        console.log(JSON.stringify({event:'cdp-command-rejected',method:request.method,...(Number.isSafeInteger(value.error?.code)?{errorCode:value.error.code}:{})}));
+        request.reject(new Error('CDP_COMMAND_REJECTED'));
+      }else request.resolve(value.result);
     }else if(typeof value.method==='string'&&value.params&&typeof value.params==='object'){
       const item:CDPEvent={method:value.method,params:value.params,...(typeof value.sessionId==='string'?{sessionId:value.sessionId}:{})};for(const listener of [...this.events])listener(item);
     }

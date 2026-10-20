@@ -81,6 +81,8 @@ export class CompanionService {
   private nextConnectAt=0;
   private connectionEpoch=0;
   private connectionAbort?:AbortController;
+  private reconnecting?:{id:string;epoch:number;controller:AbortController;promise:Promise<ExternalComposer|undefined>;ready?:ExternalComposer;claimed:boolean;disposed:boolean};
+  private dropReconnect(){const pending=this.reconnecting;this.reconnecting=undefined;if(!pending)return;pending.controller.abort();if(pending.ready&&!pending.claimed&&!pending.disposed){pending.disposed=true;void pending.ready.close().catch(()=>{});}}
   private order:PanelOrderState={identifier:'',status:'idle',error:null,fields:[]};
   private orderGeneration=0;
   private orderRequest?:AbortController;
@@ -104,7 +106,15 @@ export class CompanionService {
     this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;
     this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';
     this.retireInteractions();this.external=undefined;this.nextConnectAt=Date.now()+1000;
-    void composer.close().catch(()=>{});this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.contextChanged();this.publish();
+    if(composer.reconnect&&this.state.targetInstanceId){
+      this.dropReconnect();const controller=new AbortController();this.connectionAbort=controller;
+      const pending:NonNullable<CompanionService['reconnecting']>={id:this.state.targetInstanceId,epoch:this.connectionEpoch,controller,promise:Promise.resolve(undefined),claimed:false,disposed:false};this.reconnecting=pending;
+      pending.promise=composer.reconnect(controller.signal).then(async next=>{
+        if(this.closed||controller.signal.aborted||this.reconnecting!==pending||pending.id!==this.state.targetInstanceId||pending.epoch!==this.connectionEpoch){if(!pending.disposed){pending.disposed=true;await next.close().catch(()=>{});}return undefined;}
+        pending.ready=next;return next;
+      }).catch(()=>undefined);this.nextConnectAt=Date.now();
+    }else void composer.close().catch(()=>{});
+    this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.contextChanged();this.publish();
   }
   private publishEmbedded(){
     this.embeddedDirty=true;if(this.embeddedPublishing)return;this.embeddedPublishing=true;
@@ -241,13 +251,24 @@ export class CompanionService {
   setWindowState(window:WindowState|null){
     if(this.closed)return;
     const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.loginPopover=undefined;this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage(false);this.clearOrder();}
-    if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectionAbort?.abort();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
+    if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectionAbort?.abort();this.dropReconnect();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
   invalidate(){this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
-  private fail(error:unknown,sourceFailure=false){this.clearPendingSend();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
+  /** No selected message page is a normal waiting state; the verified connection keeps observing. */
+  private waitForMessagePage(){
+    const keepFailure=this.state.phase==='failed';
+    this.clearPendingSend();if(!keepFailure)this.attempted=undefined;this.invalidate();this.captured=undefined;
+    this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;
+    this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';
+    this.clearOrder();this.onContextChanged();if(!keepFailure)this.sourceFailure=false;
+    if(this.state.auth==='failed'&&this.sessionError){this.state.phase='failed';this.state.error=this.sessionError;}
+    else if(!keepFailure){this.state.phase='idle';this.state.error=null;}
+    this.publish();
+  }
+  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){
@@ -257,7 +278,7 @@ export class CompanionService {
         if(error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message))this.retireComposer(external);
         throw error;
       }
-      if(result.messageSurface?.active===false)throw new Error('MESSAGE_PAGE_INACTIVE');
+      if(result.messageSurface?.active===false)throw new Error(result.reason??'MESSAGE_PAGE_INACTIVE');
       if(!result.snapshot)throw new Error(result.reason??'COMPOSER_UNAVAILABLE');
       if(!result.writeVerified)throw new Error('WRITE_UNAVAILABLE');
       return{source:'verified-editor',snapshot:result.snapshot,orderEntries:result.orderEntries??[],orderViewport:result.orderViewport??null,messageSurface:result.messageSurface};
@@ -289,12 +310,12 @@ export class CompanionService {
   private async observe(){
     this.setBusy(true);const epoch=this.epoch,id=this.state.targetInstanceId;
     try{const capture=await this.capture();if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;const recovered=this.sourceFailure&&this.state.phase==='failed'&&this.state.composerSource==='unavailable'&&capture.source==='verified-editor';this.adopt(capture);if(recovered){this.sourceFailure=false;this.state.phase='idle';this.state.error=null;this.schedule();}this.publish();}
-    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.clearPendingSend();this.clearOrder();this.onContextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
+    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(error instanceof Error&&error.message==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.clearPendingSend();this.clearOrder();this.onContextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
     finally{this.setBusy(false);}
   }
   /** Background captures must finish before a visible enabled user action acquires the editor. */
   private async waitForObservation(){const id=this.state.targetInstanceId;await this.observation;return !this.closed&&id===this.state.targetInstanceId;}
-  async readDraft(){if(!await this.waitForObservation()||this.busy)return;this.setBusy(true);this.state.phase='reading';this.state.error=null;const epoch=this.epoch,id=this.state.targetInstanceId;this.publish();try{const capture=await this.capture();if(epoch!==this.epoch||id!==this.state.targetInstanceId)throw new Error('DRAFT_CHANGED');this.state.phase='idle';this.adopt(capture);this.sourceFailure=false;this.publish();}catch(error){this.fail(error,true);}finally{this.setBusy(false);}}
+  async readDraft(){if(!await this.waitForObservation()||this.busy)return;this.setBusy(true);if(this.state.phase!=='failed'){this.state.phase='reading';this.state.error=null;}const epoch=this.epoch,id=this.state.targetInstanceId;this.publish();try{const capture=await this.capture();if(epoch!==this.epoch||id!==this.state.targetInstanceId)throw new Error('DRAFT_CHANGED');this.state.phase='idle';this.state.error=null;this.adopt(capture);this.sourceFailure=false;this.publish();}catch(error){this.fail(error,true);}finally{this.setBusy(false);}}
   /** A click belongs to the exact displayed range and conversation, even between observation ticks. */
   async confirmOrderEntry(index:number,expected:OrderEntry):Promise<void>{
     if(!await this.waitForObservation()||this.busy)throw new Error('ORDER_ENTRY_STALE');
@@ -316,11 +337,14 @@ export class CompanionService {
     const id=this.state.targetInstanceId;if(!id){this.fail(new Error('TARGET_REQUIRED'));return;}this.nextConnectAt=Date.now()+5000;
     this.externalConnecting=(async()=>{
       if(!await this.waitForObservation()||this.busy||id!==this.state.targetInstanceId)return;
-      this.connectionAbort?.abort();const connectionAbort=new AbortController();this.connectionAbort=connectionAbort;
+      const warm=this.reconnecting;const connectionAbort=warm&&!warm.controller.signal.aborted?warm.controller:new AbortController();if(!warm)this.connectionAbort?.abort();this.connectionAbort=connectionAbort;
       this.invalidate();const epoch=this.connectionEpoch;this.state.error=null;this.state.phase='reading';this.publish();
       const previous=this.external;this.retireInteractions();this.external=undefined;await previous?.close().catch(()=>{});
       try{
-        const composer=await connectExternalComposer(id,connectionAbort.signal);
+        let composer=warm?await warm.promise:undefined;
+        if(warm&&this.reconnecting===warm){this.reconnecting=undefined;warm.claimed=true;}
+        if(this.closed||connectionAbort.signal.aborted||epoch!==this.connectionEpoch||id!==this.state.targetInstanceId){if(composer&&!warm?.disposed){if(warm)warm.disposed=true;await composer.close();}return;}
+        composer??=await connectExternalComposer(id,connectionAbort.signal);
         if(this.closed||epoch!==this.connectionEpoch||id!==this.state.targetInstanceId){await composer.close();return;}
         this.external=composer;this.stopInteraction=composer.onInteraction?.(event=>this.interaction(event,composer));
         this.stopInvalidation=composer.onInvalidated?.(()=>this.retireComposer(composer));this.syncInteractionOptions();
@@ -332,7 +356,7 @@ export class CompanionService {
         this.state.phase='idle';await this.readDraft();
       }
       catch(error){const failed=this.external;this.retireInteractions();this.external=undefined;await failed?.close().catch(()=>{});if(!this.closed&&epoch===this.connectionEpoch&&id===this.state.targetInstanceId){reportVendorProgress('failed');this.fail(error,true);}}
-    })().finally(()=>{this.externalConnecting=undefined;});
+    })().finally(()=>{if(id===this.state.targetInstanceId)this.nextConnectAt=Date.now()+5000;this.externalConnecting=undefined;});
     return this.externalConnecting;
   }
   async translate(target:PanelTarget,automaticSignature?:string){
@@ -520,5 +544,5 @@ export class CompanionService {
     try{await this.psim.logout();this.state.auth='needs_login';this.state.accountScope='unknown';this.state.phase='idle';this.state.error=null;this.publish();}
     catch(error){this.state.auth='failed';this.fail(error);}
   }
-  async dispose(){this.loginPopover=undefined;this.closed=true;clearTimeout(this.customerResolutionTimer);this.customerResolutionGeneration++;this.connectionAbort?.abort();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
+  async dispose(){this.loginPopover=undefined;this.closed=true;clearTimeout(this.customerResolutionTimer);this.customerResolutionGeneration++;this.connectionAbort?.abort();this.dropReconnect();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
 }

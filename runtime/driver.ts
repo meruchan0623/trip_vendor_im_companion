@@ -22,14 +22,14 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private async drainInteractions(){if(this.invalid)return;this.nativeWake=true;if(this.nativeDraining)return;this.nativeDraining=true;try{while(this.nativeWake&&!this.invalid){this.nativeWake=false;const epoch=this.epoch,events=await this.policy.drainNativeInteractions();this.current(epoch);for(const event of events){if(event?.type!=='draft-changed'&&event?.type!=='replace-shortcut'&&event?.type!=='send-shortcut')throw new Error('NATIVE_EVENTS_UNVERIFIED');if(event.type==='send-shortcut'&&event.sendGeneration!==this.nativeSendGeneration)continue;for(const listener of [...this.nativeListeners])listener(event);}}}catch(error){this.invalidate('NATIVE_EVENT_'+reasonOf(error));}finally{this.nativeDraining=false;}}
   private companionAction?: (action:string,args:unknown[])=>Promise<void>;
   private bindingName=`tsim_${randomBytes(16).toString('hex')}`;
-  private mounted=false;private cleanup?:Promise<void>;
+  private mounted=false;private cleanup?:Promise<void>;private closing?:Promise<void>;private transportClosing?:Promise<void>;
   get parentCaptureDiagnostics(){return this.captures.map(item=>({...item}));}
   private constructor(private transport:EventCDPTransport,readonly target:RuntimeTarget,private bundle:string,sha256:string){
     this.policy=new RuntimeCDPPolicy(transport,target,sha256);this.stopEvent=transport.onEvent(event=>this.event(event));this.stopDisconnect=transport.onDisconnect(()=>this.invalidate('TRANSPORT_DISCONNECTED'));
   }
   static async discover(transport:EventCDPTransport,fingerprint:BuildFingerprint,bundle:string,sha256:string,timeoutMs=60000):Promise<LiveRuntimeDriver>{
     assertBuildFingerprint(fingerprint);const deadline=Date.now()+timeoutMs;let selected:{targetId:string;url:string}|undefined;
-    while(Date.now()<deadline){const matches=approvedImTargets(await transport.send('Target.getTargets',{}));if(matches.length>1){const observations=[];for(const target of matches)observations.push(await observeImTarget(transport,target,fingerprint,randomUUID()));if(!sameTargetInventory(matches,approvedImTargets(await transport.send('Target.getTargets',{}))))throw new Error('RUNTIME_TARGET_CHANGED');selected=chooseActiveImTarget(observations);break;}if(matches.length===1){selected=matches[0];break;}await pause(250);}
+    while(Date.now()<deadline){const matches=approvedImTargets(await transport.send('Target.getTargets',{}));if(matches.length>1){const observations=[];for(const target of matches)observations.push(await observeImTarget(transport,target,fingerprint,randomUUID()));if(!sameTargetInventory(matches,approvedImTargets(await transport.send('Target.getTargets',{}))))throw new Error('RUNTIME_TARGET_CHANGED');try{selected=chooseActiveImTarget(observations);break;}catch(error){if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;}}if(matches.length===1){selected=matches[0];break;}await pause(250);}
     if(!selected)throw new Error('IM_TARGET_NOT_READY');
     let session:string|undefined;
     try{const result=await transport.send('Target.attachToTarget',{targetId:selected.targetId,flatten:true}) as {sessionId?:unknown};if(typeof result?.sessionId!=='string'||!result.sessionId)throw new Error('INVALID_SESSION');session=result.sessionId;
@@ -92,7 +92,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       await this.policy.installOwnedArtifact(this.bundle);this.current(epoch);
       await this.policy.registerWorkbenchBinding(this.bindingName);this.current(epoch);this.companionAction=onAction;
       for(;;){
-        await this.waitUntilVisible(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
+        await this.waitUntilVisible(epoch);if(!await this.verifyActiveTarget(true))continue;this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
         try{await this.policy.mountUi({leaseId:this.target.contextNonce,aresVersion:VERIFIED_RUNTIME_BUILD.aresVersion,htmlSha256:this.target.fingerprint.htmlSha256,rendererSha256:this.target.fingerprint.rendererSha256,keyboardBoundary:'isolated-world-shadow'},{bindingName:this.bindingName,state});break;}
         catch(error){this.current(epoch);if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;}
       }
@@ -101,8 +101,8 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     // The service serializes publications. UI heartbeat/update already perform boundary() atomically.
     let detached=false,lastPublished=JSON.stringify(state);
     return{
-      publish:async(next:PanelState)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);const signature=JSON.stringify(next);if(signature===lastPublished)return;await this.verifyActiveTarget();this.current(epoch);await this.policy.publishWorkbench(next);this.current(epoch);lastPublished=signature;},
-      heartbeat:async(sequence:number)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.heartbeat(sequence);this.current(epoch);},
+      publish:async(next:PanelState)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);const signature=JSON.stringify(next);if(signature===lastPublished)return;if(!await this.verifyActiveTarget(true))return;this.current(epoch);await this.policy.publishWorkbench(next);this.current(epoch);lastPublished=signature;},
+      heartbeat:async(sequence:number)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);await this.verifyActiveTarget(true);this.current(epoch);await this.policy.heartbeat(sequence);this.current(epoch);},
       detach:async()=>{if(detached)return;detached=true;await this.cleanupUi();},
     };
   }
@@ -133,27 +133,36 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     return{heartbeat:async sequence=>{this.current(epoch);await this.policy.verifyOwnedFrame();this.current(epoch);await this.policy.heartbeat(sequence);this.current(epoch);},detach:async()=>{await this.cleanupUi();await this.policy.detachSession();}};
   }
   private async cleanupUi(){this.companionAction=undefined;try{await this.policy.detachUi();}finally{this.mounted=false;}}
-  async disconnect(){
+  /** Transfer only after every owned page handle and session has been released successfully. */
+  async releaseForReconnect(){
     if(this.cleanup)return this.cleanup;
     let resolve!:()=>void,reject!:(error:unknown)=>void;
     // Reserve before notifying invalidators: a host callback may synchronously close the same port.
     this.cleanup=new Promise<void>((done,fail)=>{resolve=done;reject=fail;});
     this.invalidate();this.stopEvent();this.stopDisconnect();
-    void (async()=>{try{await this.cleanupUi();}finally{try{await this.policy.detachSession();}finally{await this.transport.disconnect();}}})().then(resolve,reject);
+    void (async()=>{let failure:unknown;try{await this.cleanupUi();}catch(error){failure=error;}try{await this.policy.detachSession();}catch(error){failure??=error;}if(failure){await this.disconnectTransport();throw failure;}})().then(resolve,reject);
     return this.cleanup;
   }
+  private disconnectTransport(){return this.transportClosing??=(async()=>{await this.transport.disconnect();})();}
+  async disconnect(){if(this.closing)return this.closing;let resolve!:()=>void,reject!:(error:unknown)=>void;this.closing=new Promise<void>((done,fail)=>{resolve=done;reject=fail;});void(async()=>{try{await this.releaseForReconnect();}finally{await this.disconnectTransport();}})().then(resolve,reject);return this.closing;}
   async geometry(){this.current(this.epoch);return this.policy.geometry();}
-  private async verifyActiveTarget(){
+  private async verifyActiveTarget(allowInactive=false):Promise<boolean>{
     const epoch=this.epoch;this.current(epoch);
     try{
       const candidates=approvedImTargets(await this.transport.send('Target.getTargets',{}));this.current(epoch);
       if(!candidates.some(target=>target.targetId===this.target.targetId))throw new Error('RUNTIME_TARGET_CHANGED');
-      if(candidates.length===1)return;
+      if(candidates.length===1)return true;
       const observations=[];for(const target of candidates){observations.push(await observeImTarget(this.transport,target,this.target.fingerprint,this.target.contextNonce));this.current(epoch);}
       const currentInventory=approvedImTargets(await this.transport.send('Target.getTargets',{}));this.current(epoch);
       if(!sameTargetInventory(candidates,currentInventory))throw new Error('RUNTIME_TARGET_CHANGED');
       const selected=chooseActiveImTarget(observations);if(selected.targetId!==this.target.targetId||selected.frameId!==this.target.frameId)throw new Error('RUNTIME_TARGET_CHANGED');
-    }catch(error){this.invalidate('ACTIVE_TARGET_'+reasonOf(error));throw error;}
+      return true;
+    }catch(error){
+      // All verified BrowserViews can be hidden while the official window is in the background.
+      // Preserve only owned leases in that state; business reads/writes still require an active target.
+      if(error instanceof Error&&error.message==='IM_TARGET_INACTIVE'){if(allowInactive)return false;throw new Error('MESSAGE_PAGE_INACTIVE');}
+      this.invalidate('ACTIVE_TARGET_'+reasonOf(error));throw error;
+    }
   }
   /** External tools use only the verified editor port. This does not mount page UI or an iframe. */
   async externalComposer(source:string,sha256:string){
@@ -166,7 +175,9 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       setInteractionOptions:async(options:NativeInteractionOptions)=>{this.current(epoch);const generation=options.sendGeneration??0;if(!Number.isSafeInteger(generation)||generation<0)throw new Error('INVALID_INTERACTION_OPTIONS');if(generation<this.nativeSendGeneration)return;this.nativeSendGeneration=generation;await this.policy.setNativeInteractionOptions(options);this.current(epoch);},
       renew:async()=>{this.current(epoch);await this.policy.renewNative();this.current(epoch);},
       read:async(authGeneration:number):Promise<NativePoll>=>{
-        this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
+        this.current(epoch);const active=await this.verifyActiveTarget(true);this.current(epoch);
+        if(!active){await this.policy.renewNative();this.current(epoch);return observed({writeVerified:false,reason:'MESSAGE_PAGE_INACTIVE',messageSurface:{active:false,composerRect:null,toolbarRect:null},orderEntries:[]});}
+        await this.policy.verifyExactDocument();this.current(epoch);
         // A foreground non-message page still calls read(), so renew before the nav gate without reading business text.
         await this.policy.renewNative();this.current(epoch);
         const inactive=(reason='MESSAGE_PAGE_INACTIVE'):NativePoll=>observed({writeVerified:false,reason,messageSurface:{active:false,composerRect:null,toolbarRect:null},orderEntries:[]});
