@@ -3,7 +3,7 @@ import {customerLanguageEvidence} from './language';
 import type {OperatorSessionGrant,OrderWindowIntent,PanelState} from '../../src/shared/workbench';
 import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../../src/shared/customer-language';
 import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
-import {createOperatorOverlay,operatorFrameURL,OPERATOR_FRAME_ID,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
+import {createOperatorOverlay,OPERATOR_FRAME_ID,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
 import {createOutboundPanel,PANEL_HOST_ID,type OutboundPanel,type PanelBridge} from './outbound-panel';
 export {TSIM_OPERATOR_ORIGIN};
 export const CUSTOMER_SCAN_DEBOUNCE_MS=300;
@@ -32,7 +32,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     overlay.open({identifier,identifierType});
   }}):undefined;
   let renderedBound:boolean|undefined;
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(!currentBound||state.auth!=='ready')overlay.close();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready')overlay.reset();else if(!currentBound)overlay.close();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
@@ -83,7 +83,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','src']});syncOrder();}
   function update(next:PanelState){
     if(disposed)return;const previousLanguage=JSON.stringify(state?.followCustomer);state=next;
-    // Close the order page on conversation change.
+    // Hide the order page on conversation change; the warm TSim page is reused only after a fresh authorization.
     if(conversation!==undefined&&conversation!==next.conversationKey)overlay.close();
     orderObservation?.setConversationKey(next.conversationKey);
     if(conversation!==next.conversationKey){conversation=next.conversationKey;originalsDeadline=Date.now()+CUSTOMER_ORIGINALS_LOAD_WINDOW_MS;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);customerTimer=undefined;scheduleCustomer();}
@@ -111,7 +111,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
         if(panel.host.isConnected&&document.getElementById(PANEL_HOST_ID)!==panel.host)throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
       }
       const own=document.getElementById(PANEL_HOST_ID),frame=document.getElementById(OPERATOR_FRAME_ID);
-      if(disposed||panel&&own!==null&&own!==panel.host||frame&&frame!==overlay.frame||overlay.frame&&(!overlay.frame.isConnected||frame!==overlay.frame||document.querySelectorAll(`[id="${OPERATOR_FRAME_ID}"]`).length!==1||!overlay.active||overlay.frame.src!==operatorFrameURL(options.origin??TSIM_OPERATOR_ORIGIN,overlay.active)))throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
+      if(disposed||panel&&own!==null&&own!==panel.host||frame&&frame!==overlay.frame||overlay.frame&&(!overlay.frame.isConnected||frame!==overlay.frame||document.querySelectorAll(`[id="${OPERATOR_FRAME_ID}"]`).length!==1||!overlay.frameURL||overlay.frame.src!==overlay.frameURL))throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},

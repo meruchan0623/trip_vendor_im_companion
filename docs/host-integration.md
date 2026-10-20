@@ -24,7 +24,9 @@ macOS 默认使用独立持久会话，实现位于 `owned-session.ts`、`secure
 
 查询页加载后向父页面发送 `TSIM_OPERATOR_NEEDS_SESSION`（只含订单标识和 requestId）。页面经 `operatorSession` 动作把 `OrderWindowIntent` 交给宿主；宿主核对消息页在前台、当前客户会话与账号认证代次后，返回已核验的 agent 令牌（mac 为助手自有会话，Windows 为绑定浏览器配置中的令牌）。令牌只经 CDP 送入自有隔离环境，再以固定 TSim origin 投递给本次 requestId 的 iframe，不进入面板状态和日志。拒绝时页面发送 `TSIM_OPERATOR_SESSION_UNAVAILABLE`，查询页回退到自身登录页。
 
-TSim_CS 查询页只接受直接父页面（`file://` 不透明 origin）对同一 requestId 的令牌，经 `/agent/profile` 核验后保存为查询页登录态；同一 agent 只更新令牌，不同账号先结束旧会话。令牌以明文保存在商家客户端为该 iframe 分配的 localStorage 中。助手未登录时点击订单先打开助手登录；换客户、账号失效或退出时关闭查询页。mac 退出助手账号会撤销服务端会话，查询页中的副本随之失效。
+TSim_CS 查询页只接受直接父页面（`file://` 不透明 origin）对同一 requestId 的令牌，经 `/agent/profile` 核验后保存为查询页登录态；同一 agent 只更新令牌，不同账号先结束旧会话。令牌以明文保存在商家客户端为该 iframe 分配的 localStorage 中。助手未登录时点击订单先打开助手登录；换客户或关闭订单时只隐藏查询页，助手账号未就绪（失效、退出、重连）时销毁查询页。mac 退出助手账号会撤销服务端会话，查询页中的副本随之失效。
+
+查询页与客服页面共用商家客户端的渲染进程（已在 macOS 客户端核实其关闭站点隔离、HTTP/2 与 GPU），每次重新加载 TSim 页面都要数秒，因此两端都在首次查询后保留该 iframe。宿主对 `operatorSession` 的每种结果都必须应答页面（令牌或 `TSIM_OPERATOR_SESSION_UNAVAILABLE`），否则查询页会空等自身超时。之后的查询先照常经 `operatorSession` 取宿主授权：返回的令牌与该 iframe 接管的令牌相同，才向它发送 `TSIM_OPERATOR_SET_IDENTIFIER`（v2，含新 requestId）和 `TSIM_OPERATOR_REQUEST_BOUNDS` 切换订单，并在页面为新标识上报边界或结果前保持 iframe 不可见；令牌不同或被拒、页面回退登录、自行重新加载或 4 秒内未响应时，销毁并按上文流程重建。
 
 
 Windows bootstrap 在原主入口前启用本机调试监听、启动自有助手，随后继续运行原入口。助手根据实际安装目录加载受保护清单，核验资源和当前用户进程，再建立唯一回环连接。
