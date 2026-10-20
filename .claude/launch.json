@@ -1,6 +1,0 @@
-{
-  "version": "0.0.1",
-  "configurations": [
-    { "name": "harness", "runtimeExecutable": "npx", "runtimeArgs": ["--yes", "http-server", "work/harness", "-p", "5317", "-c-1", "-s"], "port": 5317 }
-  ]
-}

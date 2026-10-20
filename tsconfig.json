@@ -6,6 +6,6 @@
     "allowImportingTsExtensions": true, "noEmit": true,
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "electron", "tests", "runtime", "host/owned-service.ts", "host/auth-server.ts", "host/auth-worker.ts", "vite.config.ts"]
+  "include": ["src", "electron", "runtime", "host/owned-service.ts", "host/auth-server.ts", "host/auth-worker.ts", "vite.config.ts"]
 }
 

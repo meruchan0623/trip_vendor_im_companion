@@ -9,9 +9,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "npm run typecheck && vite build && node scripts/build-electron.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
     "start": "electron .",
-    "smoke:shell": "electron . --smoke-test",
     "package:win": "npm run build:native && npm run build && electron-builder --win portable --x64",
     "build:browser-bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File native/browser-bridge/build.ps1",
     "build:native": "powershell -NoProfile -ExecutionPolicy Bypass -File native/windows/build.ps1",
@@ -34,7 +32,6 @@
     "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "@types/jsdom": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -42,10 +39,8 @@
     "electron": "44.7.2",
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
-    "jsdom": "^29.1.1",
     "typescript": "7.0.2",
-    "vite": "8.3.4",
-    "vitest": "5.0.4"
+    "vite": "8.3.4"
   },
   "build": {
     "appId": "tech.tsim.travel-merchant-companion",

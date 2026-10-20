@@ -6,7 +6,7 @@ import {resolve, dirname} from 'node:path';
 // Explicit generated outputs only. Preserve source, dependencies, official inputs,
 // installed applications, recovery backups, and acceptance evidence.
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
-for(const relative of ['release','dist','dist-electron','dist-runtime','dist-embedded','dist-lightweight','host/dist','native/macos/bin','native/windows/bin','native/windows/obj','native/resident/bin','native/resident/obj','native/browser-bridge/bin','native/browser-bridge/obj','node_modules/.vite','node_modules/.vite-temp','node_modules/.vitest-cache','work/patch-tests','work/mac-pkg-build','work/mac-inject','work/mac-migration','work/mac-arm64/electron-arm64-verified.zip']){
+for(const relative of ['release','dist','dist-electron','dist-runtime','dist-embedded','dist-lightweight','host/dist','native/macos/bin','native/windows/bin','native/windows/obj','native/resident/bin','native/resident/obj','native/browser-bridge/bin','native/browser-bridge/obj','node_modules/.vite','node_modules/.vite-temp','work/mac-pkg-build','work/mac-inject','work/mac-migration','work/mac-arm64/electron-arm64-verified.zip']){
   const path=resolve(root,relative);
   console.log(`Remove generated build output: ${path}`);
   await rm(path,{recursive:true,force:true});

@@ -1,5 +1,5 @@
 {
   "extends": "../tsconfig.json",
-  "include": ["runtime.ts", "runtime.test.ts", "vite.config.ts", "../src/shared/types.ts"],
+  "include": ["runtime.ts", "vite.config.ts", "../src/shared/types.ts"],
   "exclude": ["tsim"]
 }
