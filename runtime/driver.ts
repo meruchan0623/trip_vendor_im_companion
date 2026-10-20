@@ -7,6 +7,7 @@ import {approvedDocumentURL,assertBuildFingerprint,VERIFIED_RUNTIME_BUILD,type B
 import type {RuntimeTarget,RuntimeDriver,OwnedRuntimeHandle} from './attachment';
 import type {CDPEvent,EventCDPTransport} from './transport';
 import {RuntimeCDPPolicy,type ParentCapture} from './cdp-policy';
+import {RUNTIME_PLATFORM} from './build-manifest';
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Live diagnostics: reason codes only, never page text or payloads. */
 const diag=(event:string,fields:Record<string,unknown>)=>{try{console.log(JSON.stringify({event,...fields}));}catch{/* diagnostics are best effort */}};
@@ -167,10 +168,13 @@ export class LiveRuntimeDriver implements RuntimeDriver {
         const inactive=(reason='MESSAGE_PAGE_INACTIVE'):NativePoll=>observed({writeVerified:false,reason,messageSurface:{active:false,composerRect:null,toolbarRect:null},orderEntries:[]});
         let nav;try{nav=await this.policy.readMessageNavigation();}catch(error){this.current(epoch);return inactive(reasonOf(error));}this.current(epoch);if(!nav.active)return inactive();
         const result=await this.policy.pollNative(authGeneration) as NativePoll;this.current(epoch);if(!result.messageSurface?.active)return inactive(result.reason??'COMPOSER_GEOMETRY_UNAVAILABLE');
+        // Read the cross-origin order frame in its own isolated world. Parent DOM access
+        // cannot read this frame on Windows; keep failures local to order discovery.
+        const orderEntries=RUNTIME_PLATFORM==='win32'&&result.orderFrame?await this.policy.readRightOrderEntries(result.orderFrame).catch(()=>[]):[];this.current(epoch);
         const after=await this.policy.pollNative(authGeneration) as NativePoll;this.current(epoch);
         if(!after.messageSurface?.active||!result.snapshot||!after.snapshot||JSON.stringify(result.snapshot)!==JSON.stringify(after.snapshot))return inactive();
         const navAfter=await this.policy.readMessageNavigation().catch(()=>null);this.current(epoch);if(!navAfter?.active||navAfter.dpr!==nav.dpr||navAfter.width!==nav.width||navAfter.height!==nav.height)return inactive();
-        return observed({...after,orderFrame:undefined,orderEntries:[]});
+        return observed({...after,orderFrame:undefined,orderEntries:JSON.stringify(result.orderFrame)===JSON.stringify(after.orderFrame)?orderEntries:[]});
       },
       replace:async(expected:VerifiedComposerSnapshot,text:string,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>)=>{this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);const nav=await this.policy.readMessageNavigation();this.current(epoch);if(!nav.active)throw new Error('MESSAGE_PAGE_INACTIVE');const current=await this.policy.pollNative(expected.authGeneration) as NativePoll;this.current(epoch);if(!current.messageSurface?.active)throw new Error('MESSAGE_PAGE_INACTIVE');const navAfter=await this.policy.readMessageNavigation();this.current(epoch);if(!navAfter.active)throw new Error('MESSAGE_PAGE_INACTIVE');const finalAuthorize=await authorize();this.current(epoch);await this.verifyActiveTarget();this.current(epoch);const finalNav=await this.policy.readMessageNavigation();this.current(epoch);if(!finalNav.active)throw new Error('MESSAGE_PAGE_INACTIVE');if(typeof finalAuthorize==='function')finalAuthorize();await this.policy.replaceNative(expected,text);this.current(epoch);},
       send:async(expected:VerifiedComposerSnapshot,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>)=>{this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);const nav=await this.policy.readMessageNavigation();this.current(epoch);if(!nav.active)throw new Error('MESSAGE_PAGE_INACTIVE');const current=await this.policy.pollNative(expected.authGeneration) as NativePoll;this.current(epoch);if(!current.messageSurface?.active)throw new Error('MESSAGE_PAGE_INACTIVE');const navAfter=await this.policy.readMessageNavigation();this.current(epoch);if(!navAfter.active)throw new Error('MESSAGE_PAGE_INACTIVE');const finalAuthorize=await authorize();this.current(epoch);await this.verifyActiveTarget();this.current(epoch);const finalNav=await this.policy.readMessageNavigation();this.current(epoch);if(!finalNav.active)throw new Error('MESSAGE_PAGE_INACTIVE');if(typeof finalAuthorize==='function')finalAuthorize();await this.policy.sendNative(expected);this.current(epoch);},

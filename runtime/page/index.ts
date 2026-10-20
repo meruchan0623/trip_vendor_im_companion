@@ -32,7 +32,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     overlay.open({identifier,identifierType});
   }}):undefined;
   let renderedBound:boolean|undefined;
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready')overlay.reset();else if(!currentBound)overlay.close();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready')overlay.reset();else if(!currentBound)overlay.close();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});if(state.detectedOrder)panel?.setOrder(currentBound?state.detectedOrder.identifier??undefined:undefined);};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
@@ -77,7 +77,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   };
   // A throttle guarantees progress while scrolling/rendering continuously.
   const scheduleCustomer=()=>{if(customerTimer===undefined&&!disposed)customerTimer=view.setTimeout(scanCustomer,CUSTOMER_SCAN_DEBOUNCE_MS);};
-  const orderObservation=panel?startOrderObservation(document,order=>{if(!disposed&&document.visibilityState!=='hidden')panel.setOrder(order);},state?.conversationKey??null):undefined;
+  const orderObservation=panel&&!state?.detectedOrder?startOrderObservation(document,order=>{if(!disposed&&document.visibilityState!=='hidden')panel.setOrder(order);},state?.conversationKey??null):undefined;
   let orderTimer:number|undefined;const syncOrder=()=>{orderTimer=undefined;if(!disposed&&document.visibilityState!=='hidden')orderObservation?.refresh();};
   const orderObserver=new view.MutationObserver(mutations=>{if(disposed||document.visibilityState==='hidden'||mutations.every(m=>{const target=m.target.nodeType===1?m.target as Element:m.target.parentElement;const changed=[...m.addedNodes,...m.removedNodes];return isOwned(target)||changed.length>0&&changed.every(n=>n.nodeType===1&&isOwned(n as Element));}))return;renderCurrent(true);if(orderTimer===undefined)orderTimer=view.setTimeout(syncOrder,150);scheduleCustomer();});
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','src']});syncOrder();}

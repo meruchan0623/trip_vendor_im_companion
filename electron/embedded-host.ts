@@ -1,3 +1,4 @@
+import {RUNTIME_PLATFORM} from '../runtime/build-manifest';
 import {isLoginPopoverId} from '../src/shared/owned-login';
 import { isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTarget, type OutboundMode, type PanelState, type PanelTarget } from '../src/shared/workbench';
 import {isCustomerLanguageReport,type CustomerLanguageResolution} from '../src/shared/customer-language';
@@ -7,7 +8,7 @@ import type { OperatorSessionGrant } from '../src/shared/workbench';
 /** The only state sent to the vendor renderer. Authentication credentials stay in the host. */
 export function embeddedPanelState(state:StandaloneState,conversationKey:string|null=null):PanelState {
   const status:PanelState['status']=state.auth==='needs_login'?'needs_login':state.auth==='failed'?'failed':state.auth==='connecting'?'unavailable':!state.attached||state.composerSource!=='verified-editor'?'unavailable':state.phase==='ready'?'ready':state.phase==='translating'?'translating':state.phase==='stale'?'stale':state.phase==='failed'?'failed':'idle';
-  return {auth:state.auth,sessionMode:state.sessionMode,conversationKey:state.messageSurface?.active?conversationKey:null,draft:state.draft?{text:state.draft.text,composing:!state.draft.canReplace}:null,enabled:state.autoTranslate!==false,target:state.language,fallbackTarget:state.fallbackTarget??'en',followCustomer:{lang:state.customerLanguage??'unknown',following:state.followCustomerLanguage!==false,manualEnabled:false,resolution:state.customerLanguageResolution},status,preview:state.preview,error:state.error,busy:['reading','replacing','translating'].includes(state.phase),translationPaused:state.translationPaused===true,outboundMode:state.outboundMode??'send',sendPending:state.sendPending===true};
+  return {...(RUNTIME_PLATFORM==='win32'?{detectedOrder:{identifier:state.messageSurface?.active&&conversationKey&&state.orderEntries.length===1?state.orderEntries[0].identifier:null}}:{}),auth:state.auth,sessionMode:state.sessionMode,conversationKey:state.messageSurface?.active?conversationKey:null,draft:state.draft?{text:state.draft.text,composing:!state.draft.canReplace}:null,enabled:state.autoTranslate!==false,target:state.language,fallbackTarget:state.fallbackTarget??'en',followCustomer:{lang:state.customerLanguage??'unknown',following:state.followCustomerLanguage!==false,manualEnabled:false,resolution:state.customerLanguageResolution},status,preview:state.preview,error:state.error,busy:['reading','replacing','translating'].includes(state.phase),translationPaused:state.translationPaused===true,outboundMode:state.outboundMode??'send',sendPending:state.sendPending===true};
 }
 
 export interface EmbeddedActions {

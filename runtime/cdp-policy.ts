@@ -163,30 +163,59 @@ export class RuntimeCDPPolicy {
     }catch(error){await this.detachNavigation();if(error instanceof Error&&error.message==='CDP_COMMAND_REJECTED')throw new Error(`MESSAGE_NAV_${stage}_REJECTED`);throw error;}
   }
   private async detachNavigation(strict=false){const nav=this.navigation;this.navigation=undefined;if(nav)try{await this.transport.send('Target.detachFromTarget',{sessionId:nav.session});}catch(error){this.navigationCleanupFailed=true;if(strict)throw error;}}
+  private lastOrderRead='';
+  private reportOrderRead(code:string,count:number){const key=code+':'+count;if(key===this.lastOrderRead)return;this.lastOrderRead=key;console.log(JSON.stringify({event:'order-discovery',code,count}));}
   async readRightOrderEntries(geometry:NonNullable<NativePoll['orderFrame']>):Promise<OrderEntry[]>{
+    try{const entries=await this.inspectRightOrderEntries(geometry);this.reportOrderRead(entries.length?'ORDER_READY':'ORDER_UNAVAILABLE',entries.length);return entries;}
+    catch(error){this.reportOrderRead('ORDER_INSPECTION_FAILED',0);throw error;}
+  }
+  private async inspectRightOrderEntries(geometry:NonNullable<NativePoll['orderFrame']>):Promise<OrderEntry[]>{
     if(!this.isolatedContextId)throw new Error('ISOLATED_WORLD_REQUIRED');
-    const tree=await this.owned('Page.getFrameTree',{}),frames:any[]=[];
-    const walk=(node:any)=>{if(!node?.frame)return;frames.push(node.frame);for(const child of node.childFrames??[])walk(child);};walk(tree?.frameTree);
-    const remote=await this.owned('Runtime.evaluate',{expression:'document.querySelector(".customer_info:not(.close) iframe.customer_order-detail")',contextId:this.isolatedContextId,returnByValue:false,objectGroup:this.target.contextNonce});
-    if(remote?.exceptionDetails||typeof remote?.result?.objectId!=='string')return[];
-    let node:any;
-    try{node=(await this.owned('DOM.describeNode',{objectId:remote.result.objectId,depth:0})).node;}finally{await this.owned('Runtime.releaseObject',{objectId:remote.result.objectId});}
-    const match=frames.filter(frame=>frame.id===node?.frameId&&frame.parentId===this.target.frameId&&approvedOrderFrameURL(frame.url));if(match.length!==1||!Array.isArray(node?.attributes))return[];
-    const sourceAt=node.attributes.indexOf('src');if(sourceAt<0||!approvedOrderFrameURL(node.attributes[sourceAt+1]))return[];
-    const source=new URL(node.attributes[sourceAt+1]),actual=new URL(match[0].url);
-    // The verified vendor redirect omits serviceType; the conversation IDs and status must agree.
-    for(const key of ['groupid','sessionid','status'])if(!source.searchParams.get(key)||source.searchParams.get(key)!==actual.searchParams.get(key))return[];
-    const world=await this.owned('Page.createIsolatedWorld',{frameId:match[0].id,worldName:`tsim-order-${this.target.contextNonce}`,grantUniveralAccess:false});
-    if(!Number.isSafeInteger(world?.executionContextId)||world.executionContextId<=0)return[];
-    const read=await this.owned('Runtime.evaluate',{expression:`(${inspectRightOrderDocument.toString()})(document)`,contextId:world.executionContextId,returnByValue:true,awaitPromise:false});
-    const result=read?.result?.value;if(read?.exceptionDetails||!result||!Array.isArray(result.entries)||result.entries.length>1||!Number.isFinite(result.width)||!Number.isFinite(result.height)||result.width<=0||result.height<=0||Math.abs(result.width-geometry.clientWidth)>1||Math.abs(result.height-geometry.clientHeight)>1)return[];
-    const after=await this.owned('Page.getFrameTree',{}),afterFrames:any[]=[];const check=(item:any)=>{if(!item?.frame)return;afterFrames.push(item.frame);for(const child of item.childFrames??[])check(child);};check(after?.frameTree);
-    if(!afterFrames.some(frame=>frame.id===match[0].id&&frame.parentId===this.target.frameId&&frame.url===match[0].url))return[];
-    return result.entries.flatMap((entry:any)=>{
+    const session=this.sessionId,generation=this.generation;
+    const current=()=>{if(!session||session!==this.sessionId||generation!==this.generation)throw new Error('SESSION_CHANGED');};
+    const frames=(tree:any):any[]=>{const result:any[]=[];const walk=(node:any)=>{if(!node?.frame)return;result.push(node.frame);for(const child of node.childFrames??[])walk(child);};walk(tree?.frameTree);return result;};
+    const readNode=async()=>{
+      const remote=await this.owned('Runtime.evaluate',{expression:'document.querySelector(".customer_info:not(.close) iframe.customer_order-detail")',contextId:this.isolatedContextId,returnByValue:false,objectGroup:this.target.contextNonce});
+      if(remote?.exceptionDetails||typeof remote?.result?.objectId!=='string')return;
+      try{return(await this.owned('DOM.describeNode',{objectId:remote.result.objectId,depth:0})).node;}finally{await this.owned('Runtime.releaseObject',{objectId:remote.result.objectId});}
+    };
+    const sourceOf=(node:any)=>{if(!Array.isArray(node?.attributes))return;const at=node.attributes.indexOf('src');return at>=0&&approvedOrderFrameURL(node.attributes[at+1])?node.attributes[at+1] as string:undefined;};
+    const node=await readNode(),sourceURL=sourceOf(node);if(!sourceURL||typeof node?.frameId!=='string')return[];
+    let orderSession:string|undefined;
+    try{
+      const tree=await this.owned('Page.getFrameTree',{});
+      let matches=frames(tree).filter(frame=>frame.id===node.frameId&&frame.parentId===this.target.frameId&&approvedOrderFrameURL(frame.url));
+      if(matches.length===0){
+        // site-per-process moves the order iframe out of the parent's frame tree.
+        // Select by the actual DOM frame ID, never by URL or target-list order.
+        const targets=await this.transport.send('Target.getTargets',{}) as any;current();
+        const candidates=targets?.targetInfos?.filter((target:any)=>target.targetId===node.frameId&&target.type==='iframe'&&approvedOrderFrameURL(target.url));
+        if(!Array.isArray(candidates)||candidates.length!==1)return[];
+        const attached=await this.transport.send('Target.attachToTarget',{targetId:node.frameId,flatten:true}) as any;
+        if(typeof attached?.sessionId!=='string'||!attached.sessionId)throw new Error('INVALID_SESSION');orderSession=attached.sessionId;current();
+        const childTree=await this.transport.send('Page.getFrameTree',{},orderSession);current();
+        matches=frames(childTree).filter(frame=>frame.id===node.frameId&&frame.parentId===this.target.frameId&&approvedOrderFrameURL(frame.url));
+      }
+      if(matches.length!==1)return[];
+      const frame=matches[0],source=new URL(sourceURL),actual=new URL(frame.url);
+      for(const key of ['groupid','sessionid','status'])if(!source.searchParams.get(key)||source.searchParams.get(key)!==actual.searchParams.get(key))return[];
+      // Redirects may lowercase or omit serviceType; a present value must agree.
+      const service=actual.searchParams.get('servicetype')??actual.searchParams.get('serviceType');
+      if(service!==null&&service!==(source.searchParams.get('serviceType')??''))return[];
+      const send=async(method:string,params:Record<string,unknown>):Promise<any>=>{const result=orderSession?await this.transport.send(method,params,orderSession):await this.owned(method,params);current();return result;};
+      const world=await send('Page.createIsolatedWorld',{frameId:frame.id,worldName:`tsim-order-${this.target.contextNonce}`,grantUniveralAccess:false});
+      if(!Number.isSafeInteger(world?.executionContextId)||world.executionContextId<=0)return[];
+      const read=await send('Runtime.evaluate',{expression:`(${inspectRightOrderDocument.toString()})(document)`,contextId:world.executionContextId,returnByValue:true,awaitPromise:false});
+      const result=read?.result?.value;if(read?.exceptionDetails||!result||!Array.isArray(result.entries)||result.entries.length>1||!Number.isFinite(result.width)||!Number.isFinite(result.height)||result.width<=0||result.height<=0||Math.abs(result.width-geometry.clientWidth)>1||Math.abs(result.height-geometry.clientHeight)>1)return[];
+      const after=await send('Page.getFrameTree',{});
+      if(!frames(after).some(next=>next.id===frame.id&&next.parentId===this.target.frameId&&next.url===frame.url&&next.loaderId===frame.loaderId))return[];
+      const afterNode=await readNode();if(afterNode?.frameId!==node.frameId||sourceOf(afterNode)!==sourceURL)return[];
+      return result.entries.flatMap((entry:any)=>{
       if(entry?.identifierType!=='order_number'||typeof entry.identifier!=='string'||!/^[A-Za-z0-9_-]{4,80}$/.test(entry.identifier)||!entry.rect||!['x','y','width','height'].every(key=>Number.isFinite(entry.rect[key])))return[];
       const r=entry.rect;if(r.x<0||r.y<0||r.width<=0||r.height<=0||r.x+r.width>result.width||r.y+r.height>result.height)return[];
       return[{identifier:entry.identifier,identifierType:'order_number' as const,rect:{x:geometry.rect.x+geometry.clientLeft+r.x,y:geometry.rect.y+geometry.clientTop+r.y,width:r.width,height:r.height}}];
-    });
+      });
+    }finally{if(orderSession)await this.transport.send('Target.detachFromTarget',{sessionId:orderSession});}
   }
   async renewNative(){if(!this.nativeObjectId)throw new Error('NATIVE_NOT_READY');const result=await this.owned('Runtime.callFunctionOn',{objectId:this.nativeObjectId,functionDeclaration:'function(){this.heartbeat();return true;}',returnByValue:true});if(result?.exceptionDetails||result?.result?.value!==true)throw new Error('NATIVE_LEASE_ENDED');}
   async replaceNative(expected:unknown,text:string){if(!this.nativeObjectId)throw new Error('NATIVE_NOT_READY');const result=await this.owned('Runtime.callFunctionOn',{objectId:this.nativeObjectId,functionDeclaration:'function(expected,text){return this.replaceDraft(expected,text);}',arguments:[{value:expected},{value:text}],returnByValue:true});if(result?.exceptionDetails)throw new Error('NATIVE_CAS_FAILED');}
