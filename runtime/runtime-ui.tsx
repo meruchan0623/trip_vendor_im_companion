@@ -1,7 +1,7 @@
 import {mountPageFeatures,type PageFeatures,type PageGeometry} from './page/index';
 import type {PanelState} from '../src/shared/workbench';
-import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,WINDOWS_DYNAMIC_RUNTIME,validateWindowsRuntimeBuild,type RuntimeBuild} from './build-manifest';
-export interface RuntimeUiMetadata {leaseId:string;aresVersion:typeof VERIFIED_RUNTIME_BUILD.aresVersion;htmlSha256:string;rendererSha256:string;keyboardBoundary:'isolated-world-shadow';windowsBuild?:RuntimeBuild}
+import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,WINDOWS_DYNAMIC_RUNTIME,validateWindowsRuntimeBuild,validateMacRuntimeBuild,type RuntimeBuild} from './build-manifest';
+export interface RuntimeUiMetadata {leaseId:string;aresVersion:typeof VERIFIED_RUNTIME_BUILD.aresVersion;htmlSha256:string;rendererSha256:string;keyboardBoundary:'isolated-world-shadow';windowsBuild?:RuntimeBuild;macBuild?:RuntimeBuild}
 export interface RuntimeUiHandle {heartbeat(sequence:number):void;detach():Promise<void>;geometry():RuntimeGeometry;boundary():true;updateWorkbench(state:PanelState):void;respondWorkbench(id:string,ok:boolean):void}
 export type RuntimeGeometry=PageGeometry;
 /** Factory only. Loading this runtime artifact never mounts anything by itself; the page features live in ./page. */
@@ -11,11 +11,13 @@ export function mountRuntimeUi(metadata:RuntimeUiMetadata,document:Document=wind
   // Only the owned Node policy supplies this per-installation identity, after validating loaded resource bytes.
   if(RUNTIME_PLATFORM==='win32'&&metadata.windowsBuild){try{build=validateWindowsRuntimeBuild(metadata.windowsBuild);}catch{throw new Error('UNAPPROVED_METADATA');}}
   else if(RUNTIME_PLATFORM==='win32'&&WINDOWS_DYNAMIC_RUNTIME)throw new Error('UNAPPROVED_METADATA');
+  if(RUNTIME_PLATFORM==='darwin'){if(!metadata.macBuild||metadata.windowsBuild)throw new Error('UNAPPROVED_METADATA');try{build=validateMacRuntimeBuild(metadata.macBuild);}catch{throw new Error('UNAPPROVED_METADATA');}}
+  else if(metadata.macBuild)throw new Error('UNAPPROVED_METADATA');
   const documentPath=decodeURIComponent(new URL(build.documentURL).pathname),rendererPath=decodeURIComponent(new URL(build.rendererURL).pathname);
   if(!location||location.protocol!=='file:'||location.host||location.search||location.hash||decodeURIComponent(location.pathname).toLowerCase()!==documentPath.toLowerCase())throw new Error('UNAPPROVED_DOCUMENT');
   // Panel attachment intentionally pauses while hidden. Refuse before reserving a lease or adding listeners.
   if(document.visibilityState!=='visible')throw new Error('IM_TARGET_INACTIVE');
-  if(metadata.aresVersion!==build.aresVersion||metadata.htmlSha256!==build.htmlSha256||metadata.rendererSha256!==build.rendererSha256||metadata.keyboardBoundary!=='isolated-world-shadow'||Object.keys(metadata).length!==(metadata.windowsBuild?6:5)||!/^[a-z0-9-]{16,100}$/i.test(metadata.leaseId))throw new Error('UNAPPROVED_METADATA');
+  if(metadata.aresVersion!==build.aresVersion||metadata.htmlSha256!==build.htmlSha256||metadata.rendererSha256!==build.rendererSha256||metadata.keyboardBoundary!=='isolated-world-shadow'||Object.keys(metadata).length!==(metadata.windowsBuild||metadata.macBuild?6:5)||!/^[a-z0-9-]{16,100}$/i.test(metadata.leaseId))throw new Error('UNAPPROVED_METADATA');
   if(![...document.scripts].some(script=>{try{const url=new URL(script.src);return url.protocol==='file:'&&!url.host&&!url.search&&!url.hash&&decodeURIComponent(url.pathname).toLowerCase()===rendererPath.toLowerCase();}catch{return false;}}))throw new Error('UNAPPROVED_RENDERER');
   if(!document.getElementById('root')||document.documentElement.hasAttribute('data-tsim-runtime-lease'))throw new Error('UNAPPROVED_LAYOUT_OR_ALREADY_ATTACHED');
   const binding=bridge&&/^tsim_[a-f0-9]{32}$/.test(bridge.bindingName)?(view as unknown as Record<string,unknown>)[bridge.bindingName]:undefined;

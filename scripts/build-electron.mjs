@@ -1,4 +1,3 @@
-import {validatePageBuild} from './lib/macos-page-build.mjs';
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
@@ -14,9 +13,8 @@ if(process.env.TMC_MACOS_MANIFEST){
   if(runtimePlatform!=='darwin')throw new Error('PATCHED_MANIFEST_REQUIRES_MACOS');
   const manifest=JSON.parse(await readFile(process.env.TMC_MACOS_MANIFEST,'utf8'));
   const keys=['executableSha256','asarSha256'];
-  if(Object.keys(manifest).some(key=>![...keys,'pageBuild'].includes(key))||keys.some(key=>!/^[a-f0-9]{64}$/.test(manifest[key])))throw new Error('INVALID_PATCHED_MANIFEST');
+  if(Object.keys(manifest).some(key=>!keys.includes(key))||keys.some(key=>!/^[a-f0-9]{64}$/.test(manifest[key])))throw new Error('INVALID_PATCHED_MANIFEST');
   platformDefine.__TMC_MACOS_PATCHED_BUILD__=JSON.stringify(Object.fromEntries(keys.map(key=>[key,manifest[key]])));
-  if(manifest.pageBuild)platformDefine.__TMC_MACOS_PAGE_BUILD__=JSON.stringify(validatePageBuild(manifest.pageBuild));
 }
 const native=await build({entryPoints:['runtime/native-composer.ts'],bundle:true,platform:'browser',target:'chrome118',format:'iife',minify:true,write:false,define:platformDefine});
 const nativeSource=native.outputFiles[0].text;

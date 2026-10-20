@@ -1,13 +1,9 @@
 /** Static compatibility manifests, one per vendor build; safe to bundle into an isolated renderer world. */
 import{validateWindowsPage,validateWindowsRuntimeManifest,type WindowsPageManifest,type WindowsRuntimeManifest}from'./windows-compatibility.mjs';
+import {macPageBuild,validateMacPageBuild} from './macos-page-compatibility.mjs';
 declare const __TMC_RUNTIME_PLATFORM__:string|undefined;
 declare const __TMC_WINDOWS_DYNAMIC__:boolean|undefined;
 declare const __TMC_MACOS_PATCHED_BUILD__:{executableSha256:string;asarSha256:string}|undefined;
-declare const __TMC_MACOS_PAGE_BUILD__: {
-  aresVersion:string;htmlSha256:string;rendererSha256:string;rendererName:string;
-  navigationHtmlSha256:string;navigationRendererSha256:string;
-  documentURL:string;rendererURL:string;navigationURL:string;navigationRendererURL:string;
-}|undefined;
 export const MACOS_PATCHED_BUILD=typeof __TMC_MACOS_PATCHED_BUILD__!=='undefined';
 export const WINDOWS_RUNTIME_BUILD = Object.freeze({
   executable: 'C:\\Program Files\\vbk-electron\\旅游商家桌面版.exe',
@@ -24,7 +20,7 @@ export const WINDOWS_RUNTIME_BUILD = Object.freeze({
   navigationHtmlSha256: '294cbc2541782e25f92dd3c1efdc4be5c529ce2711ab2f7276c3954ac337b7b9',
   navigationRendererSha256: '641095b3cf2f5328a3254b391ee5acf89a985e103d243e8e7dcd5568057fbbd4',
 });
-/** Default bundled pages; injection may pin a separately verified hot-update build at compile time. */
+/** Default bundled pages; the host selects and hashes current-user pages at runtime. */
 export const MACOS_RUNTIME_BUILD = Object.freeze({
   executable: '/Applications/旅游商家桌面版.app/Contents/MacOS/旅游商家桌面版',
   executableVersion: '1.2.12', packageVersion: '1.2.12', aresVersion: '1.2.15',
@@ -40,13 +36,29 @@ export const MACOS_RUNTIME_BUILD = Object.freeze({
   navigationHtmlSha256: 'e32baaf2caeddf331de3a20eed37cfd259cdc20aeb2b6ab38aed96291494a4fd',
   navigationRendererSha256: 'c4114938c13e12bc057a8ef0931676f8b0f68cc34db46d7d3c504badd77c81a6',
   ...(typeof __TMC_MACOS_PATCHED_BUILD__!=='undefined'?__TMC_MACOS_PATCHED_BUILD__:{}),
-  ...(typeof __TMC_MACOS_PAGE_BUILD__!=='undefined'?__TMC_MACOS_PAGE_BUILD__:{}),
 });
 // Build-time define wins; unbundled Node falls back to the host. Anything but darwin keeps the Windows manifest.
 export const RUNTIME_PLATFORM:'win32'|'darwin'=(typeof __TMC_RUNTIME_PLATFORM__==='string'?__TMC_RUNTIME_PLATFORM__:typeof process!=='undefined'&&process.platform==='darwin'?'darwin':'win32')==='darwin'?'darwin':'win32';
 export type RuntimeBuild={readonly [K in keyof typeof WINDOWS_RUNTIME_BUILD]:typeof WINDOWS_RUNTIME_BUILD[K] extends number?number:string};
 export let VERIFIED_RUNTIME_BUILD:RuntimeBuild=RUNTIME_PLATFORM==='darwin'?MACOS_RUNTIME_BUILD:WINDOWS_RUNTIME_BUILD;
 export const WINDOWS_DYNAMIC_RUNTIME=typeof __TMC_WINDOWS_DYNAMIC__!=='undefined'&&__TMC_WINDOWS_DYNAMIC__;
+export function macRuntimePageBuild(aresVersion:string,distURL:string):RuntimeBuild{
+  return Object.freeze({...MACOS_RUNTIME_BUILD,...macPageBuild(aresVersion,distURL)});
+}
+/** Called only after host-side version, all four page hashes and executable/archive verification. */
+export function activateMacPageBuild(build:RuntimeBuild){
+  if(RUNTIME_PLATFORM!=='darwin')throw new Error('MACOS_REQUIRED');
+  VERIFIED_RUNTIME_BUILD=validateMacRuntimeBuild(build);
+}
+/** Renderer checks an exact reconstruction from the same reviewed page allowlist. */
+export function validateMacRuntimeBuild(value:RuntimeBuild):RuntimeBuild{
+  if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('INVALID_MACOS_RUNTIME_PAGE');
+  const pageKeys=['packageVersion','aresVersion','rendererName','htmlSha256','rendererSha256','navigationHtmlSha256','navigationRendererSha256','documentURL','rendererURL','navigationURL','navigationRendererURL'] as const;
+  const page=validateMacPageBuild(Object.fromEntries(pageKeys.map(key=>[key,value[key]])));
+  const checked=macRuntimePageBuild(page.aresVersion,new URL('../../../',page.documentURL).href);
+  if(Object.keys(value).length!==Object.keys(checked).length||Object.entries(checked).some(([key,entry])=>(value as unknown as Record<string,unknown>)[key]!==entry))throw new Error('INVALID_MACOS_RUNTIME_PAGE');
+  return checked;
+}
 /** Historical fixtures for standalone developer tests; installed Windows runtime uses its protected manifest. */
 export const WINDOWS_PAGE_BUILDS=Object.freeze([
   Object.freeze({packageVersion:'1.2.12',aresVersion:'1.2.15',rendererName:WINDOWS_RUNTIME_BUILD.rendererName,navigationRendererName:'mainWindow-M_STnhjX.js',htmlSha256:WINDOWS_RUNTIME_BUILD.htmlSha256,rendererSha256:WINDOWS_RUNTIME_BUILD.rendererSha256,navigationHtmlSha256:WINDOWS_RUNTIME_BUILD.navigationHtmlSha256,navigationRendererSha256:WINDOWS_RUNTIME_BUILD.navigationRendererSha256}),

@@ -1,18 +1,17 @@
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {createServer} from 'node:net';
-import {readFile} from 'node:fs/promises';
 import {posix} from 'node:path';
-import {fileURLToPath} from 'node:url';
 import {fingerprintFile as hash} from './file-fingerprint';
 import {createFingerprintCache,createFileFingerprintStore,type FingerprintStore} from './fingerprint-cache';
 import {fingerprintMacExecutable} from './macho-fingerprint';
-import {MACOS_PATCHED_BUILD} from './build-manifest';
+import {MACOS_PATCHED_BUILD,MACOS_RUNTIME_BUILD,activateMacPageBuild} from './build-manifest';
+import {inspectMacPages} from './macos-pages';
 import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,assertBuildFingerprint,sameExecutablePath,type ProcessIdentity,type ListenerIdentity} from './identity';
 import type {LaunchPlatform,VerifiedIdleSnapshot} from './launcher';
 const execute=promisify(execFile);
 const exe=VERIFIED_RUNTIME_BUILD.executable;
-const bundle=posix.dirname(posix.dirname(posix.dirname(exe))),contents=posix.join(bundle,'Contents'),dist=posix.resolve(posix.dirname(fileURLToPath(VERIFIED_RUNTIME_BUILD.documentURL)),'../../..');
+const bundle=posix.dirname(posix.dirname(posix.dirname(exe))),contents=posix.join(bundle,'Contents');
 const nfc=(path:string)=>posix.normalize(path).normalize('NFC'),bundlePrefix=nfc(bundle)+'/',clientName=posix.basename(nfc(exe));
 const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -96,11 +95,10 @@ export class MacLaunchPlatform implements LaunchPlatform {
     let version:string;
     try{version=(await run('/usr/bin/plutil',['-extract','CFBundleVersion','raw','-o','-',posix.join(contents,'Info.plist')],64_000)).replace(/\n$/,'');}catch{throw new Error('CLIENT_VERSION_UNAVAILABLE');}
     if(!/^[0-9A-Za-z.-]{1,64}$/.test(version))throw new Error('CLIENT_VERSION_UNAVAILABLE');
-    let packageVersion:{pkgVersion?:unknown;aresVersion?:unknown};
-    try{packageVersion=JSON.parse(await readFile(posix.join(dist,'packageVersion.json'),'utf8'));}catch{throw new Error('CLIENT_PACKAGE_VERSION_UNAVAILABLE');}
-    if(!packageVersion||typeof packageVersion.pkgVersion!=='string'||typeof packageVersion.aresVersion!=='string')throw new Error('CLIENT_PACKAGE_VERSION_UNAVAILABLE');
-    const [executableSha256,asarSha256,htmlSha256,rendererSha256]=await Promise.all([this.executableHash(exe),this.hash(posix.join(contents,'Resources','app.asar')),this.hash(posix.join(dist,'src','pages','imPlus','index.html')),this.hash(posix.join(dist,'js',VERIFIED_RUNTIME_BUILD.rendererName))]);
-    const fingerprint={executable:exe,executableVersion:version,packageVersion:packageVersion.pkgVersion,aresVersion:packageVersion.aresVersion,executableSha256,asarSha256,htmlSha256,rendererSha256};assertBuildFingerprint(fingerprint);
+    const [pages,executableSha256,asarSha256]=await Promise.all([inspectMacPages(),this.executableHash(exe),this.hash(posix.join(contents,'Resources','app.asar'))]);
+    if(version!==MACOS_RUNTIME_BUILD.executableVersion||executableSha256!==MACOS_RUNTIME_BUILD.executableSha256||asarSha256!==MACOS_RUNTIME_BUILD.asarSha256)throw new Error('UNVERIFIED_BUILD');
+    await pages.assertUnchanged();activateMacPageBuild(pages.build);
+    const fingerprint={executable:exe,executableVersion:version,packageVersion:pages.build.packageVersion,aresVersion:pages.build.aresVersion,executableSha256,asarSha256,htmlSha256:pages.build.htmlSha256,rendererSha256:pages.build.rendererSha256};assertBuildFingerprint(fingerprint);
     return{verified:true,fingerprint,clientProcessIds:clients,clientMainProcessIds:main,installerProcessIds:installers};
   }
   async reserveLoopbackPort(){

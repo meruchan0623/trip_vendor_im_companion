@@ -196,6 +196,7 @@ export class RuntimeCDPPolicy {
   async respondWorkbench(id:string,ok:boolean){if(!this.uiObjectId)return;await this.owned('Runtime.callFunctionOn',{objectId:this.uiObjectId,functionDeclaration:'function(id,ok){this.respondWorkbench(id,ok);}',arguments:[{value:id},{value:ok}],returnByValue:true});}
   async mountUi(metadata:RuntimeUiMetadata,bridge?:{bindingName:string;state:unknown}){
     if(RUNTIME_PLATFORM==='win32')metadata={...metadata,windowsBuild:VERIFIED_RUNTIME_BUILD};
+    else if(RUNTIME_PLATFORM==='darwin')metadata={...metadata,macBuild:VERIFIED_RUNTIME_BUILD};
     if(!this.installed||!this.isolatedContextId||this.uiObjectId)throw new Error('FACTORY_NOT_READY');
     const factory=await this.owned('Runtime.evaluate',{expression:'window.tsimRuntimeFactory',contextId:this.isolatedContextId,objectGroup:this.target.contextNonce,returnByValue:false});
     if(factory?.exceptionDetails||typeof factory?.result?.objectId!=='string')throw new Error('RUNTIME_FACTORY_MISSING');
