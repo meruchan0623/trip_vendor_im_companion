@@ -94,7 +94,11 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private async waitUntilVisible(epoch:number){
     let announced=false;
     for(;;){
-      this.current(epoch);const activity=await this.policy.documentActivity();this.current(epoch);if(activity.visible)return;
+      // A selected BrowserView may become hidden before mounting finishes. Keep
+      // checking the verified inventory so a different visible account can take
+      // ownership instead of waiting forever for this old document to reappear.
+      this.current(epoch);const active=RUNTIME_PLATFORM==='win32'?await this.verifyActiveTarget(true):true;this.current(epoch);
+      const activity=await this.policy.documentActivity();this.current(epoch);if(active&&activity.visible)return;
       if(!announced){diag('runtime-waiting-visible',{});announced=true;}
       await new Promise<void>((resolve,reject)=>{
         const cancel=()=>{clearTimeout(timer);this.invalidators.delete(cancel);reject(new Error('RUNTIME_TARGET_CHANGED'));};

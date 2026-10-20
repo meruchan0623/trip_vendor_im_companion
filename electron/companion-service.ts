@@ -75,6 +75,7 @@ export class CompanionService {
   private translationOptionsStarting:Promise<void>;
   private external?:ExternalComposer;
   private externalConnecting?:Promise<void>;
+  private connectingAttempt?:object;
   private stopInteraction?:()=>void;
   private stopInvalidation?:()=>void;
   private embeddedPublishing=false;
@@ -107,6 +108,9 @@ export class CompanionService {
     this.loginGeneration++;this.loginPopover=undefined;this.translationIntent++;this.invalidate();this.captured=undefined;
     this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;
     this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';
+    // Retiring an in-flight mount transfers cleanup/socket ownership to reconnect.
+    // A late rejection must neither keep polling blocked nor close its successor.
+    this.connectingAttempt=undefined;this.externalConnecting=undefined;
     this.retireInteractions();this.external=undefined;this.nextConnectAt=Date.now()+1000;
     if(composer.reconnect&&this.state.targetInstanceId){
       this.dropReconnect();const controller=new AbortController();this.connectionAbort=controller;
@@ -254,7 +258,7 @@ export class CompanionService {
   setWindowState(window:WindowState|null){
     if(this.closed)return;
     const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.loginPopover=undefined;this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage(false);this.clearOrder();}
-    if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectionAbort?.abort();this.dropReconnect();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
+    if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectingAttempt=undefined;this.externalConnecting=undefined;this.connectionAbort?.abort();this.dropReconnect();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
@@ -338,26 +342,42 @@ export class CompanionService {
     if(this.closed)return;
     if(this.externalConnecting)return this.externalConnecting;
     const id=this.state.targetInstanceId;if(!id){this.fail(new Error('TARGET_REQUIRED'));return;}this.nextConnectAt=Date.now()+5000;
-    this.externalConnecting=(async()=>{
-      if(!await this.waitForObservation()||this.busy||id!==this.state.targetInstanceId)return;
+    const attempt={};this.connectingAttempt=attempt;
+    const current=()=>!this.closed&&this.connectingAttempt===attempt&&id===this.state.targetInstanceId;
+    const operation=(async()=>{
+      if(!await this.waitForObservation()||!current()||this.busy)return;
       const warm=this.reconnecting;const connectionAbort=warm&&!warm.controller.signal.aborted?warm.controller:new AbortController();if(!warm)this.connectionAbort?.abort();this.connectionAbort=connectionAbort;
       this.invalidate();const epoch=this.connectionEpoch;this.state.error=null;this.state.phase='reading';this.publish();
       const previous=this.external;this.retireInteractions();this.external=undefined;await previous?.close().catch(()=>{});
+      let composer:ExternalComposer|undefined;
       try{
-        let composer=warm?await warm.promise:undefined;
+        if(!current()||connectionAbort.signal.aborted)return;
+        composer=warm?await warm.promise:undefined;
         if(warm&&this.reconnecting===warm){this.reconnecting=undefined;warm.claimed=true;}
-        if(this.closed||connectionAbort.signal.aborted||epoch!==this.connectionEpoch||id!==this.state.targetInstanceId){if(composer&&!warm?.disposed){if(warm)warm.disposed=true;await composer.close();}return;}
+        if(!current()||connectionAbort.signal.aborted||epoch!==this.connectionEpoch){if(composer&&!warm?.disposed){if(warm)warm.disposed=true;await composer.close();}return;}
         composer??=await connectExternalComposer(id,connectionAbort.signal);
-        if(this.closed||epoch!==this.connectionEpoch||id!==this.state.targetInstanceId){await composer.close();return;}
-        this.external=composer;this.stopInteraction=composer.onInteraction?.(event=>this.interaction(event,composer));
-        this.stopInvalidation=composer.onInvalidated?.(()=>this.retireComposer(composer));this.syncInteractionOptions();
-        await composer.mountWorkbench?.(this.embeddedState(),this.workbenchAction(composer,id));
-        if(this.external!==composer||this.closed){await composer.close();return;}
+        if(!current()||connectionAbort.signal.aborted||epoch!==this.connectionEpoch){await composer.close();return;}
+        const connected=composer;this.external=connected;
+        this.stopInteraction=connected.onInteraction?.(event=>this.interaction(event,connected));
+        const stopInvalidation=connected.onInvalidated?.(()=>this.retireComposer(connected));
+        // Registration can synchronously report a previously invalidated driver.
+        if(!current()||this.external!==connected){stopInvalidation?.();return;}
+        this.stopInvalidation=stopInvalidation;this.syncInteractionOptions();
+        await connected.mountWorkbench?.(this.embeddedState(),this.workbenchAction(connected,id));
+        // retireComposer/window changes own stale cleanup, including socket transfer.
+        if(!current()||this.external!==connected)return;
         this.state.phase='idle';await this.readDraft();
       }
-      catch(error){const failed=this.external;this.retireInteractions();this.external=undefined;await failed?.close().catch(()=>{});if(!this.closed&&epoch===this.connectionEpoch&&id===this.state.targetInstanceId){reportVendorProgress('failed');this.fail(error,true);}}
-    })().finally(()=>{if(id===this.state.targetInstanceId)this.nextConnectAt=Date.now()+5000;this.externalConnecting=undefined;});
-    return this.externalConnecting;
+      catch(error){
+        if(!current())return;
+        if(composer&&this.external===composer){this.retireInteractions();this.external=undefined;await composer.close().catch(()=>{});}
+        if(current()&&epoch===this.connectionEpoch){reportVendorProgress('failed');this.fail(error,true);}
+      }
+    })().finally(()=>{
+      if(this.connectingAttempt!==attempt)return;
+      this.nextConnectAt=Date.now()+5000;this.connectingAttempt=undefined;this.externalConnecting=undefined;
+    });
+    this.externalConnecting=operation;return operation;
   }
   async translate(target:PanelTarget,automaticSignature?:string){
     if(!isPanelTarget(target)){this.fail(new Error('INVALID_LANGUAGE'));return;}

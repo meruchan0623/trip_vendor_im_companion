@@ -37,6 +37,8 @@ export function createRuntimeDiagnostics(file:string,maxBytes=DEFAULT_MAX_BYTES)
     if(value.event==='composer-startup'&&typeof value.stage==='string'&&/^[a-z-]{1,40}$/.test(value.stage))write('composer-startup',{stage:value.stage,elapsedMs:number(value.elapsedMs)});
     else if(value.event==='order-discovery'&&['ORDER_READY','ORDER_UNAVAILABLE','ORDER_INSPECTION_FAILED'].includes(String(value.code)))write('order-discovery',{code:value.code,count:number(value.count)});
     else if(value.event==='composer-reconnect'&&typeof value.stage==='string'&&RECONNECT_STAGES.has(value.stage))write('composer-reconnect',{stage:value.stage,elapsedMs:number(value.elapsedMs)});
+    else if(value.event==='runtime-waiting-visible')write('runtime-waiting-visible',{});
+    else if(value.event==='runtime-invalidated')write('runtime-invalidated',{code:code(value.reason)});
     else if(value.event==='cdp-command-rejected'&&typeof value.method==='string'&&CDP_METHODS.has(value.method))write('cdp-command-rejected',{method:value.method,...(Number.isSafeInteger(value.errorCode)?{errorCode:value.errorCode}:{})});
     else if(value.event==='companion-service-failed')write('companion-service-failed',{code:code(value.code),errorType:typeof value.errorType==='string'&&/^[A-Za-z]{1,40}$/.test(value.errorType)?value.errorType:'Unknown',locations:Array.isArray(value.locations)?value.locations.filter(item=>typeof item==='string'&&/^[\w.-]+\.(?:c?js|ts):\d+:\d+$/.test(item)).slice(0,4):[]});
     else if((value.event==='cdp-command-timeout'||value.event==='cdp-slow-command')&&typeof value.method==='string'&&/^[A-Za-z]+\.[A-Za-z]+$/.test(value.method))write(value.event,{method:value.method,elapsedMs:number(value.elapsedMs),timeoutMs:number(value.timeoutMs)});
