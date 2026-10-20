@@ -161,6 +161,10 @@ test('in-page operator receives the session only for the visible conversation an
     await assert.rejects(invokeEmbeddedAction(service,'operatorSession',[{...intent,conversationKey:'old-customer'}]),/ORDER_CONTEXT_CHANGED/);
     await assert.rejects(invokeEmbeddedAction(service,'operatorSession',[{identifier:'ABC123'}]),/INVALID_ACTION/);
     assert.deepEqual(await invokeEmbeddedAction(service,'operatorSession',[intent]),{accessToken:'fixture-token',sessionRef:'fixture-ref'});
+    // The mounted page reaches the service through this callback; it must hand the grant back, not drop it.
+    const pageAction=fixture.workbenchAction(fixture.external,fixture.state.targetInstanceId);
+    assert.deepEqual(await pageAction('operatorSession',[intent]),{accessToken:'fixture-token',sessionRef:'fixture-ref'});
+    await assert.rejects(fixture.workbenchAction({close:async()=>{}},fixture.state.targetInstanceId)('operatorSession',[intent]),/RUNTIME_TARGET_CHANGED/);
     fixture.foreground=false;
     await assert.rejects(invokeEmbeddedAction(service,'operatorSession',[intent]),/MESSAGE_PAGE_REQUIRED/);
     assert.equal('orderWindowMode' in fixture.embeddedState(),false);

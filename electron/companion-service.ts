@@ -351,10 +351,7 @@ export class CompanionService {
         if(this.closed||epoch!==this.connectionEpoch||id!==this.state.targetInstanceId){await composer.close();return;}
         this.external=composer;this.stopInteraction=composer.onInteraction?.(event=>this.interaction(event,composer));
         this.stopInvalidation=composer.onInvalidated?.(()=>this.retireComposer(composer));this.syncInteractionOptions();
-        await composer.mountWorkbench?.(this.embeddedState(),async(action,args)=>{
-          if(this.closed||this.external!==composer||id!==this.state.targetInstanceId)throw new Error('RUNTIME_TARGET_CHANGED');
-          await invokeEmbeddedAction(this,action,args);
-        });
+        await composer.mountWorkbench?.(this.embeddedState(),this.workbenchAction(composer,id));
         if(this.external!==composer||this.closed){await composer.close();return;}
         this.state.phase='idle';await this.readDraft();
       }
@@ -512,6 +509,13 @@ export class CompanionService {
       });
       if(current()){this.state.browserOpen=true;this.publish();}
     }catch(error){if(current()){this.fail(error);throw error;}}
+  }
+  /** Page intents for one mounted composer. `operatorSession` resolves to the grant the page hands to the TSim frame. */
+  private workbenchAction(composer:ExternalComposer,id:string){
+    return async(action:string,args:unknown[])=>{
+      if(this.closed||this.external!==composer||id!==this.state.targetInstanceId)throw new Error('RUNTIME_TARGET_CHANGED');
+      return invokeEmbeddedAction(this,action,args);
+    };
   }
   /** Hands the verified bearer to the in-page TSim operator for the visible conversation only. */
   async operatorSession(intent:OrderWindowIntent):Promise<OperatorSessionGrant>{
