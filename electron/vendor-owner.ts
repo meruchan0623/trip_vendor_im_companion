@@ -1,4 +1,5 @@
 import type {ProcessIdentity} from '../runtime/identity';
+import {sameExecutablePath} from '../runtime/identity';
 
 export function vendorOwnerPID(args:readonly string[]):number|undefined {
   const flags=args.filter(arg=>arg.startsWith('--vendor-owner'));
@@ -11,7 +12,7 @@ export function vendorOwnerPID(args:readonly string[]):number|undefined {
 /** Bind automatic assistance to one process lifetime, including protection against PID reuse. */
 export async function watchVendorOwner(pid:number,inspect:(pid:number)=>Promise<ProcessIdentity>,expectedExecutable:string,onExit:()=>void,intervalMs=1000):Promise<()=>void>{
   const owner=await inspect(pid);
-  if(owner.pid!==pid||owner.executable.normalize('NFC')!==expectedExecutable.normalize('NFC'))throw new Error('INVALID_VENDOR_OWNER');
+  if(owner.pid!==pid||!sameExecutablePath(owner.executable,expectedExecutable))throw new Error('INVALID_VENDOR_OWNER');
   let stopped=false,busy=false;
   const timer=setInterval(async()=>{
     if(stopped||busy)return;busy=true;

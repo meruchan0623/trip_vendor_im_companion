@@ -1,19 +1,22 @@
 import {mountPageFeatures,type PageFeatures,type PageGeometry} from './page/index';
 import type {PanelState} from '../src/shared/workbench';
-import {VERIFIED_RUNTIME_BUILD} from './build-manifest';
-const DOCUMENT_PATH=decodeURIComponent(new URL(VERIFIED_RUNTIME_BUILD.documentURL).pathname);
-const RENDERER_PATH=decodeURIComponent(new URL(VERIFIED_RUNTIME_BUILD.rendererURL).pathname);
-export interface RuntimeUiMetadata {leaseId:string;aresVersion:typeof VERIFIED_RUNTIME_BUILD.aresVersion;htmlSha256:string;rendererSha256:string;keyboardBoundary:'isolated-world-shadow'}
+import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,WINDOWS_DYNAMIC_RUNTIME,validateWindowsRuntimeBuild,type RuntimeBuild} from './build-manifest';
+export interface RuntimeUiMetadata {leaseId:string;aresVersion:typeof VERIFIED_RUNTIME_BUILD.aresVersion;htmlSha256:string;rendererSha256:string;keyboardBoundary:'isolated-world-shadow';windowsBuild?:RuntimeBuild}
 export interface RuntimeUiHandle {heartbeat(sequence:number):void;detach():Promise<void>;geometry():RuntimeGeometry;boundary():true;updateWorkbench(state:PanelState):void;respondWorkbench(id:string,ok:boolean):void}
 export type RuntimeGeometry=PageGeometry;
 /** Factory only. Loading this runtime artifact never mounts anything by itself; the page features live in ./page. */
 export function mountRuntimeUi(metadata:RuntimeUiMetadata,document:Document=window.document,bridge?:{bindingName:string;state:PanelState}|null,options:{origin?:string;prewarmDelayMs?:number}={}):RuntimeUiHandle {
   const view=document.defaultView;const location=view?.location;
-  if(!location||location.protocol!=='file:'||location.host||location.search||location.hash||decodeURIComponent(location.pathname).toLowerCase()!==DOCUMENT_PATH.toLowerCase())throw new Error('UNAPPROVED_DOCUMENT');
+  let build=VERIFIED_RUNTIME_BUILD;
+  // Only the owned Node policy supplies this per-installation identity, after validating loaded resource bytes.
+  if(RUNTIME_PLATFORM==='win32'&&metadata.windowsBuild){try{build=validateWindowsRuntimeBuild(metadata.windowsBuild);}catch{throw new Error('UNAPPROVED_METADATA');}}
+  else if(RUNTIME_PLATFORM==='win32'&&WINDOWS_DYNAMIC_RUNTIME)throw new Error('UNAPPROVED_METADATA');
+  const documentPath=decodeURIComponent(new URL(build.documentURL).pathname),rendererPath=decodeURIComponent(new URL(build.rendererURL).pathname);
+  if(!location||location.protocol!=='file:'||location.host||location.search||location.hash||decodeURIComponent(location.pathname).toLowerCase()!==documentPath.toLowerCase())throw new Error('UNAPPROVED_DOCUMENT');
   // Panel attachment intentionally pauses while hidden. Refuse before reserving a lease or adding listeners.
   if(document.visibilityState!=='visible')throw new Error('IM_TARGET_INACTIVE');
-  if(metadata.aresVersion!==VERIFIED_RUNTIME_BUILD.aresVersion||metadata.htmlSha256!==VERIFIED_RUNTIME_BUILD.htmlSha256||metadata.rendererSha256!==VERIFIED_RUNTIME_BUILD.rendererSha256||metadata.keyboardBoundary!=='isolated-world-shadow'||Object.keys(metadata).length!==5||!/^[a-z0-9-]{16,100}$/i.test(metadata.leaseId))throw new Error('UNAPPROVED_METADATA');
-  if(![...document.scripts].some(script=>{try{const url=new URL(script.src);return url.protocol==='file:'&&decodeURIComponent(url.pathname).toLowerCase()===RENDERER_PATH.toLowerCase();}catch{return false;}}))throw new Error('UNAPPROVED_RENDERER');
+  if(metadata.aresVersion!==build.aresVersion||metadata.htmlSha256!==build.htmlSha256||metadata.rendererSha256!==build.rendererSha256||metadata.keyboardBoundary!=='isolated-world-shadow'||Object.keys(metadata).length!==(metadata.windowsBuild?6:5)||!/^[a-z0-9-]{16,100}$/i.test(metadata.leaseId))throw new Error('UNAPPROVED_METADATA');
+  if(![...document.scripts].some(script=>{try{const url=new URL(script.src);return url.protocol==='file:'&&!url.host&&!url.search&&!url.hash&&decodeURIComponent(url.pathname).toLowerCase()===rendererPath.toLowerCase();}catch{return false;}}))throw new Error('UNAPPROVED_RENDERER');
   if(!document.getElementById('root')||document.documentElement.hasAttribute('data-tsim-runtime-lease'))throw new Error('UNAPPROVED_LAYOUT_OR_ALREADY_ATTACHED');
   const binding=bridge&&/^tsim_[a-f0-9]{32}$/.test(bridge.bindingName)?(view as unknown as Record<string,unknown>)[bridge.bindingName]:undefined;
   if(bridge&&typeof binding!=='function')throw new Error('OWNED_BINDING_MISSING');

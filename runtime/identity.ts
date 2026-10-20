@@ -16,7 +16,7 @@ export function approvedDocumentURL(value:string):boolean {
 }
 export interface ProcessIdentity {pid:number;startedAt:string;executable:string}
 export interface ListenerIdentity {pid:number;address:string;port:number;processStartedAt:string}
-export function assertOwnedLoopbackListener(process:ProcessIdentity,listener:ListenerIdentity,port:number):void {
-  if(!Number.isSafeInteger(process.pid)||process.pid<=0||!process.startedAt||!sameExecutablePath(process.executable,VERIFIED_RUNTIME_BUILD.executable))throw new Error('UNVERIFIED_PROCESS');
+export function assertOwnedLoopbackListener(process:ProcessIdentity,listener:ListenerIdentity,port:number,expectedExecutable=VERIFIED_RUNTIME_BUILD.executable):void {
+  if(!Number.isSafeInteger(process.pid)||process.pid<=0||!process.startedAt||!sameExecutablePath(process.executable,expectedExecutable))throw new Error('UNVERIFIED_PROCESS');
   if(listener.pid!==process.pid||listener.processStartedAt!==process.startedAt||listener.address!=='127.0.0.1'||listener.port!==port)throw new Error('UNOWNED_DEBUG_LISTENER');
 }

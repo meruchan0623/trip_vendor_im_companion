@@ -19,6 +19,8 @@ export interface StandaloneState {
   messageSurface?:MessageSurface;
 }
 export interface StandaloneAPI {
+  /** Installed helpers attach through the vendor bootstrap and cannot launch the standalone path. */
+  readonly canStartClient:boolean;
   getState():Promise<StandaloneState>;
   onState(listener:(state:StandaloneState)=>void):()=>void;
   listWindows():Promise<NativeWindow[]>;

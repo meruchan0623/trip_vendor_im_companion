@@ -11,17 +11,28 @@ import { lockContents, lockLocalSession } from './security';
 import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
 import { ResidentConnection } from './resident-connection';
 import {vendorOwnerPID,watchVendorOwner} from './vendor-owner';
-import {createLaunchPlatform} from '../runtime/platform';
+import {createLaunchPlatform,configureExplicitVendorDebugPort} from '../runtime/platform';
 import {configureFingerprintPersistence} from '../runtime/macos-platform';
-import {VERIFIED_RUNTIME_BUILD} from '../runtime/build-manifest';
+import {windowsPowerShell} from '../runtime/windows-powershell';
+import {VERIFIED_RUNTIME_BUILD,WINDOWS_DYNAMIC_RUNTIME} from '../runtime/build-manifest';
+import {windowsInstallationFromHelper} from '../runtime/windows-compatibility.mjs';
+import {createRuntimeDiagnostics} from './runtime-diagnostics';
+import {connectVendorProgress,disconnectVendorProgress,reportVendorProgress} from './vendor-progress';
 
-// The only local window is on-demand settings; daily business UI belongs to the verified merchant BrowserView.
+// Local settings open on demand; daily business UI belongs to the verified merchant BrowserView.
 if(process.platform==='win32')app.disableHardwareAcceleration();
 const residentPlatform=process.platform==='win32'||process.platform==='darwin';
+// Installed Windows assistance belongs entirely to the official client's lifetime and embedded UI.
+const silentVendorRuntime=process.platform==='win32'&&WINDOWS_DYNAMIC_RUNTIME;
 const smokeMode=process.argv.includes('--smoke-test');
 const acceptance=process.argv.includes('--acceptance');
 if(smokeMode)app.setPath('userData',join(process.cwd(),'work/smoke-profile'));
 const ownsInstance=smokeMode||app.requestSingleInstanceLock();
+const diagnostics=ownsInstance?createRuntimeDiagnostics(join(app.getPath('userData'),'logs','runtime.log')):undefined;
+const hostLog=console.log.bind(console),hostError=console.error.bind(console);
+console.log=(...args:unknown[])=>{diagnostics?.consoleLog(args);hostLog(...args);};
+console.error=(...args:unknown[])=>{diagnostics?.consoleError(args);hostError(...args);};
+diagnostics?.lifecycle('start',process.pid);
 const localFile=join(__dirname,'../dist/index.html');
 let panel:BrowserWindow|undefined,tray:Tray|undefined,native:NativeAdapter,service:CompanionService,resident:ResidentConnection|undefined;
 let latest:WindowState|null=null,quitting=false,cleaned=false,panelIntent=0;
@@ -30,11 +41,15 @@ let lastPublished='';
 let acceptanceInput:ReadlineInterface|undefined;
 let stopOwnerWatch:(()=>void)|undefined;
 let ownerEpoch=0;
-async function adoptVendorOwner(pid:number):Promise<void>{
+async function adoptVendorOwner(pid:number,args:readonly string[]=process.argv):Promise<void>{
   const epoch=++ownerEpoch,platform=createLaunchPlatform();
-  const stop=await watchVendorOwner(pid,id=>platform.processIdentity(id),VERIFIED_RUNTIME_BUILD.executable,()=>{if(epoch===ownerEpoch)app.quit();});
+  // Owner handoff precedes resource verification/manifest activation at startup.
+  const expectedExecutable=silentVendorRuntime?windowsInstallationFromHelper(process.execPath).executable:VERIFIED_RUNTIME_BUILD.executable;
+  const stop=await watchVendorOwner(pid,id=>platform.processIdentity(id),expectedExecutable,()=>{if(epoch===ownerEpoch)app.quit();});
   if(quitting||epoch!==ownerEpoch){stop();return;}
-  stopOwnerWatch?.();stopOwnerWatch=stop;
+  if(process.platform==='win32')configureExplicitVendorDebugPort(args);stopOwnerWatch?.();stopOwnerWatch=stop;
+  // The installed vendor shows startup progress above its composer until the panel mounts.
+  if(silentVendorRuntime){connectVendorProgress(args,pid);reportVendorProgress('host-ready');}
 }
 function listenForAcceptanceQuit():void {
   if(!acceptance)return;
@@ -52,6 +67,7 @@ function trusted(event:IpcMainInvokeEvent):void {
 }
 function handle(name:string,fn:(value:unknown)=>unknown):void {ipcMain.handle(`standalone:${name}`,(event,value)=>{trusted(event);return fn(value);});}
 function publish(state=service.getState()):void {
+  diagnostics?.state({attached:state.attached,auth:state.auth,phase:state.phase,composerSource:state.composerSource,nativeStatus:state.nativeStatus,hasPreview:!!state.preview,hasError:!!state.error,orderStatus:service?.getOrderStatus?.()??'idle'});
   const serialized=JSON.stringify([state,service?.getOrderStatus?.()??'idle']);if(serialized===lastPublished)return;lastPublished=serialized;
   if(acceptance)console.log(JSON.stringify({event:'embedded_acceptance_state',attached:state.attached,auth:state.auth,phase:state.phase,composerSource:state.composerSource,error:state.error,hasPreview:!!state.preview,orderStatus:service?.getOrderStatus?.()??'idle'}));
   if(panel&&!panel.isDestroyed())panel.webContents.send('standalone:state-event',state);
@@ -60,7 +76,7 @@ function nativeHandle(window:BrowserWindow):string {const value=window.getNative
 function registerSettings():void {if(process.platform==='win32')void native?.setCompanionWindows(panel&&!panel.isDestroyed()?[nativeHandle(panel)]:[]).catch(()=>{});}
 function hideSettings():void {++panelIntent;const previous=panel;panel=undefined;if(previous&&!previous.isDestroyed())previous.destroy();registerSettings();}
 async function openSettings():Promise<void> {
-  if(quitting)return;
+  if(quitting||silentVendorRuntime)return;
   if(!panel||panel.isDestroyed()){
     const window=new BrowserWindow({show:false,frame:false,thickFrame:false,hasShadow:false,autoHideMenuBar:true,resizable:false,width:360,height:480,minWidth:280,minHeight:320,title:'翻译设置',skipTaskbar:true,webPreferences:{preload:join(__dirname,'preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,webSecurity:true,backgroundThrottling:true}});
     panel=window;lockContents(window.webContents,false);lockLocalSession(window.webContents.session);
@@ -98,6 +114,9 @@ function stateChanged(state:WindowState|null):void {
 function setupIPC():void {
   handle('state',()=>service.getState());handle('list-windows',()=>native.list());
   handle('start-client',async()=>{
+    // Installed clients select their own debugger port and start the helper from the vendor entry.
+    // Reject before resident.connect can invalidate an existing connection or spawn another client.
+    if(WINDOWS_DYNAMIC_RUNTIME)throw new Error('INSTALLED_VENDOR_ENTRY_REQUIRED');
     if(!residentPlatform)throw new Error('WINDOWS_REQUIRED');
     await resident!.connect(async current=>{
       const pid=await startExternalClient(),deadline=Date.now()+8000;
@@ -121,30 +140,34 @@ function helperPath():string {
   return app.isPackaged?join(process.resourcesPath,'native/windows/TravelMerchant.WindowHelper.exe'):join(app.getAppPath(),'native/windows/bin/publish/TravelMerchant.WindowHelper.exe');
 }
 async function cleanup():Promise<void> {
-  stopOwnerWatch?.();stopOwnerWatch=undefined;
+  stopOwnerWatch?.();stopOwnerWatch=undefined;disconnectVendorProgress();
   if(cleaned)return;cleaned=true;acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();
   try{await service?.dispose();}finally{native?.stop();}
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
   if(process.platform==='darwin'&&!smokeMode)configureFingerprintPersistence(join(app.getPath('userData'),'cache','vendor-fingerprints.json'));
   const ownerPID=vendorOwnerPID(process.argv);
+  if(silentVendorRuntime&&ownerPID===undefined){console.error('INSTALLED_VENDOR_OWNER_REQUIRED');app.quit();return;}
   if(ownerPID!==undefined)await adoptVendorOwner(ownerPID);
+  if(quitting)return;
+  diagnostics?.lifecycle('ready',process.pid,ownerPID);
   native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},undefined,undefined,undefined,()=>resident?.notifyTargetAvailable());
   service=new CompanionService(native,url=>shell.openExternal(url),()=>{},smokeMode?{enabled:false}:{},true,(changed,options)=>new PersistentSessionService(changed,options,new SecureSessionStore(join(app.getPath('userData'),'auth','tsim-session.enc'),safeStorage)));service.onState(publish);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
-  // macOS runs without Dock or menu bar icons; Windows keeps its tray controls.
-  if(residentPlatform){if(process.platform==='darwin'){app.setActivationPolicy('accessory');app.dock?.hide();}native.start();registerSettings();if(process.platform==='win32')createResidentTray();if(!smokeMode)resident.start();}else service.setNativeStatus('windows_required');
+  // Installed Windows runs silently inside the vendor; standalone Windows retains tray settings.
+  if(residentPlatform){if(process.platform==='darwin'){app.setActivationPolicy('accessory');app.dock?.hide();}native.start();registerSettings();if(process.platform==='win32'&&!silentVendorRuntime)createResidentTray();if(!smokeMode)resident.start();}else service.setNativeStatus('windows_required');
   if(smokeMode){console.log(JSON.stringify({event:'shell_started',electron:process.versions.electron,localWindows:0,trayAvailable:!!tray,residentMode:residentPlatform,embeddedBusinessUI:true,remoteNavigation:false}));setTimeout(()=>{void cleanup().then(()=>{console.log(JSON.stringify({event:'smoke_complete',remoteNavigation:false,credentialsAccessed:false}));app.exit(0);});},1500);}
 }).catch(error=>{console.error('SHELL_START_FAILED',error instanceof Error?error.message:'unknown');app.exit(1);});
 else app.quit();
 app.on('second-instance',(_event,args)=>{
   try{
     const ownerPID=vendorOwnerPID(args);
-    if(ownerPID!==undefined){void adoptVendorOwner(ownerPID).catch(()=>{console.error('INVALID_VENDOR_OWNER');app.quit();});return;}
+    if(ownerPID!==undefined){void adoptVendorOwner(ownerPID,args).catch(()=>{console.error('INVALID_VENDOR_OWNER');app.quit();});return;}
     // Repeated launches are background-only; settings require an explicit tray action.
   }catch{console.error('INVALID_VENDOR_OWNER');}
 });
 // OS activation (including vendor startup) must never summon the settings panel.
 app.on('window-all-closed',()=>{if(!quitting&&!residentPlatform)app.quit();});
-app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;void cleanup().finally(()=>app.quit());});
+app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;diagnostics?.lifecycle('quit',process.pid);void cleanup().finally(()=>app.quit());});
+app.once('will-quit',()=>windowsPowerShell.dispose());

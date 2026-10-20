@@ -26,13 +26,24 @@ internal static partial class Program
     static string? browserProfile;
     static readonly HashSet<nint> companions = new();
     static long browserOriginalStyle;
-    static readonly string ExpectedPath = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "vbk-electron", "旅游商家桌面版.exe"));
+    static string ExpectedPath = "";
 
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
         Console.OutputEncoding = new UTF8Encoding(false);
         Console.InputEncoding = Encoding.UTF8;
+        try {
+            var binding=NativeTargetBinding.Parse(args,Environment.ProcessPath??"");ExpectedPath=binding.Executable;
+            if(binding.Owner!=0) {
+                using var parent=Process.GetProcessById((int)ParentProcessId());using var owner=Process.GetProcessById(binding.Owner);using var self=Process.GetCurrentProcess();
+                _=parent.SafeHandle;_=owner.SafeHandle;
+                var row=ProcessRows($"ProcessId={parent.Id}").Single();
+                if(row.Pid!=parent.Id||Math.Abs(row.StartedTicks-parent.StartTime.ToUniversalTime().Ticks)>10)throw new InvalidOperationException();
+                NativeTargetBinding.ValidateOwner(ExpectedPath,binding.Owner,parent.MainModule?.FileName??"",row.Command,owner.MainModule?.FileName??"",owner.StartTime.ToUniversalTime().Ticks,parent.StartTime.ToUniversalTime().Ticks,self.StartTime.ToUniversalTime().Ticks);
+                foreach(var path in new[]{Environment.ProcessPath!,parent.MainModule!.FileName!,ExpectedPath})NativeTargetBinding.NoRedirects(path);
+            }
+        }catch {Console.Error.WriteLine("native_target_binding_rejected");Environment.ExitCode=1;return;}
         Native.SetProcessDpiAwarenessContext(new nint(-4));
         dispatcher = new Control();
         _ = dispatcher.Handle;

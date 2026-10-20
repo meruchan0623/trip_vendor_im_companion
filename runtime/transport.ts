@@ -44,7 +44,7 @@ function versionJSON(port:number):Promise<unknown>{return new Promise((resolve,r
 export function approvedSocketURL(value:unknown,port:number):value is string{if(typeof value!=='string')return false;try{const url=new URL(value);return url.protocol==='ws:'&&url.hostname==='127.0.0.1'&&Number(url.port)===port&&!url.username&&!url.password&&!url.search&&!url.hash&&/^\/devtools\/browser\/[a-z0-9-]+$/i.test(url.pathname);}catch{return false;}}
 /** The owning process/listener is checked before discovery, before socket open and after open. */
 export async function connectOwnedLoopback(port:number,verifyOwner:()=>Promise<void>):Promise<LoopbackCDPTransport>{
-  if(!Number.isSafeInteger(port)||port<1024||port>=65535)throw new Error('INVALID_DEBUG_PORT');
+  if(!Number.isSafeInteger(port)||port<1024||port>65535)throw new Error('INVALID_DEBUG_PORT');
   await verifyOwner();const version=await versionJSON(port) as {webSocketDebuggerUrl?:unknown;Browser?:unknown};
   if(!version||!approvedSocketURL(version.webSocketDebuggerUrl,port)||typeof version.Browser!=='string'||!version.Browser.startsWith(`Chrome/${VERIFIED_RUNTIME_BUILD.chromiumMajor}.`))throw new Error('UNVERIFIED_DEBUG_ENDPOINT');
   await verifyOwner();const socket=new WebSocket(version.webSocketDebuggerUrl);

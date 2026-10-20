@@ -16,7 +16,7 @@ export async function launchFromExplicitUserAction(platform:LaunchPlatform,userA
   if(userAction!=='start-runtime-assistance')throw new Error('USER_START_REQUIRED');
   assertIdle(await platform.inspectReadOnly());
   const reservation=await platform.reserveLoopbackPort();
-  if(reservation.address!=='127.0.0.1'||!Number.isSafeInteger(reservation.port)||reservation.port<1024||reservation.port>=65535){await reservation.release();throw new Error('INVALID_LOOPBACK_RESERVATION');}
+  if(reservation.address!=='127.0.0.1'||!Number.isSafeInteger(reservation.port)||reservation.port<1024||reservation.port>65535){await reservation.release();throw new Error('INVALID_LOOPBACK_RESERVATION');}
   let snapshot:VerifiedIdleSnapshot;
   try{snapshot=await platform.inspectReadOnly();assertIdle(snapshot);}catch(error){await reservation.release();throw error;}
   await reservation.release();
@@ -32,7 +32,7 @@ export async function launchFromExplicitUserAction(platform:LaunchPlatform,userA
 
 /** Dev re-attach: the single verified client main process this helper launched earlier with a loopback debugger. Never spawns or restarts anything. */
 export async function reattachExplicitDevInstance(platform:LaunchPlatform&{processIdentity(pid:number):Promise<ProcessIdentity>},pid:number,port:number):Promise<{process:ProcessIdentity;port:number;fingerprint:BuildFingerprint}> {
-  if(!Number.isSafeInteger(pid)||pid<=0||!Number.isSafeInteger(port)||port<1024||port>=65535)throw new Error('INVALID_REATTACH_ARGUMENTS');
+  if(!Number.isSafeInteger(pid)||pid<=0||!Number.isSafeInteger(port)||port<1024||port>65535)throw new Error('INVALID_REATTACH_ARGUMENTS');
   const snapshot=await platform.inspectReadOnly();
   if(snapshot.verified!==true||snapshot.installerProcessIds.length||snapshot.clientMainProcessIds.length!==1||snapshot.clientMainProcessIds[0]!==pid)throw new Error('REATTACH_PROCESS_MISMATCH');
   assertBuildFingerprint(snapshot.fingerprint);

@@ -232,13 +232,13 @@ export function SettingsPanel({ api, state, busy, perform }: BaseProps) {
         </div>
         <p className="hint">{state.attached ? "翻译与订单查询显示在原客户端客服页面内。" : "打开商家客户端后，助手会自动连接。"}</p>
         {state.error && <p className="hint" role="status">{state.error}</p>}
-        {(!state.attached || state.composerSource === "unavailable") && (
+        {api?.canStartClient && (!state.attached || state.composerSource === "unavailable") && (
           <button className="secondary full-width" disabled={!api || busy} onClick={() => api && void perform(() => api.startClient())}>启动商家客户端</button>
         )}
         {state.attached && state.composerSource === "unavailable" && (
           <>
             <button className="text-button" disabled={!api || busy} onClick={() => api && void perform(() => api.connectComposer())}>连接既有客户端文本框</button>
-            <p className="hint">若仍无法连接，请先退出当前客户端，再用助手启动客户端。</p>
+            <p className="hint">{api?.canStartClient ? "若仍无法连接，请先退出当前客户端，再用助手启动客户端。" : "若仍无法连接，请退出商家客户端，再从商家客户端原入口重新打开，助手会自动连接。"}</p>
           </>
         )}
       </section>

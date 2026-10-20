@@ -1,9 +1,11 @@
 import { createLaunchPlatform, existingClientDebugPort } from '../runtime/platform';
 import { reattachExplicitDevInstance, launchFromExplicitUserAction } from '../runtime/launcher';
-import { connectOwnedLoopback } from '../runtime/transport';
+import { WINDOWS_DYNAMIC_RUNTIME } from '../runtime/build-manifest';
+import { connectOwnedLoopback,type LoopbackCDPTransport } from '../runtime/transport';
 import { LiveRuntimeDriver } from '../runtime/driver';
 import type { NativeInteraction, NativeInteractionOptions, NativePoll } from '../runtime/native-composer';
 import type { PanelState, VerifiedComposerSnapshot } from '../src/shared/workbench';
+import { reportVendorProgress, type VendorProgressStage } from './vendor-progress';
 declare const __NATIVE_ARTIFACT_SOURCE__:string;
 declare const __NATIVE_ARTIFACT_SHA256__:string;
 declare const __RUNTIME_ARTIFACT_SOURCE__:string;
@@ -26,14 +28,15 @@ export interface ExternalComposer {
 export async function connectExternalComposer(targetInstanceId:string,signal?:AbortSignal):Promise<ExternalComposer> {
   if(process.platform!=='win32'&&process.platform!=='darwin'||!/^\d+:\d+:\d+$/.test(targetInstanceId))throw new Error('INVALID_TARGET');
   const started=Date.now();
-  const mark=(stage:string)=>console.log(JSON.stringify({event:'composer-startup',stage,elapsedMs:Date.now()-started,at:new Date().toISOString()}));
+  const mark=(stage:VendorProgressStage)=>{console.log(JSON.stringify({event:'composer-startup',stage,elapsedMs:Date.now()-started,at:new Date().toISOString()}));reportVendorProgress(stage);};
   const current=()=>{if(signal?.aborted)throw new Error('CONNECTION_SUPERSEDED');};current();
   mark('start');
   const pid=Number(targetInstanceId.split(':')[0]);
   const port=await existingClientDebugPort(pid);
   const platform=createLaunchPlatform();
   const verified=await reattachExplicitDevInstance(platform,pid,port);current();mark('files-verified');
-  const verify=async()=>{current();const process=await platform.processIdentity(pid);if(process.startedAt!==verified.process.startedAt)throw new Error('PROCESS_CHANGED');await reattachExplicitDevInstance(platform,pid,port);current();};
+  const verifyOwner=async()=>{if('verifyHandshakeOwner'in platform)await platform.verifyHandshakeOwner(verified.process,port,verified.fingerprint);else{const process=await platform.processIdentity(pid);if(process.startedAt!==verified.process.startedAt)throw new Error('PROCESS_CHANGED');await reattachExplicitDevInstance(platform,pid,port);}};
+  const verify=async()=>{current();await verifyOwner();current();};
   const transport=await connectOwnedLoopback(port,verify);mark('transport-ready');
   const abort=()=>{void transport.disconnect();};
   signal?.addEventListener('abort',abort,{once:true});
@@ -58,5 +61,6 @@ export async function connectExternalComposer(targetInstanceId:string,signal?:Ab
   }catch(error){signal?.removeEventListener('abort',abort);if(driver)await driver.disconnect().catch(()=>{});else await transport.disconnect().catch(()=>{});throw error;}
 }
 export async function startExternalClient():Promise<number>{
+  if(WINDOWS_DYNAMIC_RUNTIME)throw new Error('INSTALLED_VENDOR_ENTRY_REQUIRED');
   const launched=await launchFromExplicitUserAction(createLaunchPlatform(),'start-runtime-assistance');return launched.process.pid;
 }

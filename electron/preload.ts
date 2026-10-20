@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { StandaloneAPI } from '../src/shared/companion-api';
+import { WINDOWS_DYNAMIC_RUNTIME } from '../runtime/build-manifest';
 const api:StandaloneAPI={
+  canStartClient:!WINDOWS_DYNAMIC_RUNTIME,
   getState:()=>ipcRenderer.invoke('standalone:state'),
   onState:listener=>{const wrapped=(_event:unknown,value:Parameters<typeof listener>[0])=>listener(value);ipcRenderer.on('standalone:state-event',wrapped);return()=>ipcRenderer.removeListener('standalone:state-event',wrapped);},
   listWindows:()=>ipcRenderer.invoke('standalone:list-windows'),

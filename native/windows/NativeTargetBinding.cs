@@ -1,0 +1,29 @@
+using System.IO;
+using System.Text.RegularExpressions;
+
+internal static class NativeTargetBinding {
+    internal const string NativeSuffix = @"\resources\TripVendorCompanion\resources\native\windows\TravelMerchant.WindowHelper.exe";
+    internal static string DefaultExecutable => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"vbk-electron","旅游商家桌面版.exe");
+    internal static bool InstalledImage(string image)=>image.EndsWith(NativeSuffix,StringComparison.OrdinalIgnoreCase);
+    static void Require(bool value){if(!value)throw new InvalidOperationException("native_target_binding_rejected");}
+    internal static (string Executable,int Owner) Parse(string[] args,string nativeImage) {
+        if(args.Length==0){Require(!InstalledImage(nativeImage));return(DefaultExecutable,0);}
+        Require(args.Length==4&&args[0]=="--vendor-executable"&&args[2]=="--vendor-owner"&&Regex.IsMatch(args[3],"^[1-9][0-9]{0,8}$"));
+        Require(InstalledImage(nativeImage));
+        var root=nativeImage[..^NativeSuffix.Length];
+        Require(root.Length is >3 and <=240&&Regex.IsMatch(root,@"^[A-Za-z]:\\")&&!root[2..].Contains(':')&&!root.Any(char.IsControl));
+        Require(root[3..].Split('\\').All(p=>p.Length>0&&p is not ("." or "..")&&!p.EndsWith('.')&&!p.EndsWith(' ')&&p.IndexOfAny(['<','>','"','|','?','*'])<0&&!Regex.IsMatch(p,@"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)",RegexOptions.IgnoreCase)));
+        var executable=Path.Combine(root,"旅游商家桌面版.exe");Require(string.Equals(args[1],executable,StringComparison.OrdinalIgnoreCase));
+        return(executable,int.Parse(args[3]));
+    }
+    internal static void ValidateOwner(string executable,int owner,string parentImage,string parentCommand,string ownerImage,long ownerStarted,long parentStarted,long nativeStarted) {
+        var helper=Path.Combine(Path.GetDirectoryName(executable)!,"resources","TripVendorCompanion","旅游商家助手.exe");
+        Require(string.Equals(parentImage,helper,StringComparison.OrdinalIgnoreCase)&&string.Equals(ownerImage,executable,StringComparison.OrdinalIgnoreCase));
+        var flags=Regex.Matches(parentCommand,@"(?:^|\s)""?--vendor-owner=([^\s""]+)""?(?=\s|$)");
+        Require(flags.Count==1&&flags[0].Groups[1].Value==owner.ToString()&&ownerStarted>0&&ownerStarted<=parentStarted&&parentStarted<=nativeStarted);
+    }
+    internal static void NoRedirects(string path) {
+        Require(new DriveInfo(Path.GetPathRoot(path)!).DriveType==DriveType.Fixed);
+        for(string? current=path;current!=null;current=Path.GetDirectoryName(current))Require((File.GetAttributes(current)&FileAttributes.ReparsePoint)==0);
+    }
+}

@@ -25,7 +25,8 @@
     "prepare:mac:arm64": "node scripts/prepare-macos-arm64.mjs",
     "package:mac:app": "npm run build:native:mac && npm run build && install-electron && electron-builder --mac --arm64",
     "clean:mac": "node scripts/clean-macos-build.mjs",
-    "inject:mac": "node scripts/inject-macos-official.mjs"
+    "inject:mac": "node scripts/inject-macos-official.mjs",
+    "package:windows:injector": "node scripts/package-windows-injector.mjs"
   },
   "dependencies": {
     "react": "19.3.0",

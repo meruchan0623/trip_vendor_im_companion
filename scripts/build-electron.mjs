@@ -6,6 +6,10 @@ import { mkdir, writeFile, readFile } from 'node:fs/promises';
 const runtimePlatform=process.env.TMC_RUNTIME_PLATFORM||process.platform;
 if(!['win32','darwin'].includes(runtimePlatform))throw new Error(`UNSUPPORTED_RUNTIME_PLATFORM ${runtimePlatform}`);
 const platformDefine={__TMC_RUNTIME_PLATFORM__:JSON.stringify(runtimePlatform)};
+if(runtimePlatform==='win32'&&process.env.TMC_WINDOWS_DYNAMIC==='1')platformDefine.__TMC_WINDOWS_DYNAMIC__='true';
+if(process.env.TMC_WINDOWS_MANIFEST){
+  throw new Error('WINDOWS_MANIFEST_MUST_BE_CREATED_AT_INSTALL_TIME');
+}
 if(process.env.TMC_MACOS_MANIFEST){
   if(runtimePlatform!=='darwin')throw new Error('PATCHED_MANIFEST_REQUIRES_MACOS');
   const manifest=JSON.parse(await readFile(process.env.TMC_MACOS_MANIFEST,'utf8'));

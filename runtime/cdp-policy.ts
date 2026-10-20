@@ -2,14 +2,11 @@ import { createHash } from 'node:crypto';
 import type { RuntimeTarget } from './attachment';
 import {approvedDocumentURL,assertBuildFingerprint} from './identity';
 import {VERIFIED_RUNTIME_BUILD} from './identity';
+import{RUNTIME_PLATFORM}from'./build-manifest';
 import type {RuntimeUiMetadata} from './runtime-ui';
 import type {RuntimeGeometry} from './runtime-ui';
 import type {OrderEntry} from '../src/shared/companion-api';
 import type {NativePoll} from './native-composer';
-const NAV_URL=VERIFIED_RUNTIME_BUILD.navigationURL;
-const NAV_SCRIPT=VERIFIED_RUNTIME_BUILD.navigationRendererURL;
-const NAV_HTML_HASH=VERIFIED_RUNTIME_BUILD.navigationHtmlSha256;
-const NAV_SCRIPT_HASH=VERIFIED_RUNTIME_BUILD.navigationRendererSha256;
 function sameFileURL(value:string,expected:string){try{const url=new URL(value),known=new URL(expected);return url.protocol==='file:'&&!url.host&&!url.search&&!url.hash&&decodeURIComponent(url.pathname).toLowerCase()===decodeURIComponent(known.pathname).toLowerCase();}catch{return false;}}
 export function approvedOrderFrameURL(value:string){try{const u=new URL(value);return u.origin==='https://vbooking.ctrip.com'&&!u.username&&!u.password&&!u.hash&&['/tour/im/ex-area/b','/tour/im/ex-area/b/imExtraInfo'].includes(u.pathname);}catch{return false;}}
 /** Fixed read-only inspector; function is serialized into our isolated world. */
@@ -116,6 +113,7 @@ export class RuntimeCDPPolicy {
   async pollNative(authGeneration:number){if(!this.nativeObjectId)throw new Error('NATIVE_NOT_READY');const result=await this.owned('Runtime.callFunctionOn',{objectId:this.nativeObjectId,functionDeclaration:'function(generation){return this.poll(generation);}',arguments:[{value:authGeneration}],returnByValue:true});if(result?.exceptionDetails||!result?.result?.value)throw new Error('NATIVE_POLL_FAILED');return result.result.value;}
   /** The IM BrowserView stays mounted on other pages. Verify the separate main window's selected nav. */
   async readMessageNavigation():Promise<{active:boolean;dpr:number;width:number;height:number}>{
+    const NAV_URL=VERIFIED_RUNTIME_BUILD.navigationURL,NAV_SCRIPT=VERIFIED_RUNTIME_BUILD.navigationRendererURL,NAV_HTML_HASH=VERIFIED_RUNTIME_BUILD.navigationHtmlSha256,NAV_SCRIPT_HASH=VERIFIED_RUNTIME_BUILD.navigationRendererSha256;
     const generation=this.generation,session=this.sessionId;if(!session)throw new Error('SESSION_REQUIRED');
     const current=()=>{if(generation!==this.generation||session!==this.sessionId)throw new Error('SESSION_CHANGED');};
     let stage='DISCOVERY';
@@ -196,6 +194,7 @@ export class RuntimeCDPPolicy {
   async publishWorkbench(state:unknown){if(!this.uiObjectId)return;const result=await this.owned('Runtime.callFunctionOn',{objectId:this.uiObjectId,functionDeclaration:'function(state){this.updateWorkbench(state);return true;}',arguments:[{value:state}],returnByValue:true});if(result?.exceptionDetails)throw new Error('UI_STATE_FAILED');}
   async respondWorkbench(id:string,ok:boolean){if(!this.uiObjectId)return;await this.owned('Runtime.callFunctionOn',{objectId:this.uiObjectId,functionDeclaration:'function(id,ok){this.respondWorkbench(id,ok);}',arguments:[{value:id},{value:ok}],returnByValue:true});}
   async mountUi(metadata:RuntimeUiMetadata,bridge?:{bindingName:string;state:unknown}){
+    if(RUNTIME_PLATFORM==='win32')metadata={...metadata,windowsBuild:VERIFIED_RUNTIME_BUILD};
     if(!this.installed||!this.isolatedContextId||this.uiObjectId)throw new Error('FACTORY_NOT_READY');
     const factory=await this.owned('Runtime.evaluate',{expression:'window.tsimRuntimeFactory',contextId:this.isolatedContextId,objectGroup:this.target.contextNonce,returnByValue:false});
     if(factory?.exceptionDetails||typeof factory?.result?.objectId!=='string')throw new Error('RUNTIME_FACTORY_MISSING');

@@ -3,6 +3,10 @@ import type { Readable, Writable } from 'node:stream';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { win32 } from 'node:path';
+import { WINDOWS_DYNAMIC_RUNTIME } from '../runtime/build-manifest';
+import { windowsInstallationFromHelper } from '../runtime/windows-compatibility.mjs';
+import { vendorOwnerPID } from './vendor-owner';
 import type { NativeWindow } from '../src/shared/types';
 import { isRecord } from '../src/shared/validation';
 export interface NativeBounds { x:number; y:number; width:number; height:number }
@@ -19,6 +23,13 @@ function draftSnapshot(value:unknown, bound:string|null):NativeDraftSnapshot {
   return {targetInstanceId:value.targetInstanceId as string,editorIdentity:value.editorIdentity,text:value.text,revision:value.revision,bounds:value.bounds,canReplace:value.canReplace};
 }
 export interface NativeTransport { stdin:Writable; stdout:Readable; stderr:Readable; on(event:string, listener:(...args:any[])=>void):unknown; once(event:string, listener:(...args:any[])=>void):unknown; kill():unknown }
+export function nativeLaunchArguments(nativePath:string,context={platform:process.platform,installed:WINDOWS_DYNAMIC_RUNTIME,helper:process.execPath,args:process.argv}):string[]{
+  if(context.platform!=='win32'||!context.installed)return[];
+  const installation=windowsInstallationFromHelper(context.helper),owner=vendorOwnerPID(context.args);
+  const expected=win32.join(installation.helperDirectory,'resources','native','windows','TravelMerchant.WindowHelper.exe');
+  if(!owner||nativePath.toLowerCase()!==expected.toLowerCase())throw new Error('native_target_binding_rejected');
+  return['--vendor-executable',installation.executable,'--vendor-owner',String(owner)];
+}
 export class NativeAdapter {
   private child: NativeTransport | undefined;
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -27,7 +38,7 @@ export class NativeAdapter {
   start(): void {
     if (this.child) return;
     if (!this.transportFactory && !existsSync(this.path)) { this.onAvailability('helper_not_built'); return; }
-    this.child = this.transportFactory ? this.transportFactory() : spawn(this.path, [], { stdio: ['pipe','pipe','pipe'], windowsHide: true });
+    this.child = this.transportFactory ? this.transportFactory() : spawn(this.path, nativeLaunchArguments(this.path), { stdio: ['pipe','pipe','pipe'], windowsHide: true });
     // Diagnostics contain codes only; draft data travels solely over the private stdout pipe.
     this.child.stderr.on('data', () => this.onAvailability('helper_diagnostic'));
     const lines = createInterface({ input: this.child.stdout });

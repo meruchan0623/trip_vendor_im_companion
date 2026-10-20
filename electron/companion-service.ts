@@ -6,6 +6,7 @@ import type {NativeInteraction} from '../runtime/native-composer';
 import type { NativeAdapter, NativeDraftSnapshot, WindowState } from './native-adapter';
 import { connectExternalComposer, type ExternalComposer } from './external-composer';
 import { embeddedPanelState, invokeEmbeddedAction } from './embedded-host';
+import {reportVendorProgress} from './vendor-progress';
 
 type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
@@ -285,7 +286,7 @@ export class CompanionService {
         if(this.external!==composer||this.closed){await composer.close();return;}
         this.state.phase='idle';await this.readDraft();
       }
-      catch(error){const failed=this.external;this.retireInteractions();this.external=undefined;await failed?.close().catch(()=>{});if(!this.closed&&epoch===this.connectionEpoch&&id===this.state.targetInstanceId)this.fail(error,true);}
+      catch(error){const failed=this.external;this.retireInteractions();this.external=undefined;await failed?.close().catch(()=>{});if(!this.closed&&epoch===this.connectionEpoch&&id===this.state.targetInstanceId){reportVendorProgress('failed');this.fail(error,true);}}
     })().finally(()=>{this.externalConnecting=undefined;});
     return this.externalConnecting;
   }

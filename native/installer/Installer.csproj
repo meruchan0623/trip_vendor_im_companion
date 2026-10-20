@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <AssemblyName>TripVendorCompanion-Setup</AssemblyName><PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SelfContained>true</SelfContained><RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType><DebugSymbols>false</DebugSymbols>
+    <!-- Release packaging supplies Version; unversioned local builds must not claim a release. -->
+    <InformationalVersion Condition="'$(Version)' == ''">unversioned</InformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../work/windows-inject/payload.zip.br" LogicalName="payload.zip.br" Condition="Exists('../../work/windows-inject/payload.zip.br')" />
+    <EmbeddedResource Include="../../work/windows-inject/payload-archive.json" LogicalName="payload-archive.json" Condition="Exists('../../work/windows-inject/payload-archive.json')" />
+  </ItemGroup>
+</Project>
