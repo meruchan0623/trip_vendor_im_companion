@@ -46,7 +46,7 @@ export class RuntimeCDPPolicy {
   get session(){return this.sessionId;}
   get context(){return this.isolatedContextId;}
   get nativeReady(){return !!this.nativeObjectId;}
-  invalidateContext(){this.generation++;this.isolatedContextId=undefined;this.installed=false;}
+  invalidateContext(){this.generation++;this.isolatedContextId=undefined;this.installed=false;this.verifiedLoader=undefined;}
   private async owned(method:string,params:Record<string,unknown>):Promise<any>{const session=this.sessionId,generation=this.generation;if(!session)throw new Error('SESSION_REQUIRED');const result=await this.transport.send(method,params,session);if(session!==this.sessionId||generation!==this.generation)throw new Error('SESSION_CHANGED');return result;}
   constructor(private transport:CDPTransport,private target:RuntimeTarget,private ownBundleSha256:string){assertBuildFingerprint(target.fingerprint);if(!approvedDocumentURL(target.documentURL)||!target.targetId||!target.frameId||!target.contextNonce||!/^[0-9a-f]{64}$/.test(ownBundleSha256))throw new Error('UNVERIFIED_POLICY_TARGET');}
   async attachSession():Promise<void>{
@@ -80,11 +80,19 @@ export class RuntimeCDPPolicy {
     return{visible:value.visible,focused:value.focused};
   }
   async enableInspection(){await Promise.all([this.owned('Page.enable',{}),this.owned('Runtime.enable',{}),this.owned('Debugger.enable',{})]);}
+  /** Loader whose main resource already matched on this session; a navigation gets a new loaderId. */
+  private verifiedLoader?:{session:string;loaderId:string;url:string};
   async verifyExactDocument(){
-    const result=await this.owned('Page.getFrameTree',{});const frame=result?.frameTree?.frame;
+    const session=this.sessionId,result=await this.owned('Page.getFrameTree',{});const frame=result?.frameTree?.frame;
     if(!frame||frame.id!==this.target.frameId||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
+    const loaderId=typeof frame.loaderId==='string'&&frame.loaderId?frame.loaderId:undefined,known=this.verifiedLoader;
+    if(loaderId&&known&&known.session===session&&known.loaderId===loaderId&&known.url===frame.url)return;
     const resource=await this.owned('Page.getResourceContent',{frameId:this.target.frameId,url:this.target.documentURL});
     if(!resource||typeof resource.content!=='string'||resource.content.length>20000||resource.base64Encoded!==false||createHash('sha256').update(resource.content,'utf8').digest('hex')!==this.target.fingerprint.htmlSha256)throw new Error('LOADED_DOCUMENT_HASH_MISMATCH');
+    if(!loaderId||!session)return;
+    // Bind the hash to the loader that was current before and after the resource read.
+    const after=(await this.owned('Page.getFrameTree',{}))?.frameTree?.frame;
+    if(after?.id===frame.id&&after.loaderId===loaderId&&after.url===frame.url)this.verifiedLoader={session,loaderId,url:frame.url};
   }
   async verifyRenderer(scriptId:string){if(!/^[0-9]+$/.test(scriptId))throw new Error('INVALID_SCRIPT_ID');const result=await this.owned('Debugger.getScriptSource',{scriptId});if(!result||typeof result.scriptSource!=='string'||result.scriptSource.length>8_000_000||createHash('sha256').update(result.scriptSource,'utf8').digest('hex')!==VERIFIED_RUNTIME_BUILD.rendererSha256)throw new Error('LOADED_RENDERER_HASH_MISMATCH');}
   async inspectParentCaptures():Promise<ParentCapture[]>{

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {LiveRuntimeDriver} from '../runtime/driver';
 import {VERIFIED_RUNTIME_BUILD} from '../runtime/identity';
+import {RuntimeCDPPolicy} from '../runtime/cdp-policy';
+import {activateWindowsRuntimeBuild} from '../runtime/build-manifest';
 import {CompanionService} from '../electron/companion-service';
 
 function deferred<T=void>(){let resolve!:(value:T)=>void,reject!:(error:unknown)=>void;const promise=new Promise<T>((done,fail)=>{resolve=done;reject=fail;});return{promise,resolve,reject};}
@@ -134,4 +136,30 @@ test('ordinary mount failure closes only that failed owner and permits a later c
     const successor=composer();service.reconnecting={id:'1:2:3',epoch:service.connectionEpoch,controller:new AbortController(),promise:Promise.resolve(successor.value),claimed:false,disposed:false};
     await service.connectComposer();assert.equal(service.external,successor.value);assert.equal(successor.counts().mounts,1);
   }finally{await service.dispose();}
+});
+
+test('exact-document checks reuse a verified hash only for the same session, loader and URL',async()=>{
+  const saved=VERIFIED_RUNTIME_BUILD,html='exact document fixture';
+  activateWindowsRuntimeBuild({...saved,htmlSha256:createHash('sha256').update(html).digest('hex')});
+  try{
+    const keys=['executable','executableVersion','packageVersion','aresVersion','executableSha256','asarSha256','htmlSha256','rendererSha256'] as const;
+    const fingerprint=Object.fromEntries(keys.map(key=>[key,VERIFIED_RUNTIME_BUILD[key]])) as any;
+    let loader='L1',content=html,reads=0,sessions=0;
+    const transport:any={disconnect:async()=>{},send:async(method:string)=>{
+      if(method==='Target.attachToTarget')return{sessionId:'S'+(++sessions)};
+      if(method==='Target.detachFromTarget')return{};
+      if(method==='Page.getFrameTree')return{frameTree:{frame:{id:'F',url:VERIFIED_RUNTIME_BUILD.documentURL,loaderId:loader}}};
+      if(method==='Page.getResourceContent'){reads++;return{content,base64Encoded:false};}
+      throw Error('Unexpected '+method);
+    }};
+    const policy=new RuntimeCDPPolicy(transport,{targetId:'T',frameId:'F',contextNonce:'fixture',documentURL:VERIFIED_RUNTIME_BUILD.documentURL,fingerprint},'0'.repeat(64));
+    await policy.attachSession();
+    await policy.verifyExactDocument();await policy.verifyExactDocument();await policy.verifyExactDocument();assert.equal(reads,1);
+    // A reload is a new loader: its bytes are read and compared again before any reuse.
+    loader='L2';content='tampered vendor bytes';
+    await assert.rejects(policy.verifyExactDocument(),/LOADED_DOCUMENT_HASH_MISMATCH/);assert.equal(reads,2);
+    await assert.rejects(policy.verifyExactDocument(),/LOADED_DOCUMENT_HASH_MISMATCH/);assert.equal(reads,3);
+    loader='L3';content=html;await policy.verifyExactDocument();await policy.verifyExactDocument();assert.equal(reads,4);
+    policy.invalidateContext();await policy.verifyExactDocument();assert.equal(reads,5);
+  }finally{activateWindowsRuntimeBuild(saved);}
 });

@@ -25,6 +25,10 @@ export function approvedImTargets(result:unknown):ImTargetCandidate[]{
   if(targets.length>16)throw new Error('IM_TARGET_LIMIT');
   return targets;
 }
+/** Hash-verified documents per socket. A loaderId names one browser-side navigation whose main
+ * resource is immutable; a reload or navigation gets a new loaderId and is verified again. */
+const verifiedLoaders=new WeakMap<CDPTransport,Set<string>>();
+const VERIFIED_LOADER_LIMIT=64;
 /** Probe only a pinned top document in a temporary isolated world; never reads business text. */
 export async function observeImTarget(transport:CDPTransport,target:ImTargetCandidate,fingerprint:BuildFingerprint,nonce:string):Promise<ImTargetObservation>{
   let session:string|undefined;
@@ -32,18 +36,24 @@ export async function observeImTarget(transport:CDPTransport,target:ImTargetCand
     const attached=await transport.send('Target.attachToTarget',{targetId:target.targetId,flatten:true}) as any;
     if(typeof attached?.sessionId!=='string'||!attached.sessionId)throw new Error('INVALID_SESSION');
     session=attached.sessionId;
-    // Resource content is available only after Page has been enabled on this new session.
-    await transport.send('Page.enable',{},session);
     const tree=await transport.send('Page.getFrameTree',{},session) as any,frame=tree?.frameTree?.frame;
     if(!frame||typeof frame.id!=='string'||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
-    const resource=await transport.send('Page.getResourceContent',{frameId:frame.id,url:frame.url},session) as any;
-    if(typeof resource?.content!=='string'||resource.content.length>20000||resource.base64Encoded!==false||createHash('sha256').update(resource.content).digest('hex')!==fingerprint.htmlSha256)throw new Error('LOADED_DOCUMENT_HASH_MISMATCH');
+    const loaders=verifiedLoaders.get(transport)??new Set<string>();
+    const loader=typeof frame.loaderId==='string'&&frame.loaderId?JSON.stringify([fingerprint.htmlSha256,target.targetId,frame.id,frame.loaderId,frame.url]):undefined;
+    // Page.enable is the slowest probe command and is needed only to read resource content.
+    if(!loader||!loaders.has(loader)){
+      await transport.send('Page.enable',{},session);
+      const resource=await transport.send('Page.getResourceContent',{frameId:frame.id,url:frame.url},session) as any;
+      if(typeof resource?.content!=='string'||resource.content.length>20000||resource.base64Encoded!==false||createHash('sha256').update(resource.content).digest('hex')!==fingerprint.htmlSha256)throw new Error('LOADED_DOCUMENT_HASH_MISMATCH');
+    }
     const world=await transport.send('Page.createIsolatedWorld',{frameId:frame.id,worldName:`tsim-selection-${nonce}`,grantUniveralAccess:false},session) as any;
     if(!Number.isSafeInteger(world?.executionContextId)||world.executionContextId<=0)throw new Error('INVALID_CONTEXT');
     const read=await transport.send('Runtime.evaluate',{expression:'({visible:document.visibilityState==="visible",focused:document.hasFocus()})',contextId:world.executionContextId,returnByValue:true,awaitPromise:false},session) as any,value=read?.result?.value;
     if(read?.exceptionDetails||typeof value?.visible!=='boolean'||typeof value?.focused!=='boolean')throw new Error('ACTIVE_IM_TARGET_UNVERIFIED');
     const after=await transport.send('Page.getFrameTree',{},session) as any;
     if(after?.frameTree?.frame?.id!==frame.id||after?.frameTree?.frame?.loaderId!==frame.loaderId||after?.frameTree?.frame?.url!==frame.url)throw new Error('RUNTIME_TARGET_CHANGED');
+    // Record only after the closing tree confirms the hash and observation belong to one loader.
+    if(loader&&!loaders.has(loader)){if(loaders.size>=VERIFIED_LOADER_LIMIT)loaders.delete(loaders.values().next().value!);loaders.add(loader);verifiedLoaders.set(transport,loaders);}
     return{...target,frameId:frame.id,visible:value.visible,focused:value.focused};
   }finally{if(session)await transport.send('Target.detachFromTarget',{sessionId:session});}
 }
