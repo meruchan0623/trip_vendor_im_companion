@@ -8,6 +8,7 @@ import {JSDOM} from 'jsdom';
 import {createHash} from 'node:crypto';
 import {WINDOWS_RUNTIME_BUILD} from '../runtime/build-manifest';
 import {readConversationId,readCurrentOrderHint,readHeaderConversation} from '../runtime/page/conversation';
+import {CompanionService} from '../electron/companion-service';
 
 const order='1622931630893808';
 test('out-of-process order frames use the DOM frame ID and detach after every outcome',async t=>{
@@ -243,4 +244,107 @@ test('host hints remain separate from visible overlay ranges and clear for anoth
   assert.equal(embeddedPanelState(state,key).detectedOrder?.identifier,order);
   assert.equal(embeddedPanelState(state,JSON.stringify(['target','other',1,'account'])).detectedOrder?.identifier,null);
   assert.equal(embeddedPanelState({...state,messageSurface:{active:false}},key).detectedOrder?.identifier,null);
+});
+async function sessionFixture(){
+  let identity:any={accountScope:'psim:fixture',authGeneration:1,permissions:[]},grants=0;
+  const session={identity:()=>identity,sync:async()=>{},setBackgroundPolling(){},getBrowserProfile:()=>null,operatorGrant:()=>{grants++;return{accessToken:'fixture-token',sessionRef:'fixture-ref'};},translate:async()=>{throw Error('unused');},queryOriginalIdentifier:async()=>{throw Error('unused');},openLogin:async()=>{},logout:async()=>{},dispose(){}};
+  const service=new CompanionService({} as never,async()=>{},()=>{},{enabled:false},true,()=>session as never),fixture=service as any;
+  await fixture.sessionStarting;
+  fixture.state={...service.getState(),auth:'ready',attached:true,targetInstanceId:'1:2:3',messageSurface:{active:true,composerRect:null,toolbarRect:null},currentOrderHint:{identifier:order,conversationId:'customer'}};
+  fixture.foreground=true;fixture.external={close:async()=>{}};
+  fixture.captured={source:'verified-editor',snapshot:{conversationId:'customer',scopeGeneration:1,platformAccountScope:'vendor:fixture'},currentOrderHint:null,orderEntries:[]};
+  fixture.capture=async()=>fixture.captured;fixture.adopt=(capture:any)=>{fixture.captured=capture;fixture.state.currentOrderHint=capture.currentOrderHint??null;};fixture.publish=()=>{};
+  const intent={identifier:'89123456789012345678',identifierType:'iccid' as const,conversationKey:fixture.context()};
+  return{service,fixture,intent,get grants(){return grants;},set identity(value:any){identity=value;}};
+}
+test('operator handoff waits for observation and freshly captures a no-order consultation before granting manual card lookup',async()=>{
+  const f=await sessionFixture();let release!:()=>void,captures=0;
+  try{
+    f.fixture.observation=new Promise<void>(resolve=>{release=resolve;});
+    f.fixture.capture=async()=>{captures++;return f.fixture.captured;};
+    const opening=f.service.operatorSession(f.intent);
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(captures,0);assert.equal(f.grants,0);
+    release();assert.deepEqual(await opening,{accessToken:'fixture-token',sessionRef:'fixture-ref'});assert.equal(captures,1);assert.equal(f.grants,1);assert.equal(f.fixture.busy,false);
+  }finally{await f.service.dispose();}
+});
+test('account, epoch, lease, foreground or conversation changes during fresh capture never receive a grant',async()=>{
+  for(const mode of ['account','epoch','lease','foreground','conversation','mismatched-store']){
+    const f=await sessionFixture();let release!:()=>void;
+    try{
+      f.fixture.capture=async()=>{await new Promise<void>(resolve=>{release=resolve;});if(mode==='mismatched-store')throw Error('CONVERSATION_SOURCE_UNVERIFIED');return mode==='conversation'?{...f.fixture.captured,snapshot:{...f.fixture.captured.snapshot,conversationId:'other'}}:f.fixture.captured;};
+      const opening=f.service.operatorSession(f.intent);await new Promise(resolve=>setImmediate(resolve));assert.equal(f.grants,0);
+      if(mode==='account')f.identity={accountScope:'psim:other',authGeneration:2,permissions:[]};
+      if(mode==='epoch')f.fixture.epoch++;
+      if(mode==='lease')f.fixture.external={close:async()=>{}};
+      if(mode==='foreground')f.fixture.foreground=false;
+      release();await assert.rejects(opening,/ORDER_CONTEXT_CHANGED|CONVERSATION_SOURCE_UNVERIFIED/);assert.equal(f.grants,0);assert.equal(f.fixture.busy,false);
+      if(mode==='mismatched-store'){assert.equal(f.fixture.state.currentOrderHint,null);assert.equal(f.fixture.state.messageSurface.active,false);}
+    }finally{await f.service.dispose();}
+  }
+});
+/** Adopts the fixture capture through the real service path so `verifiedAt` is recorded as in production. */
+function adoptVerified(f:Awaited<ReturnType<typeof sessionFixture>>){
+  f.fixture.captured={...f.fixture.captured,messageSurface:{active:true,composerRect:null,toolbarRect:null}};
+  (CompanionService.prototype as any).adopt.call(f.fixture,f.fixture.captured);
+  assert.equal(f.fixture.state.messageSurface.active,true);assert.ok(f.fixture.verifiedAt);
+}
+test('operator handoff reuses a verified capture adopted within 1 s and re-reads an older one',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:10_000});
+  for(const [elapsed,expected] of [[0,0],[1000,0],[1001,1]] as const){
+    const f=await sessionFixture();let captures=0;
+    try{
+      adoptVerified(f);f.fixture.capture=async()=>{captures++;return f.fixture.captured;};
+      t.mock.timers.tick(elapsed);
+      assert.deepEqual(await f.service.operatorSession(f.intent),{accessToken:'fixture-token',sessionRef:'fixture-ref'});
+      assert.equal(captures,expected,`elapsed ${elapsed}`);assert.equal(f.grants,1);assert.equal(f.fixture.busy,false);
+    }finally{await f.service.dispose();}
+  }
+});
+test('the fresh-capture fast path still refuses foreground, conversation and login changes and yields to in-flight reads',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:10_000});
+  for(const mode of ['foreground','surface','conversation','auth-state','logged-out','auth-generation','epoch','invalidated','lease','observation','busy']){
+    const f=await sessionFixture();let captures=0,release:(()=>void)|undefined;
+    try{
+      adoptVerified(f);f.fixture.capture=async()=>{captures++;return f.fixture.captured;};
+      let intent=f.intent;
+      if(mode==='foreground')f.fixture.foreground=false;
+      if(mode==='surface')f.fixture.state.messageSurface={active:false,composerRect:null,toolbarRect:null};
+      if(mode==='conversation')intent={...f.intent,conversationKey:JSON.stringify(['1:2:3','other',1,'vendor:fixture'])};
+      if(mode==='auth-state')f.fixture.state.auth='connecting';
+      if(mode==='logged-out')f.identity=null;
+      if(mode==='auth-generation')f.identity={accountScope:'psim:fixture',authGeneration:2,permissions:[]};
+      if(mode==='epoch')f.fixture.epoch++;
+      if(mode==='invalidated')f.service.invalidate();
+      if(mode==='lease')f.fixture.external={close:async()=>{}};
+      if(mode==='observation')f.fixture.observation=new Promise<void>(resolve=>{release=resolve;});
+      if(mode==='busy')f.fixture.setBusy(true);
+      const opening=f.service.operatorSession(intent);
+      if(['foreground','surface'].includes(mode)){await assert.rejects(opening,/MESSAGE_PAGE_REQUIRED/);assert.equal(f.grants,0);}
+      else if(mode==='conversation'){await assert.rejects(opening,/ORDER_CONTEXT_CHANGED/);assert.equal(f.grants,0);}
+      else if(['auth-state','logged-out'].includes(mode)){await assert.rejects(opening,/PSIM_LOGIN_REQUIRED/);assert.equal(f.grants,0);}
+      else{
+        // Anything that could make the earlier capture stale falls back to the full fresh-capture path.
+        await new Promise(resolve=>setImmediate(resolve));
+        if(mode==='observation'||mode==='busy'){assert.equal(captures,0);assert.equal(f.grants,0);release?.();if(mode==='busy')f.fixture.setBusy(false);}
+        assert.deepEqual(await opening,{accessToken:'fixture-token',sessionRef:'fixture-ref'});assert.equal(captures,1,mode);assert.equal(f.grants,1);
+      }
+      assert.equal(f.fixture.busy,false);
+    }finally{await f.service.dispose();}
+  }
+});
+test('a new header store and an old alternate/iframe cannot authorize the old intent',async()=>{
+  const header=headerFixture(),f=await sessionFixture();
+  try{
+    const oldConversation=readConversationId(header.document);
+    f.fixture.captured.snapshot.conversationId=oldConversation;f.fixture.state.currentOrderHint={identifier:order,conversationId:oldConversation};
+    const intent={...f.intent,identifier:order,identifierType:'order_number' as const,conversationKey:f.fixture.context()};
+    const newState={currentConvId:'new',conversationList:[{gid:'new',sessionId:'new',serviceType:'t',status:1,relationOrderId:'NEW12345'}]};
+    header.owner.dependencies.firstContext.memoizedValue.ctrl.store={getState:()=>newState};
+    // alternate still points at header.store and the iframe still identifies old.
+    assert.deepEqual(readHeaderConversation(header.document),{conversationId:null,identifier:null});
+    assert.throws(()=>readConversationId(header.document,true),/CONVERSATION_SOURCE_UNVERIFIED/);
+    f.fixture.capture=async()=>{readConversationId(header.document,true);return f.fixture.captured;};
+    await assert.rejects(f.service.operatorSession(intent),/CONVERSATION_SOURCE_UNVERIFIED/);
+    assert.equal(f.grants,0);assert.equal(f.fixture.state.currentOrderHint,null);assert.equal(f.fixture.state.messageSurface.active,false);
+  }finally{header.dom.window.close();await f.service.dispose();}
 });

@@ -61,6 +61,8 @@ export const CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS=5000;
 /** Idle lease renewal cadence: four attempts inside the 6 s page and native leases. */
 const LEASE_RENEW_MS=1500;
 const DRAFT_SETTLE_MS=120;
+/** A verified capture this recent, under the same epoch, lets the operator grant skip a second read. */
+export const OPERATOR_CAPTURE_FRESH_MS=1000;
 export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
@@ -156,6 +158,8 @@ export class CompanionService {
     this.interactionTask=task;void task.finally(()=>{if(this.interactionTask===task)this.interactionTask=undefined;});
   }
   private captured?:Captured;
+  /** When `captured` was last adopted as verified; any `invalidate()` (epoch change, account switch, reset) drops it. */
+  private verifiedAt?:{at:number;capture:Captured;epoch:number;target:string|null;external:ExternalComposer;accountScope?:string;authGeneration?:number};
   /** Survives temporary capture failures so recovery can distinguish the same customer from a new one. */
   private verifiedContext?:string;
   private verifiedCustomerContext?:string;
@@ -275,7 +279,7 @@ export class CompanionService {
     const wasForeground=this.foreground;
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
-  invalidate(){this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
+  invalidate(){this.verifiedAt=undefined;this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
   /** A verified socket waiting for the IM page keeps its attempt open; release the panel controls meanwhile. */
   private composerWaiting(controller:AbortController){
     if(this.closed||controller.signal.aborted||this.connectionAbort!==controller)return;
@@ -332,6 +336,8 @@ export class CompanionService {
     this.state.currentOrderHint=capture.source==='verified-editor'?capture.currentOrderHint:null;
     this.state.draft={text:capture.snapshot.text,canReplace:capture.source==='verified-editor'?capture.snapshot.isPlainText&&!capture.snapshot.composing:capture.snapshot.canReplace};
     if(invalidateChanged)this.schedule();
+    const identity=this.psim.identity();
+    this.verifiedAt=capture.source==='verified-editor'&&this.external?{at:Date.now(),capture,epoch:this.epoch,target:this.state.targetInstanceId,external:this.external,accountScope:identity?.accountScope,authGeneration:identity?.authGeneration}:undefined;
   }
   private async observe(){
     this.setBusy(true);const epoch=this.epoch,id=this.state.targetInstanceId;
@@ -567,6 +573,22 @@ export class CompanionService {
     if(this.closed||!this.foreground||!this.external||this.captured?.source!=='verified-editor'||!this.state.messageSurface?.active)throw new Error('MESSAGE_PAGE_REQUIRED');
     if(intent.conversationKey!==this.context())throw new Error('ORDER_CONTEXT_CHANGED');
     const identity=this.psim.identity();if(!identity||this.state.auth!=='ready')throw new Error('PSIM_LOGIN_REQUIRED');
+    const epoch=this.epoch,target=this.state.targetInstanceId,external=this.external;
+    const current=()=>!this.closed&&this.foreground&&this.external===external&&this.state.targetInstanceId===target&&this.epoch===epoch&&this.state.messageSurface?.active===true&&intent.conversationKey===this.context()&&this.state.auth==='ready'&&this.psim.identity()?.accountScope===identity.accountScope&&this.psim.identity()?.authGeneration===identity.authGeneration;
+    // Fast path: the displayed verified capture was adopted moments ago under this epoch, target, lease and login, and no read is in flight.
+    const fresh=this.verifiedAt,age=fresh?Date.now()-fresh.at:Infinity;
+    if(fresh&&age>=0&&age<=OPERATOR_CAPTURE_FRESH_MS&&fresh.capture===this.captured&&fresh.epoch===epoch&&fresh.target===target&&fresh.external===external&&fresh.accountScope===identity.accountScope&&fresh.authGeneration===identity.authGeneration&&!this.busy&&!this.observation&&!this.interactionTask&&!this.externalConnecting&&current()){
+      const grant=this.psim.operatorGrant(identity);if(!grant)throw new Error('AUTH_CHANGED');
+      return grant;
+    }
+    if(!await this.waitForObservation()||!current())throw new Error('ORDER_CONTEXT_CHANGED');
+    await this.acquireEditor();
+    try{
+      if(!current())throw new Error('ORDER_CONTEXT_CHANGED');
+      const capture=await this.capture();if(!current())throw new Error('ORDER_CONTEXT_CHANGED');
+      this.adopt(capture);this.publish();if(!current())throw new Error('ORDER_CONTEXT_CHANGED');
+    }catch(error){if(current())this.fail(error,true);throw error;}
+    finally{this.setBusy(false);}
     const grant=this.psim.operatorGrant(identity);if(!grant)throw new Error('AUTH_CHANGED');
     return grant;
   }
