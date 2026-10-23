@@ -38,14 +38,25 @@ export class NativeAdapter {
   start(): void {
     if (this.child) return;
     if (!this.transportFactory && !existsSync(this.path)) { this.onAvailability('helper_not_built'); return; }
-    this.child = this.transportFactory ? this.transportFactory() : spawn(this.path, nativeLaunchArguments(this.path), { stdio: ['pipe','pipe','pipe'], windowsHide: true });
+    const child = this.child = this.transportFactory ? this.transportFactory() : spawn(this.path, nativeLaunchArguments(this.path), { stdio: ['pipe','pipe','pipe'], windowsHide: true });
+    let readyNotified = false;
     // Diagnostics contain codes only; draft data travels solely over the private stdout pipe.
-    this.child.stderr.on('data', () => this.onAvailability('helper_diagnostic'));
-    const lines = createInterface({ input: this.child.stdout });
+    child.stderr.on('data', () => { if (this.child === child) this.onAvailability('helper_diagnostic'); });
+    const lines = createInterface({ input: child.stdout });
     lines.on('line', line => {
+      if (this.child !== child) return;
       if (line.length > 262_144) return;
       let value: unknown; try { value = JSON.parse(line); } catch { return; }
       if (!isRecord(value) || value.protocolVersion !== '1.0' || typeof value.type !== 'string') return;
+      // The unsolicited startup capability arrives after native identity checks.
+      // Wake discovery even if its initial six-second list request has expired.
+      const capability = value.payload;
+      if (!readyNotified && value.type === 'capabilities' && value.requestId == null && isRecord(capability)
+        && capability.reason === 'not_bound' && capability.windowFollow === true
+        && ['readMessage','readOrder','readDraft','writeDraft'].every(key => capability[key] === false)) {
+        readyNotified = true;
+        this.onTargetAvailable?.();
+      }
       if (value.type==='browserLost') this.onBrowserLost?.();
       if(value.type==='targetAvailable')this.onTargetAvailable?.();
       if(value.type==='browserWindowState'&&isRecord(value.payload)&&launchIdValid(value.payload.launchId)&&validBounds(value.payload.bounds)&&typeof value.payload.maximized==='boolean'){
@@ -70,8 +81,8 @@ export class NativeAdapter {
         this.onState({ targetInstanceId: this.bound!, bounds, ...(validBounds(p.clientBounds)?{clientBounds:p.clientBounds}:{}), visible:p.visible as boolean, minimized:p.minimized as boolean, foreground:p.foreground as boolean, groupForeground:typeof p.groupForeground==='boolean'?p.groupForeground:p.foreground as boolean, dpi:p.dpi });
       }
     });
-    this.child.on('error', () => this.lost('helper_unavailable'));
-    this.child.on('exit', () => this.lost('helper_stopped'));
+    child.on('error', () => { if (this.child === child) this.lost('helper_unavailable'); });
+    child.on('exit', () => { if (this.child === child) this.lost('helper_stopped'); });
     this.onAvailability('available');
   }
   private lost(status:string): void { this.child = undefined; this.bound = null; for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error(status)); } this.pending.clear(); this.onState(null); this.onAvailability(status); }
