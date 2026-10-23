@@ -190,7 +190,11 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       const candidates=approvedImTargets(await this.transport.send('Target.getTargets',{}));this.current(epoch);
       if(!candidates.some(target=>target.targetId===this.target.targetId))throw new Error('RUNTIME_TARGET_CHANGED');
       if(candidates.length===1)return true;
-      const observations=[];for(const target of candidates){observations.push(await observeImTarget(this.transport,target,this.target.fingerprint,this.target.contextNonce));this.current(epoch);}
+      // Each probe owns a separate temporary CDP session. Wait for every
+      // finally/detach, including failed probes, before choosing or failing.
+      const settled=await Promise.allSettled(candidates.map(target=>observeImTarget(this.transport,target,this.target.fingerprint,this.target.contextNonce)));this.current(epoch);
+      const failure=settled.find(result=>result.status==='rejected');if(failure?.status==='rejected')throw failure.reason;
+      const observations=settled.flatMap(result=>result.status==='fulfilled'?[result.value]:[]);
       const currentInventory=approvedImTargets(await this.transport.send('Target.getTargets',{}));this.current(epoch);
       if(!sameTargetInventory(candidates,currentInventory))throw new Error('RUNTIME_TARGET_CHANGED');
       const selected=chooseActiveImTarget(observations);if(selected.targetId!==this.target.targetId||selected.frameId!==this.target.frameId)throw new Error('RUNTIME_TARGET_CHANGED');
@@ -215,11 +219,17 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       read:async(authGeneration:number):Promise<NativePoll>=>{
         this.current(epoch);const active=await this.verifyActiveTarget(true);this.current(epoch);
         if(!active){await this.policy.renewNative();this.current(epoch);return observed({writeVerified:false,reason:'MESSAGE_PAGE_INACTIVE',messageSurface:{active:false,composerRect:null,toolbarRect:null},orderEntries:[]});}
-        await this.policy.verifyExactDocument();this.current(epoch);
-        // A foreground non-message page still calls read(), so renew before the nav gate without reading business text.
-        await this.policy.renewNative();this.current(epoch);
+        // Document identity, native lease renewal and the separate window's nav
+        // observation are independent. All must finish before reading business
+        // text; a foreground non-message page still renews its native lease.
+        const gates=await Promise.allSettled([
+          this.policy.verifyExactDocument(),this.policy.renewNative(),
+          this.policy.readMessageNavigation().then(value=>({value,error:null}),error=>({value:null,error:reasonOf(error)})),
+        ]);this.current(epoch);
+        for(const gate of gates)if(gate.status==='rejected')throw gate.reason;
+        const navigationGate=gates[2];if(navigationGate.status!=='fulfilled')throw new Error('MESSAGE_NAVIGATION_UNVERIFIED');const navigation=navigationGate.value;
         const inactive=(reason='MESSAGE_PAGE_INACTIVE'):NativePoll=>observed({writeVerified:false,reason,messageSurface:{active:false,composerRect:null,toolbarRect:null},orderEntries:[]});
-        let nav;try{nav=await this.policy.readMessageNavigation();}catch(error){this.current(epoch);return inactive(reasonOf(error));}this.current(epoch);if(!nav.active)return inactive();
+        const nav=navigation.value;if(!nav)return inactive(navigation.error??'MESSAGE_PAGE_INACTIVE');if(!nav.active)return inactive();
         const result=await this.policy.pollNative(authGeneration) as NativePoll;this.current(epoch);if(!result.messageSurface?.active)return inactive(result.reason??'COMPOSER_GEOMETRY_UNAVAILABLE');
         // Read the cross-origin order frame in its own isolated world. Parent DOM access
         // cannot read this frame on Windows; keep failures local to order discovery.

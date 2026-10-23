@@ -80,6 +80,62 @@ test('conversation/geometry changes discard the order; failed reads preserve com
     assert.deepEqual(result.orderEntries,[]);if(mode==='failed')assert.equal(result.messageSurface.active,true);
   }
 });
+test('read starts independent identity gates together but cannot poll before they all pass',async()=>{
+  const f=fixture(),policy=f.driver.policy,started:string[]=[];
+  let release!:()=>void;
+  policy.verifyExactDocument=async()=>{started.push('document');await new Promise<void>(resolve=>{release=resolve;});};
+  policy.renewNative=async()=>{started.push('lease');};
+  const navigation=policy.readMessageNavigation;
+  policy.readMessageNavigation=async()=>{started.push('navigation');return navigation();};
+  const poll=policy.pollNative;
+  policy.pollNative=async()=>{started.push('poll');return poll();};
+  const port=await f.driver.externalComposer('',''),reading=port.read(0);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(started,['document','lease','navigation']);
+  release();assert.equal((await reading).orderEntries.length,1);
+  assert.equal(started.filter(value=>value==='poll').length,2);
+});
+test('an identity gate rejection never reads business text even when other gates finish',async()=>{
+  const f=fixture();let polls=0;
+  f.driver.policy.verifyExactDocument=async()=>{throw Error('LOADED_DOCUMENT_HASH_MISMATCH');};
+  f.driver.policy.pollNative=async()=>{polls++;return{};};
+  await assert.rejects((await f.driver.externalComposer('','')).read(0),/LOADED_DOCUMENT_HASH_MISMATCH/);
+  assert.equal(polls,0);assert.equal(f.reads(),0);
+});
+test('a rejected document gate waits for in-flight navigation initialization before read returns',async()=>{
+  const f=fixture();let release!:()=>void,completed=false,initialized=false;
+  f.driver.policy.verifyExactDocument=async()=>{throw Error('LOADED_DOCUMENT_HASH_MISMATCH');};
+  f.driver.policy.readMessageNavigation=async()=>{await new Promise<void>(resolve=>{release=resolve;});initialized=true;return{active:true,dpr:1,width:1000,height:800};};
+  const reading=(await f.driver.externalComposer('','')).read(0).catch((error:unknown)=>{completed=true;throw error;});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(completed,false);assert.equal(initialized,false);
+  release();await assert.rejects(reading,/LOADED_DOCUMENT_HASH_MISMATCH/);assert.equal(initialized,true);assert.equal(f.reads(),0);
+});
+test('active-account probes run in parallel and await all owned session cleanup on failure',async()=>{
+  for(const failed of [false,true]){
+    const ids=['hidden-a','selected','hidden-b'],attached:string[]=[],detached:string[]=[],source='fixture-html';
+    let release!:()=>void,completed=false,inventoryReads=0;
+    const cleanup=new Promise<void>(resolve=>{release=resolve;});
+    const driver:any=Object.create(LiveRuntimeDriver.prototype);
+    Object.assign(driver,{epoch:0,invalid:false,invalidate:()=>{},target:{targetId:'selected',frameId:'selected-frame',contextNonce:'fixture',fingerprint:{htmlSha256:createHash('sha256').update(source).digest('hex')}},transport:{send:async(method:string,params:any,session?:string)=>{
+      if(method==='Target.getTargets'){inventoryReads++;return{targetInfos:ids.map(targetId=>({type:'page',targetId,url:WINDOWS_RUNTIME_BUILD.documentURL}))};}
+      if(method==='Target.attachToTarget'){attached.push(params.targetId);return{sessionId:params.targetId};}
+      if(method==='Target.detachFromTarget'){if(params.sessionId==='hidden-b')await cleanup;detached.push(params.sessionId);return{};}
+      if(method==='Page.enable')return{};
+      if(method==='Page.getFrameTree')return{frameTree:{frame:{id:session+'-frame',url:WINDOWS_RUNTIME_BUILD.documentURL,loaderId:'fixture'}}};
+      if(method==='Page.getResourceContent')return{content:failed&&session==='hidden-a'?'changed':source,base64Encoded:false};
+      if(method==='Page.createIsolatedWorld')return{executionContextId:2};
+      if(method==='Runtime.evaluate')return{result:{value:{visible:session==='selected',focused:session==='selected'}}};
+      throw Error('Unexpected '+method);
+    }}});
+    const reading=driver.verifyActiveTarget().then((value:boolean)=>{completed=true;return value;},(error:unknown)=>{completed=true;throw error;});
+    // Attach/verification of all three accounts must progress while one cleanup
+    // is delayed. Even a rejected sibling must not abandon that owned session.
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(attached,ids);assert.equal(completed,false);assert.ok(!detached.includes('hidden-b'));
+    release();if(failed)await assert.rejects(reading,/LOADED_DOCUMENT_HASH_MISMATCH/);else assert.equal(await reading,true);
+    assert.deepEqual([...detached].sort(),[...ids].sort());assert.equal(inventoryReads,failed?1:2);
+  }
+});
 test('host order reaches the panel without parent access to the cross-origin document and clears on switch',()=>{
   const dom=new JSDOM('<body><div class="customer_info"><iframe class="customer_order-detail" src="https://vbooking.ctrip.com/tour/im/ex-area/b?groupid=g&sessionid=s&serviceType=t&status=1"></iframe></div></body>',{url:'https://merchant.invalid'});
   const key=JSON.stringify(['target',JSON.stringify(['g','s','t','1']),1,'account']);

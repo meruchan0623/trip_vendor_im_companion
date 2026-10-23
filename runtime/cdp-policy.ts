@@ -181,6 +181,11 @@ export class RuntimeCDPPolicy {
     if(!this.isolatedContextId)throw new Error('ISOLATED_WORLD_REQUIRED');
     const session=this.sessionId,generation=this.generation;
     const current=()=>{if(!session||session!==this.sessionId||generation!==this.generation)throw new Error('SESSION_CHANGED');};
+    const together=async<T,U>(first:Promise<T>,second:Promise<U>):Promise<[T,U]>=>{
+      const results=await Promise.allSettled([first,second] as const);current();
+      if(results[0].status==='rejected')throw results[0].reason;if(results[1].status==='rejected')throw results[1].reason;
+      return[results[0].value,results[1].value];
+    };
     const frames=(tree:any):any[]=>{const result:any[]=[];const walk=(node:any)=>{if(!node?.frame)return;result.push(node.frame);for(const child of node.childFrames??[])walk(child);};walk(tree?.frameTree);return result;};
     const readNode=async()=>{
       const remote=await this.owned('Runtime.evaluate',{expression:'document.querySelector(".customer_info:not(.close) iframe.customer_order-detail")',contextId:this.isolatedContextId,returnByValue:false,objectGroup:this.target.contextNonce});
@@ -188,10 +193,12 @@ export class RuntimeCDPPolicy {
       try{return(await this.owned('DOM.describeNode',{objectId:remote.result.objectId,depth:0})).node;}finally{await this.owned('Runtime.releaseObject',{objectId:remote.result.objectId});}
     };
     const sourceOf=(node:any)=>{if(!Array.isArray(node?.attributes))return;const at=node.attributes.indexOf('src');return at>=0&&approvedOrderFrameURL(node.attributes[at+1])?node.attributes[at+1] as string:undefined;};
-    const node=await readNode(),sourceURL=sourceOf(node);if(!sourceURL||typeof node?.frameId!=='string')return[];
+    // These independent observations bracket the child read below. Keep both
+    // identity checks, but do not spend a separate CDP round trip on the tree.
+    const [node,tree]=await together(readNode(),this.owned('Page.getFrameTree',{}));
+    const sourceURL=sourceOf(node);if(!sourceURL||typeof node?.frameId!=='string')return[];
     let orderSession:string|undefined;
     try{
-      const tree=await this.owned('Page.getFrameTree',{});
       let matches=frames(tree).filter(frame=>frame.id===node.frameId&&frame.parentId===this.target.frameId&&approvedOrderFrameURL(frame.url));
       if(matches.length===0){
         // site-per-process moves the order iframe out of the parent's frame tree.
@@ -215,9 +222,9 @@ export class RuntimeCDPPolicy {
       if(!Number.isSafeInteger(world?.executionContextId)||world.executionContextId<=0)return[];
       const read=await send('Runtime.evaluate',{expression:`(${inspectRightOrderDocument.toString()})(document)`,contextId:world.executionContextId,returnByValue:true,awaitPromise:false});
       const result=read?.result?.value;if(read?.exceptionDetails||!result||!Array.isArray(result.entries)||result.entries.length>1||!Number.isFinite(result.width)||!Number.isFinite(result.height)||result.width<=0||result.height<=0||Math.abs(result.width-geometry.clientWidth)>1||Math.abs(result.height-geometry.clientHeight)>1)return[];
-      const after=await send('Page.getFrameTree',{});
+      const [after,afterNode]=await together(send('Page.getFrameTree',{}),readNode());
       if(!frames(after).some(next=>next.id===frame.id&&next.parentId===this.target.frameId&&next.url===frame.url&&next.loaderId===frame.loaderId))return[];
-      const afterNode=await readNode();if(afterNode?.frameId!==node.frameId||sourceOf(afterNode)!==sourceURL)return[];
+      if(afterNode?.frameId!==node.frameId||sourceOf(afterNode)!==sourceURL)return[];
       return result.entries.flatMap((entry:any)=>{
       if(entry?.identifierType!=='order_number'||typeof entry.identifier!=='string'||!/^[A-Za-z0-9_-]{4,80}$/.test(entry.identifier)||!entry.rect||!['x','y','width','height'].every(key=>Number.isFinite(entry.rect[key])))return[];
       const r=entry.rect;if(r.x<0||r.y<0||r.width<=0||r.height<=0||r.x+r.width>result.width||r.y+r.height>result.height)return[];
