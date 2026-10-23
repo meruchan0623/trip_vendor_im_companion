@@ -33,17 +33,26 @@ internal static partial class Program
     {
         Console.OutputEncoding = new UTF8Encoding(false);
         Console.InputEncoding = Encoding.UTF8;
+        var bindingWatch = Stopwatch.StartNew();
+        string bindingStage = "arguments";
         try {
             var binding=NativeTargetBinding.Parse(args,Environment.ProcessPath??"");ExpectedPath=binding.Executable;
             if(binding.Owner!=0) {
+                bindingStage = "process_handles";
                 using var parent=Process.GetProcessById((int)ParentProcessId());using var owner=Process.GetProcessById(binding.Owner);using var self=Process.GetCurrentProcess();
                 _=parent.SafeHandle;_=owner.SafeHandle;
-                var row=ProcessRows($"ProcessId={parent.Id}").Single();
+                bindingStage = "parent_inspection";
+                // Startup needs one bounded CIM query for the parent's owner flag.
+                // Keep browser-operation inspection on its shorter default budget.
+                var row=ProcessRows($"ProcessId={parent.Id}", timeoutMs: 8000).Single();
+                bindingStage = "parent_identity";
                 if(row.Pid!=parent.Id||Math.Abs(row.StartedTicks-parent.StartTime.ToUniversalTime().Ticks)>10)throw new InvalidOperationException();
+                bindingStage = "owner_identity";
                 NativeTargetBinding.ValidateOwner(ExpectedPath,binding.Owner,parent.MainModule?.FileName??"",row.Command,owner.MainModule?.FileName??"",owner.StartTime.ToUniversalTime().Ticks,parent.StartTime.ToUniversalTime().Ticks,self.StartTime.ToUniversalTime().Ticks);
+                bindingStage = "path_redirects";
                 foreach(var path in new[]{Environment.ProcessPath!,parent.MainModule!.FileName!,ExpectedPath})NativeTargetBinding.NoRedirects(path);
             }
-        }catch {Console.Error.WriteLine("native_target_binding_rejected");Environment.ExitCode=1;return;}
+        }catch {Console.Error.WriteLine($"native_target_binding_rejected stage={bindingStage} elapsed_ms={bindingWatch.ElapsedMilliseconds}");Environment.ExitCode=1;return;}
         Native.SetProcessDpiAwarenessContext(new nint(-4));
         dispatcher = new Control();
         _ = dispatcher.Handle;
