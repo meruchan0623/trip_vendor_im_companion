@@ -269,3 +269,16 @@ test('exact-document checks reuse a verified hash only for the same session, loa
     policy.invalidateContext();await policy.verifyExactDocument();assert.equal(reads,5);
   }finally{activateWindowsRuntimeBuild(saved);}
 });
+
+test('lease-only active checks share one inventory observation; writes always observe afresh',{timeout:5000},async()=>{
+  const world=inventory(),item=world.make('A');
+  const [first,second]=await Promise.all([item.driver.verifyActiveTarget(true),item.driver.verifyActiveTarget(true)]);
+  assert.equal(first,true);assert.equal(second,true);assert.equal(world.probes.length,2);
+  await item.driver.verifyActiveTarget(true);assert.equal(world.probes.length,2);
+  await item.driver.verifyActiveTarget(false);assert.equal(world.probes.length,4);
+  await new Promise(resolve=>setTimeout(resolve,350));
+  await item.driver.verifyActiveTarget(true);assert.equal(world.probes.length,6);
+  // An account switch is observed once the reuse window has passed, and invalidates the epoch.
+  world.setVisible('B');await new Promise(resolve=>setTimeout(resolve,350));
+  await assert.rejects(item.driver.verifyActiveTarget(true),/RUNTIME_TARGET_CHANGED/);assert.equal(item.driver.invalid,true);
+});

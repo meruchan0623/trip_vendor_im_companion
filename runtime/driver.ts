@@ -9,6 +9,8 @@ import type {CDPEvent,EventCDPTransport} from './transport';
 import {RuntimeCDPPolicy,type ParentCapture} from './cdp-policy';
 import {RUNTIME_PLATFORM} from './build-manifest';
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+/** One observation covers a heartbeat and the read that immediately follows it. */
+const ACTIVE_TARGET_REUSE_MS=300;
 /** Live diagnostics: reason codes only, never page text or payloads. */
 const diag=(event:string,fields:Record<string,unknown>)=>{try{console.log(JSON.stringify({event,...fields}));}catch{/* diagnostics are best effort */}};
 const reasonOf=(error:unknown)=>error instanceof Error&&/^[A-Z][A-Z0-9_]{1,100}$/.test(error.message)?error.message:'UNCLASSIFIED';
@@ -169,8 +171,21 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private disconnectTransport(){return this.transportClosing??=(async()=>{await this.transport.disconnect();})();}
   async disconnect(){if(this.closing)return this.closing;let resolve!:()=>void,reject!:(error:unknown)=>void;this.closing=new Promise<void>((done,fail)=>{resolve=done;reject=fail;});void(async()=>{try{await this.releaseForReconnect();}finally{await this.disconnectTransport();}})().then(resolve,reject);return this.closing;}
   async geometry(){this.current(this.epoch);return this.policy.geometry();}
+  /** Lease-only checks (heartbeat, read, publish) arrive back to back; they share one inventory
+   * observation per epoch. Writes pass allowInactive=false and always observe afresh. */
+  private sharedActiveCheck?:{epoch:number;settledAt?:number;promise:Promise<boolean>};
   private async verifyActiveTarget(allowInactive=false):Promise<boolean>{
     const epoch=this.epoch;this.current(epoch);
+    if(!allowInactive){if(!await this.observeActiveTarget(epoch))throw new Error('MESSAGE_PAGE_INACTIVE');return true;}
+    const shared=this.sharedActiveCheck;
+    if(shared&&shared.epoch===epoch&&(shared.settledAt===undefined||Date.now()-shared.settledAt<ACTIVE_TARGET_REUSE_MS))return shared.promise;
+    const next:NonNullable<LiveRuntimeDriver['sharedActiveCheck']>={epoch,promise:this.observeActiveTarget(epoch)};this.sharedActiveCheck=next;
+    // Failures invalidate this epoch, so only successful observations stay reusable.
+    next.promise.then(()=>{next.settledAt=Date.now();},()=>{if(this.sharedActiveCheck===next)this.sharedActiveCheck=undefined;});
+    return next.promise;
+  }
+  /** Resolves false only when every verified account is hidden; any other failure invalidates the epoch. */
+  private async observeActiveTarget(epoch:number):Promise<boolean>{
     try{
       const candidates=approvedImTargets(await this.transport.send('Target.getTargets',{}));this.current(epoch);
       if(!candidates.some(target=>target.targetId===this.target.targetId))throw new Error('RUNTIME_TARGET_CHANGED');
@@ -183,7 +198,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     }catch(error){
       // All verified BrowserViews can be hidden while the official window is in the background.
       // Preserve only owned leases in that state; business reads/writes still require an active target.
-      if(error instanceof Error&&error.message==='IM_TARGET_INACTIVE'){if(allowInactive)return false;throw new Error('MESSAGE_PAGE_INACTIVE');}
+      if(error instanceof Error&&error.message==='IM_TARGET_INACTIVE')return false;
       this.invalidate('ACTIVE_TARGET_'+reasonOf(error));throw error;
     }
   }
