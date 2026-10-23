@@ -282,3 +282,13 @@ test('lease-only active checks share one inventory observation; writes always ob
   world.setVisible('B');await new Promise(resolve=>setTimeout(resolve,350));
   await assert.rejects(item.driver.verifyActiveTarget(true),/RUNTIME_TARGET_CHANGED/);assert.equal(item.driver.invalid,true);
 });
+
+test('idle lease renewal keeps four attempts inside the six-second leases instead of one per poll',async t=>{
+  t.mock.timers.enable({apis:['setInterval','Date'],now:0});
+  const idle=composer(),service=await serviceFixture(idle.value);let renews=0;idle.value.renew=async()=>{renews++;};
+  try{
+    service.external=idle.value;service.foreground=false;service.updatePolling();
+    for(let i=0;i<12;i++){t.mock.timers.tick(500);await flush();}
+    assert.equal(renews,4);
+  }finally{await service.dispose();}
+});

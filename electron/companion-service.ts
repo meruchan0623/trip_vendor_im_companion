@@ -57,6 +57,8 @@ const messages:Record<string,string>={
 /** Quiet period after the last edit before an automatic outbound translation request. */
 export const AUTO_TRANSLATE_DELAY_MS=500;
 export const CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS=5000;
+/** Idle lease renewal cadence: four attempts inside the 6 s page and native leases. */
+const LEASE_RENEW_MS=1500;
 export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
@@ -176,6 +178,8 @@ export class CompanionService {
   private suppressed?:string;
   private pausedContext?:string;
   private renewing=false;
+  /** Last read or renew start. Each read already renews both 6 s leases. */
+  private leaseAt=0;
   private context(capture=this.captured){return capture?JSON.stringify(capture.source==='verified-editor'?[this.state.targetInstanceId,capture.snapshot.conversationId,capture.snapshot.scopeGeneration,capture.snapshot.platformAccountScope]:[this.state.targetInstanceId,capture.snapshot.editorIdentity]):'';}
   /** Language and pause preferences belong to the customer, across editor remounts. */
   private customerContext(capture=this.captured){return capture?.source==='verified-editor'?JSON.stringify([this.state.targetInstanceId,capture.snapshot.conversationId,capture.snapshot.platformAccountScope,capture.snapshot.documentGeneration]):this.context(capture);}
@@ -244,8 +248,8 @@ export class CompanionService {
     if(this.poll)return;
     this.poll=setInterval(()=>{
       if(this.embeddedMode&&!this.external&&!this.externalConnecting&&Date.now()>=this.nextConnectAt){this.nextConnectAt=Date.now()+5000;void this.connectComposer();return;}
-      if(this.foreground&&!this.busy&&!this.externalConnecting&&this.state.attached)this.observation=this.observe().finally(()=>{this.observation=undefined;});
-      else if(this.external&&!this.renewing&&!this.externalConnecting){const external=this.external;this.renewing=true;void external.renew().catch(()=>this.retireComposer(external)).finally(()=>{this.renewing=false;});}
+      if(this.foreground&&!this.busy&&!this.externalConnecting&&this.state.attached){this.leaseAt=Date.now();this.observation=this.observe().finally(()=>{this.observation=undefined;});}
+      else if(this.external&&!this.renewing&&!this.externalConnecting&&Date.now()-this.leaseAt>=LEASE_RENEW_MS){const external=this.external;this.renewing=true;this.leaseAt=Date.now();void external.renew().catch(()=>this.retireComposer(external)).finally(()=>{this.renewing=false;});}
     },500);
   }
   getState(){const state=structuredClone(this.state);if(state.auth==='failed'&&this.sessionError)state.error=this.sessionError;return state;}
