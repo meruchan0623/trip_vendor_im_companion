@@ -3,8 +3,11 @@ import {join,resolve,dirname,basename} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {readFileSync} from 'node:fs';
 
-export const launcherSource = String.raw`import Foundation
+// Every packaging/install entry imports this assembled source, so the assistant
+// supervisor has one implementation in the launcher and no vendor-window hooks.
+export const launcherSource = readFileSync(new URL('../native/macos/CompanionRecovery.swift',import.meta.url),'utf8') + '\n' + String.raw`import Foundation
 import Darwin
 import AppKit
 // The wrapper only supervises the real client and must not own a second Dock icon.
@@ -64,25 +67,52 @@ if let size = try? FileManager.default.attributesOfItem(atPath: helperLogURL.pat
 if !FileManager.default.fileExists(atPath: helperLogURL.path) { FileManager.default.createFile(atPath: helperLogURL.path, contents: nil) }
 let helperLog = try? FileHandle(forWritingTo: helperLogURL); _ = try? helperLog?.seekToEnd()
 helper.standardOutput = helperLog ?? FileHandle.standardOutput; helper.standardError = helperLog ?? FileHandle.standardError
+let signalQueue = DispatchQueue(label: "trip-vendor-launcher-signals")
+let stopLock = NSLock()
+var stopRequested = false
+func stopping() -> Bool { stopLock.lock(); defer { stopLock.unlock() }; return stopRequested || !vendor.isRunning }
+var sources: [DispatchSourceSignal] = []
+for number in [SIGTERM, SIGINT, SIGHUP] { signal(number, SIG_IGN); let source = DispatchSource.makeSignalSource(signal: number, queue: signalQueue); source.setEventHandler { stopLock.lock(); stopRequested = true; stopLock.unlock(); if vendor.isRunning { vendor.terminate() } }; source.resume(); sources.append(source) }
 // An earlier helper may be releasing its singleton lock while this vendor generation starts.
 // A live prior helper receives the new owner in its second-instance handler.
 var launchedHelpers: [Process] = []
+var activeHelper: Process?
 let companionDeadline = Date().addingTimeInterval(30)
 var companionStarted = false
 var attempt = 0
 while Date() < companionDeadline {
-  if !vendor.isRunning { break }
+  if stopping() { break }
   let candidate = attempt == 0 ? helper : Process()
   if attempt != 0 { candidate.executableURL = helper.executableURL; candidate.arguments = helper.arguments; candidate.environment = helper.environment; candidate.standardOutput = helper.standardOutput; candidate.standardError = helper.standardError }
   do { try candidate.run(); launchedHelpers.append(candidate); record("companion-start pid=\(candidate.processIdentifier) attempt=\(attempt + 1)") } catch { record("companion-start-failed") }
   Thread.sleep(forTimeInterval: 0.5)
-  if candidate.isRunning { companionStarted = true; break }
+  if candidate.isRunning { companionStarted = true; activeHelper = candidate; break }
   attempt += 1
 }
 if !companionStarted && vendor.isRunning { record("companion-start-timeout") }
-let signalQueue = DispatchQueue(label: "trip-vendor-launcher-signals")
-var sources: [DispatchSourceSignal] = []
-for number in [SIGTERM, SIGINT, SIGHUP] { signal(number, SIG_IGN); let source = DispatchSource.makeSignalSource(signal: number, queue: signalQueue); source.setEventHandler { if vendor.isRunning { vendor.terminate() } }; source.resume(); sources.append(source) }
+// Once initially running, only abnormal helper exits are recovered. A fixed
+// generation budget avoids a crash loop; process survival cannot reset it.
+var recovery = CompanionRecovery()
+var observedExit = false
+while companionStarted && !stopping() {
+  if let current = activeHelper, !current.isRunning, !observedExit {
+    observedExit = true
+    let unexpected = current.terminationReason != .exit || current.terminationStatus != 0
+    recovery.helperEnded(at: ProcessInfo.processInfo.systemUptime, unexpected: unexpected, ownerRunning: !stopping())
+    record(unexpected ? "companion-exit-unexpected" : "companion-exit-normal")
+  }
+  if recovery.stopped { break }
+  if recovery.shouldLaunch(at: ProcessInfo.processInfo.systemUptime, ownerRunning: !stopping()) {
+    // No previous helper may still be alive, and check cancellation again just
+    // before spawning; vendor termination during backoff must not revive it.
+    if stopping() || activeHelper?.isRunning == true { recovery.cancel(); break }
+    let candidate = Process(); candidate.executableURL = helper.executableURL; candidate.arguments = helper.arguments; candidate.environment = helper.environment; candidate.standardOutput = helper.standardOutput; candidate.standardError = helper.standardError
+    do { try candidate.run(); launchedHelpers.append(candidate); activeHelper = candidate; observedExit = false; record("companion-recovery-start attempt=\(recovery.retries)") }
+    catch { record("companion-recovery-start-failed"); recovery.helperEnded(at: ProcessInfo.processInfo.systemUptime, unexpected: true, ownerRunning: !stopping()) }
+  }
+  Thread.sleep(forTimeInterval: 0.1)
+}
+recovery.cancel()
 vendor.waitUntilExit()
 // The helper owns its verified vendor-owner watcher; never kill a helper handed to a newer generation.
 record("vendor-exit status=\(vendor.terminationStatus)")
