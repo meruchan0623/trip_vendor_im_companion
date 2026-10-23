@@ -12,7 +12,7 @@ import { startExternalClient } from './external-composer';
 import { lockContents, lockLocalSession } from './security';
 import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
 import { ResidentConnection } from './resident-connection';
-import {vendorOwnerPID,watchVendorOwner} from './vendor-owner';
+import {vendorOwnerPID,watchVendorOwner,vendorOwnerExitCode} from './vendor-owner';
 import {createLaunchPlatform,configureExplicitVendorDebugPort} from '../runtime/platform';
 import {configureFingerprintPersistence} from '../runtime/macos-platform';
 import {windowsPowerShell} from '../runtime/windows-powershell';
@@ -44,11 +44,12 @@ let lastPublished='';
 let acceptanceInput:ReadlineInterface|undefined;
 let stopOwnerWatch:(()=>void)|undefined;
 let ownerEpoch=0;
+let ownerExitCode=0;
 async function adoptVendorOwner(pid:number,args:readonly string[]=process.argv):Promise<void>{
   const epoch=++ownerEpoch,platform=createLaunchPlatform();
   // Owner handoff precedes resource verification/manifest activation at startup.
   const expectedExecutable=silentVendorRuntime?windowsInstallationFromHelper(process.execPath).executable:VERIFIED_RUNTIME_BUILD.executable;
-  const stop=await watchVendorOwner(pid,id=>platform.processIdentity(id),expectedExecutable,()=>{if(epoch===ownerEpoch)app.quit();});
+  const stop=await watchVendorOwner(pid,id=>platform.processIdentity(id),expectedExecutable,reason=>{if(epoch===ownerEpoch){ownerExitCode=vendorOwnerExitCode(reason);console.error(reason);app.quit();}});
   if(quitting||epoch!==ownerEpoch){stop();return;}
   if(process.platform==='win32')configureExplicitVendorDebugPort(args);stopOwnerWatch?.();stopOwnerWatch=stop;
   // The installed vendor shows startup progress above its composer until the panel mounts.
@@ -181,5 +182,5 @@ app.on('second-instance',(_event,args)=>{
 });
 // OS activation (including vendor startup) must never summon the settings panel.
 app.on('window-all-closed',()=>{if(!quitting&&!residentPlatform)app.quit();});
-app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;diagnostics?.lifecycle('quit',process.pid);void cleanup().finally(()=>app.quit());});
+app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;diagnostics?.lifecycle('quit',process.pid);void cleanup().finally(()=>{if(ownerExitCode){windowsPowerShell.dispose();app.exit(ownerExitCode);}else app.quit();});});
 app.once('will-quit',()=>windowsPowerShell.dispose());

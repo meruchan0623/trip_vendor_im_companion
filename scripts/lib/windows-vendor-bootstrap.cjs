@@ -98,7 +98,7 @@ function companionLoadingIndicator(view, doc) {
   ui.host.setAttribute('aria-label', view.title + '：' + view.label);
   ui.sync();
 }
-function installBootstrap({app, spawn, createServer = require('node:net').createServer, randomBytes = require('node:crypto').randomBytes, execPath = process.execPath, pid = process.pid, argv = process.argv}) {
+function installBootstrap({app, spawn, createServer = require('node:net').createServer, randomBytes = require('node:crypto').randomBytes, execPath = process.execPath, pid = process.pid, argv = process.argv, schedule = setTimeout, cancel = clearTimeout}) {
   // The vendor disables site-isolation trials and webSecurity. Without an
   // explicit isolated process, its renderer can read a sandboxed login iframe
   // and Chromium 118 omits Origin on its fetches. Force isolation before the
@@ -112,11 +112,21 @@ function installBootstrap({app, spawn, createServer = require('node:net').create
   app.commandLine.removeSwitch('remote-debugging-address');
   app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1');
   app.commandLine.appendSwitch('remote-debugging-port', String(port));
-  let child, childRunning = false, quitting = false, stage = 'launching';
+  let child, childRunning = false, quitting = false, stage = 'launching', retries = 0, retryTimer, stableTimer;
+  const retryDelays = [1000, 3000, 10000];
+  const cancelRetry = () => { if (retryTimer !== undefined) cancel(retryTimer); retryTimer = undefined; };
+  const cancelStable = () => { if (stableTimer !== undefined) cancel(stableTimer); stableTimer = undefined; };
   // A helper is alive while our child runs or any helper holds a progress connection:
   // a running helper can adopt this vendor while our own child exits on its instance lock.
   const sockets = new Set();
-  const helperGone = () => { if (!childRunning && sockets.size === 0) setStage('exited'); };
+  const helperGone = () => {
+    if (quitting || childRunning || sockets.size !== 0 || retryTimer !== undefined) return;
+    cancelStable();
+    if (retries >= retryDelays.length) { setStage('exited'); return; }
+    setStage('failed');
+    retryTimer = schedule(() => { retryTimer = undefined; if (quitting || childRunning || sockets.size !== 0) return; retries++; launchHelper(); }, retryDelays[retries]);
+    retryTimer.unref?.();
+  };
   // Startup progress: the helper reports fixed stage names over a private pipe;
   // the vendor document shows them where the outbound panel will appear.
   const documents = new Set();
@@ -130,6 +140,11 @@ function installBootstrap({app, spawn, createServer = require('node:net').create
   const setStage = next => {
     if (next === stage || quitting) return;
     stage = next;
+    if (next !== 'panel-mounted') cancelStable();
+    if (next === 'panel-mounted' && stableTimer === undefined) {
+      stableTimer = schedule(() => { stableTimer = undefined; if (!quitting && (childRunning || sockets.size > 0)) retries = 0; }, 60000);
+      stableTimer.unref?.();
+    }
     for (const contents of documents) paint(contents);
   };
   app.on('web-contents-created', (_event, contents) => {
@@ -143,6 +158,8 @@ function installBootstrap({app, spawn, createServer = require('node:net').create
     progress = createServer(socket => {
       let buffered = '';
       sockets.add(socket);
+      // A single-instance helper may adopt this owner before our retry fires.
+      cancelRetry();
       socket.once('close', () => { sockets.delete(socket); helperGone(); });
       socket.setEncoding('utf8');
       socket.on('error', () => {});
@@ -160,11 +177,12 @@ function installBootstrap({app, spawn, createServer = require('node:net').create
     progress.listen(progressPipe);
     progress.unref?.();
   } catch { progress = undefined; stage = 'hidden'; }
-  app.once('before-quit', () => { quitting = true; });
+  app.once('before-quit', () => { quitting = true; cancelRetry(); cancelStable(); });
   app.once('will-quit', () => { try { child?.kill(); } catch { /* Owner watch also handles crashes. */ } try { progress?.close(); } catch { /* Already closed. */ } });
-  app.whenReady().then(() => {
+  const launchHelper = () => {
     // A rejected second vendor instance calls app.quit() in its original main.
-    if (quitting) return;
+    if (quitting || childRunning || sockets.size > 0) return;
+    setStage('launching');
     const executable = path.join(path.dirname(execPath), 'resources', 'TripVendorCompanion', '旅游商家助手.exe');
     const env = {...process.env};
     delete env.ELECTRON_RUN_AS_NODE;
@@ -175,11 +193,15 @@ function installBootstrap({app, spawn, createServer = require('node:net').create
     delete env.PSModulePath;
     // The helper discovers the sole listener owned by this exact process, then
     // performs its usual full identity/loopback/handshake checks before HTTP/CDP.
-    child = spawn(executable, [`--vendor-owner=${pid}`, '--vendor-debug-port=auto', ...(progress ? [`--vendor-progress=${progressPipe}`] : [])], {shell:false, windowsHide:true, stdio:'ignore', env});
-    childRunning = true;
-    child.on('error', () => { childRunning = false; helperGone(); /* Failure must not prevent the official client from running. */ });
-    child.on('exit', () => { childRunning = false; helperGone(); });
-  }).catch(() => {});
+    try {
+      const launched = spawn(executable, [`--vendor-owner=${pid}`, '--vendor-debug-port=auto', ...(progress ? [`--vendor-progress=${progressPipe}`] : [])], {shell:false, windowsHide:true, stdio:'ignore', env});
+      child = launched; childRunning = true;
+      let ended = false;
+      const gone = () => { if (ended || child !== launched) return; ended = true; childRunning = false; helperGone(); };
+      launched.on('error', gone); launched.on('exit', gone);
+    } catch { childRunning = false; helperGone(); }
+  };
+  app.whenReady().then(launchHelper).catch(() => {});
   return {port, progressPipe: progress ? progressPipe : undefined, stage: () => stage};
 }
 module.exports = {installBootstrap, companionLoadingIndicator, loadingView, LOADING_WORLD_ID};
