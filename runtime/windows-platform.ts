@@ -1,6 +1,6 @@
 import {spawn} from 'node:child_process';
 import {windowsPowerShell} from './windows-powershell';
-import {windowsProcessIdentityScript} from './windows-process-identity';
+import {windowsProcessIdentityScript,windowsProcessScanScript} from './windows-process-identity';
 import {createServer} from 'node:net';
 import {readFile,lstat,realpath} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -16,6 +16,7 @@ import{windowsTcpListenerScript}from'./windows-tcp-listeners';
 import{windowsManifestAclScript}from'./windows-acl';
 import type {LaunchPlatform,VerifiedIdleSnapshot} from './launcher';
 const exe=WINDOWS_EXECUTABLE;
+const CLIENT_IMAGE='旅游商家桌面版.exe';
 function selectedWindowsInstallation(){return WINDOWS_DYNAMIC_RUNTIME?windowsInstallationFromHelper(process.execPath):windowsInstallationFromExecutable(WINDOWS_EXECUTABLE);}
 /** Existing standalone builds retain their original fixed identities; only the installer enables dynamic compatibility. */
 export function standaloneWindowsManifest():WindowsRuntimeManifest{return{schemaVersion:1,executable:exe,executableVersion:WINDOWS_RUNTIME_BUILD.executableVersion,executableSha256:WINDOWS_RUNTIME_BUILD.executableSha256,asarSha256:WINDOWS_RUNTIME_BUILD.asarSha256,chromiumMajor:WINDOWS_RUNTIME_BUILD.chromiumMajor,bundledPage:WINDOWS_PAGE_BUILDS[0]};}
@@ -87,7 +88,8 @@ export class WindowsLaunchPlatform implements LaunchPlatform {
   async inspectReadOnly():Promise<VerifiedIdleSnapshot>{
     if(process.platform!=='win32')throw new Error('WINDOWS_REQUIRED');
     const exe=this.executable;
-    const state=await powershell(`$all=@(Get-CimInstance Win32_Process -ErrorAction Stop); $clients=@(); $main=@(); $installers=@(); foreach($p in $all){ if($p.Name -eq '旅游商家桌面版.exe'){if(-not $p.ExecutablePath -or -not $p.CommandLine){throw 'Client identity unavailable'}; if($p.ExecutablePath -ine '${exe.replaceAll("'","''")}'){throw 'Unknown client image'}; $clients+=([int]$p.ProcessId); if($p.CommandLine -notmatch '--type='){$main+=([int]$p.ProcessId)}}; if($p.Name -match '^旅游商家桌面版.*win_.*\\.exe$' -or $p.ExecutablePath -match 'vbk-electron-updater[\\\\/]pending'){$installers+=([int]$p.ProcessId)}}; @{verified=$true; clientProcessIds=$clients;clientMainProcessIds=$main;installerProcessIds=$installers;version=(Get-Item -LiteralPath '${exe.replaceAll("'","''")}' -ErrorAction Stop).VersionInfo.FileVersion}|ConvertTo-Json -Compress`) as Record<string,unknown>;
+    const state=await powershell(`${windowsProcessScanScript(CLIENT_IMAGE)}
+$clients=@(); $main=@(); $installers=@(); foreach($p in $all){ if($p.Name -eq '旅游商家桌面版.exe'){if(-not $p.ExecutablePath -or -not $p.LaunchPath -or -not $p.CommandLine){throw 'Client identity unavailable'}; if($p.ExecutablePath -ine '${exe.replaceAll("'","''")}' -or $p.LaunchPath -ine '${exe.replaceAll("'","''")}'){throw 'Unknown client image'}; $clients+=([int]$p.ProcessId); if($p.CommandLine -notmatch '--type='){$main+=([int]$p.ProcessId)}}; if($p.Name -match '^旅游商家桌面版.*win_.*\\.exe$' -or $p.ExecutablePath -match 'vbk-electron-updater[\\\\/]pending'){$installers+=([int]$p.ProcessId)}}; @{verified=$true; clientProcessIds=$clients;clientMainProcessIds=$main;installerProcessIds=$installers;version=(Get-Item -LiteralPath '${exe.replaceAll("'","''")}' -ErrorAction Stop).VersionInfo.FileVersion}|ConvertTo-Json -Compress`) as Record<string,unknown>;
     if(!state||state.verified!==true||typeof state.version!=='string'||!['clientProcessIds','clientMainProcessIds','installerProcessIds'].every(key=>Array.isArray(state[key])&&(state[key] as unknown[]).every(id=>Number.isSafeInteger(id)&&(id as number)>0)))throw new Error('PROCESS_INSPECTION_INVALID_STATE');
     const files=new VerifiedFiles(),manifest=await selectedWindowsRuntimeManifest(files);
     await Promise.all([noRedirect(exe),noRedirect(win32.join(win32.dirname(exe),'resources','app.asar'))]);
@@ -135,7 +137,8 @@ export class WindowsLaunchPlatform implements LaunchPlatform {
     if(!Number.isSafeInteger(owner.pid)||owner.pid<=0||!Number.isSafeInteger(port)||port<1024||port>65535||!sameExecutablePath(owner.executable,exe))throw new Error('UNVERIFIED_PROCESS');
     await files.assertUnchanged();
     const result=await powershell(`${windowsTcpListenerScript(port)}
-$all=@(Get-CimInstance Win32_Process -ErrorAction Stop);$main=@();foreach($item in $all){if($item.Name -eq '旅游商家桌面版.exe'){if(-not $item.ExecutablePath -or -not $item.CommandLine -or $item.ExecutablePath -ine '${exe.replaceAll("'","''")}'){throw 'Unknown client image'};if($item.CommandLine -notmatch '--type='){$main+=([int]$item.ProcessId)}};if($item.Name -match '^旅游商家桌面版.*win_.*\\.exe$' -or $item.ExecutablePath -match 'vbk-electron-updater[\\\\/]pending'){throw 'Updater active'}};if($main.Count -ne 1 -or $main[0] -ne ${owner.pid}){throw 'Main process changed'};
+${windowsProcessScanScript(CLIENT_IMAGE)}
+$main=@();foreach($item in $all){if($item.Name -eq '旅游商家桌面版.exe'){if(-not $item.ExecutablePath -or -not $item.LaunchPath -or -not $item.CommandLine -or $item.ExecutablePath -ine '${exe.replaceAll("'","''")}' -or $item.LaunchPath -ine '${exe.replaceAll("'","''")}'){throw 'Unknown client image'};if($item.CommandLine -notmatch '--type='){$main+=([int]$item.ProcessId)}};if($item.Name -match '^旅游商家桌面版.*win_.*\\.exe$' -or $item.ExecutablePath -match 'vbk-electron-updater[\\\\/]pending'){throw 'Updater active'}};if($main.Count -ne 1 -or $main[0] -ne ${owner.pid}){throw 'Main process changed'};
 ${windowsProcessIdentityScript(owner.pid)}
 @{pid=$identity.pid;executable=$identity.executable;startedAt=$identity.startedAt;listeners=$listeners}|ConvertTo-Json -Compress -Depth 3`)as ProcessIdentity&{listeners?:{pid:number;address:string;port:number}[]};
     if(!result||result.pid!==owner.pid||result.startedAt!==owner.startedAt||typeof result.executable!=='string'||!sameExecutablePath(result.executable,owner.executable))throw new Error('PROCESS_CHANGED');
