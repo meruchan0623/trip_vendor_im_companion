@@ -4,7 +4,8 @@ import {windowsProcessIdentityScript,windowsProcessScanScript} from './windows-p
 import {createServer} from 'node:net';
 import {readFile,lstat,realpath} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
-import {fingerprintFile as hash} from './file-fingerprint';
+import {fingerprintFile} from './file-fingerprint';
+import {createFingerprintCache} from './fingerprint-cache';
 import {win32} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {activateWindowsRuntimeBuild,windowsRuntimeBuild,WINDOWS_DYNAMIC_RUNTIME,WINDOWS_PAGE_BUILDS,WINDOWS_RUNTIME_BUILD} from './build-manifest';
@@ -17,6 +18,8 @@ import{windowsManifestAclScript}from'./windows-acl';
 import type {LaunchPlatform,VerifiedIdleSnapshot} from './launcher';
 const exe=WINDOWS_EXECUTABLE;
 const CLIENT_IMAGE='旅游商家桌面版.exe';
+/** Every reconnect re-verifies the ~0.5 GB executable/archive pair; an unchanged lstat identity reuses its digest. */
+const hash=createFingerprintCache(fingerprintFile);
 function selectedWindowsInstallation(){return WINDOWS_DYNAMIC_RUNTIME?windowsInstallationFromHelper(process.execPath):windowsInstallationFromExecutable(WINDOWS_EXECUTABLE);}
 /** Existing standalone builds retain their original fixed identities; only the installer enables dynamic compatibility. */
 export function standaloneWindowsManifest():WindowsRuntimeManifest{return{schemaVersion:1,executable:exe,executableVersion:WINDOWS_RUNTIME_BUILD.executableVersion,executableSha256:WINDOWS_RUNTIME_BUILD.executableSha256,asarSha256:WINDOWS_RUNTIME_BUILD.asarSha256,chromiumMajor:WINDOWS_RUNTIME_BUILD.chromiumMajor,bundledPage:WINDOWS_PAGE_BUILDS[0]};}
