@@ -59,6 +59,7 @@ export const AUTO_TRANSLATE_DELAY_MS=500;
 export const CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS=5000;
 /** Idle lease renewal cadence: four attempts inside the 6 s page and native leases. */
 const LEASE_RENEW_MS=1500;
+const DRAFT_SETTLE_MS=120;
 export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
@@ -147,7 +148,10 @@ export class CompanionService {
     // Revoke immediately, before CDP reads or the 500 ms safety observation can finish.
     this.clearPendingSend(false);this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.interactionRefresh=true;this.publish();
     if(this.interactionTask)return;
-    const task=(async()=>{while(this.interactionRefresh&&!this.closed&&this.external===external){this.interactionRefresh=false;if(!this.foreground)return;await this.acquireEditor();const epoch=this.epoch,id=this.state.targetInstanceId;try{if(this.closed||external!==this.external)continue;const capture=await this.capture();if(this.closed||external!==this.external||epoch!==this.epoch||id!==this.state.targetInstanceId)continue;this.adopt(capture);this.publish();}catch{/* The fallback observation handles source recovery. */}finally{this.setBusy(false);}}})();
+    const task=(async()=>{while(this.interactionRefresh&&!this.closed&&this.external===external){
+      // Coalesce a typing burst into one read; every read also runs script in the vendor renderer.
+      await new Promise(resolve=>setTimeout(resolve,DRAFT_SETTLE_MS));if(this.closed||this.external!==external)return;
+      this.interactionRefresh=false;if(!this.foreground)return;await this.acquireEditor();const epoch=this.epoch,id=this.state.targetInstanceId;try{if(this.closed||external!==this.external)continue;const capture=await this.capture();if(this.closed||external!==this.external||epoch!==this.epoch||id!==this.state.targetInstanceId)continue;this.adopt(capture);this.publish();}catch{/* The fallback observation handles source recovery. */}finally{this.setBusy(false);}}})();
     this.interactionTask=task;void task.finally(()=>{if(this.interactionTask===task)this.interactionTask=undefined;});
   }
   private captured?:Captured;
