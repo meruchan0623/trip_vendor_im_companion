@@ -31,6 +31,10 @@ function run(command, commandArgs) {
   return result.stdout.trim();
 }
 const plist = (app, key) => run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(app, 'Contents/Info.plist')]);
+// A prebuilt payload still needs the same platform-specific acceptance gates.
+for (const suite of ['macos-page-selection', 'macos-owned-session', 'macos-runtime-order', 'macos-native-parity', 'operator-overlay', 'macos-launcher-recovery']) {
+  run(process.execPath, [`tests/run-${suite}.mjs`]);
+}
 await mkdir(work, {recursive: true}); await mkdir(output, {recursive: true});
 let mount;
 try {

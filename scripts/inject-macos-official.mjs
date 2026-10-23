@@ -43,6 +43,10 @@ function read(command, commandArgs) {
   return result.stdout.trim();
 }
 const plist = (app, key) => read('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(app, 'Contents/Info.plist')]);
+// Validate the darwin runtime and assistant-only supervisor before building a payload.
+for (const suite of ['macos-page-selection', 'macos-owned-session', 'macos-runtime-order', 'macos-native-parity', 'operator-overlay', 'macos-launcher-recovery']) {
+  run(process.execPath, [`tests/run-${suite}.mjs`]);
+}
 async function verifyOfficial(app) {
   for (const [key, value] of Object.entries({CFBundleIdentifier: support.bundleId, CFBundleVersion: support.version, CFBundleShortVersionString: support.version, CFBundleExecutable: support.executable})) if (plist(app, key) !== value) throw new Error('UNSUPPORTED_OFFICIAL_IDENTITY ' + key);
   run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--test-requirement', OFFICIAL_REQUIREMENT, app]);
