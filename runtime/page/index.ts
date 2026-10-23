@@ -1,4 +1,5 @@
 import {matchesPageConversation} from './conversation';
+import {RUNTIME_PLATFORM} from '../build-manifest';
 import {customerLanguageEvidence} from './language';
 import type {OperatorSessionGrant,OrderWindowIntent,PanelState} from '../../src/shared/workbench';
 import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../../src/shared/customer-language';
@@ -77,7 +78,9 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   };
   // A throttle guarantees progress while scrolling/rendering continuously.
   const scheduleCustomer=()=>{if(customerTimer===undefined&&!disposed)customerTimer=view.setTimeout(scanCustomer,CUSTOMER_SCAN_DEBOUNCE_MS);};
-  const orderObservation=panel&&!state?.detectedOrder?startOrderObservation(document,order=>{if(!disposed&&document.visibilityState!=='hidden')panel.setOrder(order);},state?.conversationKey??null):undefined;
+  // macOS keeps its existing iframe observer when the pinned renderer cannot
+  // provide a verified early hint. Host hints take precedence while present.
+  const orderObservation=panel&&(RUNTIME_PLATFORM==='darwin'||!state?.detectedOrder)?startOrderObservation(document,order=>{if(!disposed&&document.visibilityState!=='hidden'&&!state?.detectedOrder)panel.setOrder(order);},state?.conversationKey??null):undefined;
   let orderTimer:number|undefined;const syncOrder=()=>{orderTimer=undefined;if(!disposed&&document.visibilityState!=='hidden')orderObservation?.refresh();};
   const orderObserver=new view.MutationObserver(mutations=>{if(disposed||document.visibilityState==='hidden'||mutations.every(m=>{const target=m.target.nodeType===1?m.target as Element:m.target.parentElement;const changed=[...m.addedNodes,...m.removedNodes];return isOwned(target)||changed.length>0&&changed.every(n=>n.nodeType===1&&isOwned(n as Element));}))return;renderCurrent(true);if(orderTimer===undefined)orderTimer=view.setTimeout(syncOrder,150);scheduleCustomer();});
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','src']});syncOrder();}

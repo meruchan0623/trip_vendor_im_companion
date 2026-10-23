@@ -13,7 +13,7 @@ import type {BrowserProfile} from './browser-profile-session';
 import type {OperatorSelection} from './system-browser';
 import {reportVendorProgress} from './vendor-progress';
 
-type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
+type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;currentOrderHint?:StandaloneState['currentOrderHint'];orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
 const ORDER_FAILURES:Record<string,string>={PSIM_LOGIN_REQUIRED:'请先登录 TSim 账号后查询订单。',AUTH_CHANGED:'登录状态已变化，请重新登录后查询。',ORDER_PERMISSION_REQUIRED:'当前 TSim 账号没有订单查询权限。',INVALID_ORDER_IDENTIFIER:'请输入有效的订单 ID（字母、数字、下划线或横线）。',ORDER_QUERY_FAILED:'订单服务暂时不可用，请稍后重试。',ORDER_LIST_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_DETAIL_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',INVALID_READ_IDENTIFIER:'订单服务返回了无法识别的结果，请稍后重试。',SERVICE_RESPONSE_TOO_LARGE:'订单结果过大，无法在助手内显示。'};
 const messages:Record<string,string>={
@@ -21,6 +21,7 @@ const messages:Record<string,string>={
   TRANSLATION_OPTIONS_INVALID:'兜底语言设置无效，请重新选择并保存。',
   TRANSLATION_OPTIONS_SAVE_FAILED:'兜底语言保存失败，仍保留原设置，请重试。',
   MESSAGE_PAGE_INACTIVE:'请先切换到旅游商家的“消息”页面并打开客户会话。',
+  CONVERSATION_SOURCE_UNVERIFIED:'客户会话正在切换，请稍后重新查询。',
   PSIM_LOGIN_REQUIRED:process.platform==='darwin'?'请先在助手内登录 TSim 账号，再使用翻译与订单查询。':'请先在 Edge 或 Chrome 登录 TSim_CS，助手将自动复用浏览器会话。',
   SESSION_STORAGE_ENCRYPTION_UNAVAILABLE:'系统安全存储不可用，请解锁系统钥匙串后重试。',
   SESSION_STORAGE_CORRUPT:'保存的登录态无法解密，请在账户设置中重新登录。',
@@ -106,13 +107,13 @@ export class CompanionService {
     if(!collecting){this.customerResolutionTimer=undefined;return;}
     this.customerResolutionTimer=setTimeout(()=>{this.customerResolutionTimer=undefined;if(this.closed||generation!==this.customerResolutionGeneration||this.state.customerLanguageResolution?.status!=='collecting')return;this.state.customerLanguageResolution=unavailableCustomerLanguage();if(this.state.followCustomerLanguage!==false){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();},CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS);
   }
-  private contextChanged(){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
+  private contextChanged(){this.invalidate();this.state.currentOrderHint=null;this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
   // Both platforms show the TSim operator inside the merchant page; the host only grants its session.
   private embeddedState(){return {...embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null),...(this.loginPopover?{loginPopover:{...this.loginPopover}}:{})};}
   private retireComposer(composer:ExternalComposer){
     if(this.external!==composer||this.closed)return;
     this.loginGeneration++;this.loginPopover=undefined;this.translationIntent++;this.invalidate();this.captured=undefined;
-    this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;
+    this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;
     this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';
     // Retiring an in-flight mount transfers cleanup/socket ownership to reconnect.
     // A late rejection must neither keep polling blocked nor close its successor.
@@ -269,7 +270,7 @@ export class CompanionService {
   setWindowState(window:WindowState|null){
     if(this.closed)return;
     const id=window?.targetInstanceId??null;if(id!==this.state.targetInstanceId){this.loginPopover=undefined;this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;this.clearPendingSend();this.resetCustomerLanguage(false);this.clearOrder();}
-    if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectingAttempt=undefined;this.externalConnecting=undefined;this.connectionAbort?.abort();this.dropReconnect();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
+    if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectingAttempt=undefined;this.externalConnecting=undefined;this.connectionAbort?.abort();this.dropReconnect();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
@@ -285,14 +286,14 @@ export class CompanionService {
   private waitForMessagePage(){
     const keepFailure=this.state.phase==='failed';
     this.clearPendingSend();if(!keepFailure)this.attempted=undefined;this.invalidate();this.captured=undefined;
-    this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;
+    this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;
     this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';
     this.clearOrder();this.onContextChanged();if(!keepFailure)this.sourceFailure=false;
     if(this.state.auth==='failed'&&this.sessionError){this.state.phase='failed';this.state.error=this.sessionError;}
     else if(!keepFailure){this.state.phase='idle';this.state.error=null;}
     this.publish();
   }
-  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
+  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){
@@ -305,7 +306,7 @@ export class CompanionService {
       if(result.messageSurface?.active===false)throw new Error(result.reason??'MESSAGE_PAGE_INACTIVE');
       if(!result.snapshot)throw new Error(result.reason??'COMPOSER_UNAVAILABLE');
       if(!result.writeVerified)throw new Error('WRITE_UNAVAILABLE');
-      return{source:'verified-editor',snapshot:result.snapshot,orderEntries:result.orderEntries??[],orderViewport:result.orderViewport??null,messageSurface:result.messageSurface};
+      return{source:'verified-editor',snapshot:result.snapshot,currentOrderHint:result.currentOrderHint,orderEntries:result.orderEntries??[],orderViewport:result.orderViewport??null,messageSurface:result.messageSurface};
     }
     if(this.embeddedMode)throw new Error('COMPOSER_UNAVAILABLE');
     const snapshot=await this.native.readDraft();if(snapshot.targetInstanceId!==id)throw new Error('TARGET_REQUIRED');
@@ -328,13 +329,14 @@ export class CompanionService {
     this.captured=capture;this.state.composerSource=capture.source;
     this.state.messageSurface=capture.source==='verified-editor'?(capture.messageSurface??{active:false,composerRect:null,toolbarRect:null}):{active:false,composerRect:null,toolbarRect:null};
     this.state.orderEntries=capture.source==='verified-editor'?capture.orderEntries:[];this.state.orderViewport=capture.source==='verified-editor'?capture.orderViewport:null;
+    this.state.currentOrderHint=capture.source==='verified-editor'?capture.currentOrderHint:null;
     this.state.draft={text:capture.snapshot.text,canReplace:capture.source==='verified-editor'?capture.snapshot.isPlainText&&!capture.snapshot.composing:capture.snapshot.canReplace};
     if(invalidateChanged)this.schedule();
   }
   private async observe(){
     this.setBusy(true);const epoch=this.epoch,id=this.state.targetInstanceId;
     try{const capture=await this.capture();if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;const recovered=this.sourceFailure&&this.state.phase==='failed'&&this.state.composerSource==='unavailable'&&capture.source==='verified-editor';this.adopt(capture);if(recovered){this.sourceFailure=false;this.state.phase='idle';this.state.error=null;this.schedule();}this.publish();}
-    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(error instanceof Error&&error.message==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.clearPendingSend();this.clearOrder();this.onContextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
+    catch(error){if(this.closed||id!==this.state.targetInstanceId||epoch!==this.epoch)return;if(error instanceof Error&&error.message==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}if(this.external&&error instanceof Error&&/LEASE_ENDED|RUNTIME_TARGET_CHANGED|OWNED_FRAME_BOUNDARY_FAILED|NATIVE_NOT_READY|NATIVE_POLL_FAILED|SERVICE_DISCONNECTED/.test(error.message)){this.retireComposer(this.external);return;}if(this.state.draft||this.state.messageSurface?.active||this.state.orderEntries.length){this.clearPendingSend();this.clearOrder();this.onContextChanged();if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.publish();}}
     finally{this.setBusy(false);}
   }
   /** Background captures must finish before a visible enabled user action acquires the editor. */
