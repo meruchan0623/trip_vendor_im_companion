@@ -26,15 +26,48 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private constructor(private transport:EventCDPTransport,readonly target:RuntimeTarget,private bundle:string,sha256:string){
     this.policy=new RuntimeCDPPolicy(transport,target,sha256);this.stopEvent=transport.onEvent(event=>this.event(event));this.stopDisconnect=transport.onDisconnect(()=>this.invalidate('TRANSPORT_DISCONNECTED'));
   }
-  static async discover(transport:EventCDPTransport,fingerprint:BuildFingerprint,bundle:string,sha256:string,timeoutMs=60000):Promise<LiveRuntimeDriver>{
-    assertBuildFingerprint(fingerprint);const deadline=Date.now()+timeoutMs;let selected:{targetId:string;url:string}|undefined;
-    while(Date.now()<deadline){const matches=approvedImTargets(await transport.send('Target.getTargets',{}));if(matches.length>1){const observations=[];for(const target of matches)observations.push(await observeImTarget(transport,target,fingerprint,randomUUID()));if(!sameTargetInventory(matches,approvedImTargets(await transport.send('Target.getTargets',{}))))throw new Error('RUNTIME_TARGET_CHANGED');try{selected=chooseActiveImTarget(observations);break;}catch(error){if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;}}if(matches.length===1){selected=matches[0];break;}await pause(250);}
-    if(!selected)throw new Error('IM_TARGET_NOT_READY');
-    let session:string|undefined;
-    try{const result=await transport.send('Target.attachToTarget',{targetId:selected.targetId,flatten:true}) as {sessionId?:unknown};if(typeof result?.sessionId!=='string'||!result.sessionId)throw new Error('INVALID_SESSION');session=result.sessionId;
-      const tree=await transport.send('Page.getFrameTree',{},session) as any;const frame=tree?.frameTree?.frame;if(!frame||typeof frame.id!=='string'||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
-      return new LiveRuntimeDriver(transport,{targetId:selected.targetId,frameId:frame.id,documentURL:frame.url,contextNonce:randomUUID(),fingerprint},bundle,sha256);
-    }finally{if(session)await transport.send('Target.detachFromTarget',{sessionId:session});}
+  /** onWaiting fires once when every verified account is hidden and discovery starts waiting without a deadline. */
+  static async discover(transport:EventCDPTransport,fingerprint:BuildFingerprint,bundle:string,sha256:string,timeoutMs=60000,onWaiting?:()=>void):Promise<LiveRuntimeDriver>{
+    assertBuildFingerprint(fingerprint);let deadline=Date.now()+timeoutMs,waitingHidden=false,announced=false,disconnected=false,wake:(()=>void)|undefined;
+    const windows=RUNTIME_PLATFORM==='win32',selectionNonce=randomUUID();
+    const check=()=>{if(disconnected)throw new Error('CDP_DISCONNECTED');};
+    const stopDisconnect=transport.onDisconnect(()=>{disconnected=true;wake?.();});
+    try{
+      let selected:{targetId:string;url:string}|undefined;
+      while(waitingHidden||Date.now()<deadline){
+        check();waitingHidden=false;
+        const matches=approvedImTargets(await transport.send('Target.getTargets',{}));
+        if(matches.length>1){
+          const observations=[];
+          // Reuse the named selection world during a long background wait.
+          for(const target of matches)observations.push(await observeImTarget(transport,target,fingerprint,windows?selectionNonce:randomUUID()));
+          if(!sameTargetInventory(matches,approvedImTargets(await transport.send('Target.getTargets',{}))))throw new Error('RUNTIME_TARGET_CHANGED');
+          try{selected=chooseActiveImTarget(observations);break;}
+          catch(error){
+            if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;
+            if(windows){
+              // Hidden, verified accounts are healthy. Preserve this socket and
+              // the bounded no-target timeout until an account becomes visible.
+              waitingHidden=true;deadline=Date.now()+timeoutMs;
+              if(!announced){diag('runtime-waiting-visible',{});announced=true;onWaiting?.();}
+            }
+          }
+        }
+        if(matches.length===1){selected=matches[0];break;}
+        check();
+        await new Promise<void>(resolve=>{
+          const timer=setTimeout(()=>{wake=undefined;resolve();},waitingHidden?1000:250);
+          wake=()=>{clearTimeout(timer);wake=undefined;resolve();};
+          if(disconnected)wake();
+        });
+      }
+      check();if(!selected)throw new Error('IM_TARGET_NOT_READY');
+      let session:string|undefined;
+      try{const result=await transport.send('Target.attachToTarget',{targetId:selected.targetId,flatten:true}) as {sessionId?:unknown};if(typeof result?.sessionId!=='string'||!result.sessionId)throw new Error('INVALID_SESSION');session=result.sessionId;
+        const tree=await transport.send('Page.getFrameTree',{},session) as any;const frame=tree?.frameTree?.frame;if(!frame||typeof frame.id!=='string'||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
+        check();return new LiveRuntimeDriver(transport,{targetId:selected.targetId,frameId:frame.id,documentURL:frame.url,contextNonce:randomUUID(),fingerprint},bundle,sha256);
+      }finally{if(session)await transport.send('Target.detachFromTarget',{sessionId:session});}
+    }finally{stopDisconnect();wake?.();}
   }
   private event(event:CDPEvent){
     if(event.method==='Target.targetDestroyed'&&event.params.targetId===this.target.targetId){this.invalidate('TARGET_DESTROYED');return;}
@@ -69,7 +102,8 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     this.target.executionContextId=[...this.defaultContexts][0];await this.policy.verifyRenderer(candidates()[0].id);this.current(epoch);await this.policy.createOwnedWorld();this.current(epoch);// Capture listeners are optional diagnostics, not an authorization gate.
     if(options.collectParentCaptures!==false){this.captures=await this.policy.inspectParentCaptures();this.current(epoch);}
   }
-  async mountCompanion(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<unknown>){
+  /** onWaiting fires once when mounting waits for a hidden document to become visible. */
+  async mountCompanion(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<unknown>,onWaiting?:()=>void){
     const epoch=this.epoch;this.current(epoch);if(this.mounted)throw new Error('ALREADY_ATTACHED');this.mounted=true;
     const stopBootstrap=this.keepBootstrapNativeLease(epoch);
     try{
@@ -77,7 +111,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       await this.policy.installOwnedArtifact(this.bundle);this.current(epoch);
       await this.policy.registerWorkbenchBinding(this.bindingName);this.current(epoch);this.companionAction=onAction;
       for(;;){
-        await this.waitUntilVisible(epoch);if(!await this.verifyActiveTarget(true))continue;this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
+        await this.waitUntilVisible(epoch,onWaiting);if(!await this.verifyActiveTarget(true))continue;this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
         try{await this.policy.mountUi({leaseId:this.target.contextNonce,aresVersion:VERIFIED_RUNTIME_BUILD.aresVersion,htmlSha256:this.target.fingerprint.htmlSha256,rendererSha256:this.target.fingerprint.rendererSha256,keyboardBoundary:'isolated-world-shadow'},{bindingName:this.bindingName,state});break;}
         catch(error){this.current(epoch);if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;}
       }
@@ -91,7 +125,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       detach:async()=>{if(detached)return;detached=true;await this.cleanupUi();},
     };
   }
-  private async waitUntilVisible(epoch:number){
+  private async waitUntilVisible(epoch:number,onWaiting?:()=>void){
     let announced=false;
     for(;;){
       // A selected BrowserView may become hidden before mounting finishes. Keep
@@ -99,7 +133,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       // ownership instead of waiting forever for this old document to reappear.
       this.current(epoch);const active=RUNTIME_PLATFORM==='win32'?await this.verifyActiveTarget(true):true;this.current(epoch);
       const activity=await this.policy.documentActivity();this.current(epoch);if(active&&activity.visible)return;
-      if(!announced){diag('runtime-waiting-visible',{});announced=true;}
+      if(!announced){diag('runtime-waiting-visible',{});announced=true;onWaiting?.();}
       await new Promise<void>((resolve,reject)=>{
         const cancel=()=>{clearTimeout(timer);this.invalidators.delete(cancel);reject(new Error('RUNTIME_TARGET_CHANGED'));};
         const timer=setTimeout(()=>{this.invalidators.delete(cancel);resolve();},500);this.invalidators.add(cancel);

@@ -3,23 +3,24 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {LiveRuntimeDriver} from '../runtime/driver';
 import {VERIFIED_RUNTIME_BUILD} from '../runtime/identity';
-import {RuntimeCDPPolicy} from '../runtime/cdp-policy';
 import {activateWindowsRuntimeBuild} from '../runtime/build-manifest';
 import {CompanionService} from '../electron/companion-service';
+import {RuntimeCDPPolicy} from '../runtime/cdp-policy';
 
 function deferred<T=void>(){let resolve!:(value:T)=>void,reject!:(error:unknown)=>void;const promise=new Promise<T>((done,fail)=>{resolve=done;reject=fail;});return{promise,resolve,reject};}
 const flush=()=>new Promise<void>(resolve=>setImmediate(resolve));
 const panel={} as any;
 function inventory(){
   const html='verified fixture',fingerprint={...VERIFIED_RUNTIME_BUILD,htmlSha256:createHash('sha256').update(html).digest('hex')};
-  let visible:string|undefined='A',focused:string|undefined='A',corrupt=false;
+  // A changed document is a new navigation, so tampering also changes the loader identity.
+  let visible:string|undefined='A',focused:string|undefined='A',corrupt=false,generation=0;
   const mounts:string[]=[],probes:string[]=[],detaches:string[]=[];
   const transport={send:async(method:string,params:any,session?:string)=>{
     if(method==='Target.getTargets')return{targetInfos:['A','B'].map(targetId=>({targetId,type:'page',url:VERIFIED_RUNTIME_BUILD.documentURL}))};
     if(method==='Target.attachToTarget')return{sessionId:params.targetId};
     if(method==='Target.detachFromTarget'){detaches.push(params.sessionId);return{};}
     if(method==='Page.enable')return{};
-    if(method==='Page.getFrameTree')return{frameTree:{frame:{id:session+'-frame',url:VERIFIED_RUNTIME_BUILD.documentURL,loaderId:session+'-loader'}}};
+    if(method==='Page.getFrameTree')return{frameTree:{frame:{id:session+'-frame',url:VERIFIED_RUNTIME_BUILD.documentURL,loaderId:session+'-loader-'+generation}}};
     if(method==='Page.getResourceContent')return{content:corrupt?'unexpected vendor bytes':html,base64Encoded:false};
     if(method==='Page.createIsolatedWorld')return{executionContextId:session==='A'?1:2};
     if(method==='Runtime.evaluate'){probes.push(session!);return{result:{value:{visible:visible==='both'||visible===session,focused:focused===session}}};}
@@ -34,7 +35,7 @@ function inventory(){
         mountUi:async()=>{assert.equal(visible,id,'only the visible account may mount');mounts.push(id);mounted.resolve();},},});
     return{driver,mounted:mounted.promise,activity:activity.promise};
   };
-  return{make,mounts,probes,detaches,setVisible:(id?:string)=>{visible=id;focused=id;},corrupt:()=>{corrupt=true;}};
+  return{make,mounts,probes,detaches,setVisible:(id?:string)=>{visible=id;focused=id;},corrupt:()=>{corrupt=true;generation++;}};
 }
 
 test('hidden bootstrap migrates to the currently visible verified account, without returning to the old account',{timeout:5000},async()=>{
@@ -47,9 +48,9 @@ test('hidden bootstrap migrates to the currently visible verified account, witho
 });
 
 test('all-hidden retains its lease and resumes when the same verified account becomes visible',{timeout:5000},async()=>{
-  const world=inventory();world.setVisible();const item=world.make('A');
-  const mounting=item.driver.mountCompanion(panel,async()=>{});await item.activity;world.setVisible('A');await mounting;
-  assert.deepEqual(world.mounts,['A']);assert.equal(item.driver.invalid,false);
+  const world=inventory();world.setVisible();const item=world.make('A');let waits=0;
+  const mounting=item.driver.mountCompanion(panel,async()=>{},()=>{waits++;});await item.activity;await flush();assert.equal(waits,1);world.setVisible('A');await mounting;
+  assert.deepEqual(world.mounts,['A']);assert.equal(item.driver.invalid,false);assert.equal(waits,1);
 });
 
 test('rapid A B A invalidates both obsolete bootstrap owners and mounts only the final account',{timeout:5000},async()=>{
@@ -136,6 +137,111 @@ test('ordinary mount failure closes only that failed owner and permits a later c
     const successor=composer();service.reconnecting={id:'1:2:3',epoch:service.connectionEpoch,controller:new AbortController(),promise:Promise.resolve(successor.value),claimed:false,disposed:false};
     await service.connectComposer();assert.equal(service.external,successor.value);assert.equal(successor.counts().mounts,1);
   }finally{await service.dispose();}
+});
+
+/** Resolves true only if the promise settles within a few event-loop turns. */
+async function settlesSoon(promise:Promise<unknown>){let settled=false;void promise.then(()=>{settled=true;},()=>{settled=true;});for(let i=0;i<5&&!settled;i++)await flush();return settled;}
+
+test('a socket waiting for the IM page releases the busy phase and is never awaited, even by the connect that started it',{timeout:5000},async t=>{
+  for(const timing of ['before-claim','after-claim'])await t.test(timing,async()=>{
+    const arrived=deferred<any>(),successor=composer(),first=composer(),service=await serviceFixture(first.value);
+    let waits=0,report!:()=>void;first.value.reconnect=async(_signal:AbortSignal,onWaiting:()=>void)=>{waits++;report=onWaiting;if(timing==='before-claim')onWaiting();return arrived.promise;};
+    try{
+      await service.connectComposer();assert.equal(service.external,first.value);
+      // The vendor logs out: the warm reconnect keeps its verified socket and waits for the IM page.
+      first.invalidate();assert.equal(waits,1);
+      const creator=service.connectComposer();
+      if(timing==='after-claim'){await flush();assert.equal(service.state.phase,'reading');assert.equal(await settlesSoon(creator),false);report();}
+      assert.equal(await settlesSoon(creator),true,'the creating call must settle once the attempt waits');
+      assert.notEqual(service.externalConnecting,undefined);assert.equal(service.state.phase,'idle');
+      assert.equal(await settlesSoon(service.connectComposer()),true);
+      arrived.resolve(successor.value);for(let i=0;i<5&&service.externalConnecting;i++)await flush();
+      assert.equal(service.external,successor.value);assert.equal(successor.counts().mounts,1);assert.equal(service.externalConnecting,undefined);assert.equal(service.waitingConnection,undefined);
+    }finally{await service.dispose();}
+  });
+});
+
+test('a mount waiting for a hidden IM page releases the busy phase and completes when it becomes visible',{timeout:5000},async()=>{
+  const visible=deferred(),first=composer(),service=await serviceFixture(first.value);
+  // The verified attach reports waiting from inside mountWorkbench, as LiveRuntimeDriver.mountCompanion does.
+  let report!:()=>void;const successor=composer({mount:visible.promise});const mount=successor.value.mountWorkbench;
+  successor.value.mountWorkbench=async(...args:unknown[])=>{report();return mount(...args);};
+  first.value.reconnect=async(_signal:AbortSignal,onWaiting:()=>void)=>{report=onWaiting;return successor.value;};
+  try{
+    await service.connectComposer();first.invalidate();
+    const creator=service.connectComposer();await successor.started;
+    assert.equal(await settlesSoon(creator),true,'the creating call must settle while the page is hidden');
+    assert.equal(service.state.phase,'idle');assert.notEqual(service.externalConnecting,undefined);
+    visible.resolve();for(let i=0;i<5&&service.externalConnecting;i++)await flush();
+    assert.equal(service.external,successor.value);assert.equal(service.externalConnecting,undefined);assert.equal(successor.counts().closes,0);
+  }finally{await service.dispose();}
+});
+
+function discoveryInventory(){
+  const saved=VERIFIED_RUNTIME_BUILD,html='verified discovery fixture';
+  activateWindowsRuntimeBuild({...saved,htmlSha256:createHash('sha256').update(html).digest('hex')});
+  const keys=['executable','executableVersion','packageVersion','aresVersion','executableSha256','asarSha256','htmlSha256','rendererSha256'] as const;
+  const fingerprint=Object.fromEntries(keys.map(key=>[key,VERIFIED_RUNTIME_BUILD[key]])) as any;
+  let ids=['A','B'],visible:string|undefined,corrupt=false,generation=0,driftInventory=false,closed=false,listCalls=0,resourceReads=0,enables=0;
+  const disconnects=new Set<()=>void>(),events=new Set<()=>void>(),worldNames=new Set<string>(),attached:string[]=[],detached:string[]=[];
+  const transport:any={onEvent:(listener:()=>void)=>{events.add(listener);return()=>events.delete(listener);},
+    onDisconnect:(listener:()=>void)=>{disconnects.add(listener);if(closed)listener();return()=>disconnects.delete(listener);},
+    disconnect:async()=>{closed=true;for(const listener of [...disconnects])listener();},
+    send:async(method:string,params:any,session?:string)=>{
+      if(closed)throw Error('CDP_DISCONNECTED');
+      if(method==='Target.getTargets'){listCalls++;return{targetInfos:(driftInventory&&listCalls%2===0?['A','C']:ids).map(targetId=>({targetId,type:'page',url:VERIFIED_RUNTIME_BUILD.documentURL}))};}
+      if(method==='Target.attachToTarget'){attached.push(params.targetId);return{sessionId:params.targetId};}
+      if(method==='Target.detachFromTarget'){detached.push(params.sessionId);return{};}
+      if(method==='Page.enable'){enables++;return{};}
+      if(method==='Page.getFrameTree')return{frameTree:{frame:{id:session+'-frame',url:VERIFIED_RUNTIME_BUILD.documentURL,loaderId:session+'-loader-'+generation}}};
+      if(method==='Page.getResourceContent'){resourceReads++;return{content:corrupt?'tampered bytes':html,base64Encoded:false};}
+      if(method==='Page.createIsolatedWorld'){worldNames.add(params.worldName);return{executionContextId:session==='A'?1:2};}
+      if(method==='Runtime.evaluate')return{result:{value:{visible:visible==='both'||visible===session,focused:visible===session}}};
+      throw Error('Unexpected discovery '+method);
+    }};
+  return{transport,attached,detached,worldNames,discover:(onWaiting?:()=>void)=>LiveRuntimeDriver.discover(transport,fingerprint,'fixture bundle','0'.repeat(64),8000,onWaiting),
+    setVisible:(id?:string)=>{visible=id;},removeTargets:()=>{ids=[];},corrupt:()=>{corrupt=true;generation++;},reload:()=>{generation++;},driftInventory:()=>{driftInventory=true;},
+    counts:()=>({listCalls,resourceReads,enables,disconnectListeners:disconnects.size}),restore:()=>activateWindowsRuntimeBuild(saved)};
+}
+
+test('Windows discovery keeps one verified socket beyond eight seconds of hidden accounts and resumes only on visible B',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:0});const f=discoveryInventory();t.after(f.restore);
+  const messages:unknown[][]=[];t.mock.method(console,'log',(...args:unknown[])=>{messages.push(args);});
+  let settled=false,waits=0;const discovering=f.discover(()=>{waits++;}).finally(()=>{settled=true;});await flush();
+  for(let i=0;i<12;i++){t.mock.timers.tick(1000);await flush();}
+  // Each loader is hash-verified once; hidden polling afterwards only re-reads visibility.
+  assert.equal(settled,false);assert.equal(f.counts().resourceReads,2);assert.equal(f.counts().enables,2);assert.equal(f.worldNames.size,1);
+  assert.equal(messages.filter(args=>typeof args[0]==='string'&&args[0].includes('runtime-waiting-visible')).length,1);
+  // The unbounded hidden wait is reported once so the companion can release its busy state.
+  assert.equal(waits,1);
+  f.reload();t.mock.timers.tick(1000);await flush();assert.equal(f.counts().resourceReads,4);assert.equal(f.counts().enables,4);
+  f.setVisible('B');t.mock.timers.tick(1000);await flush();const driver=await discovering;
+  assert.equal(driver.target.targetId,'B');assert.equal(f.counts().disconnectListeners,1);
+  assert.equal(f.attached.length,f.detached.length);await driver.disconnect();assert.equal(f.counts().disconnectListeners,0);
+});
+
+test('Windows hidden discovery still times out within eight seconds after verified targets disappear',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:0});const f=discoveryInventory();t.after(f.restore);
+  let settled=false;const rejected=assert.rejects(f.discover().finally(()=>{settled=true;}),/IM_TARGET_NOT_READY/);await flush();
+  for(let i=0;i<12;i++){t.mock.timers.tick(1000);await flush();}assert.equal(settled,false);
+  f.removeTargets();for(let i=0;i<7;i++){t.mock.timers.tick(1000);await flush();}assert.equal(settled,false);
+  t.mock.timers.tick(1000);await rejected;assert.equal(f.counts().disconnectListeners,0);assert.equal(f.attached.length,f.detached.length);
+});
+
+test('Windows hidden discovery wakes immediately on cancellation through transport disconnect and removes its listener',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:0});const f=discoveryInventory();t.after(f.restore);
+  const rejected=assert.rejects(f.discover(),/CDP_DISCONNECTED/);await flush();const before=f.counts().listCalls;
+  await f.transport.disconnect();await rejected;assert.equal(f.counts().disconnectListeners,0);
+  t.mock.timers.tick(20000);await flush();assert.equal(f.counts().listCalls,before);
+});
+
+test('Windows hidden discovery continues rejecting changed hashes, ambiguous visible accounts and inventory drift',async t=>{
+  for(const mode of ['hash','ambiguous','inventory'])await t.test(mode,async t=>{
+    t.mock.timers.enable({apis:['setTimeout','Date'],now:0});const f=discoveryInventory();t.after(f.restore);
+    const rejected=assert.rejects(f.discover(),mode==='hash'?/LOADED_DOCUMENT_HASH_MISMATCH/:mode==='ambiguous'?/AMBIGUOUS_IM_TARGET/:/RUNTIME_TARGET_CHANGED/);await flush();
+    if(mode==='hash')f.corrupt();else if(mode==='ambiguous')f.setVisible('both');else f.driftInventory();
+    t.mock.timers.tick(1000);await rejected;assert.equal(f.counts().disconnectListeners,0);assert.equal(f.attached.length,f.detached.length);
+  });
 });
 
 test('exact-document checks reuse a verified hash only for the same session, loader and URL',async()=>{

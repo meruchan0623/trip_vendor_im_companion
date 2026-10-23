@@ -74,8 +74,9 @@ export class CompanionService {
   private sessionStarting:Promise<void>;
   private translationOptionsStarting:Promise<void>;
   private external?:ExternalComposer;
+  /** Settles when the attempt ends or starts waiting for the vendor page; set for the attempt's whole life. */
   private externalConnecting?:Promise<void>;
-  private connectingAttempt?:object;
+  private connectingAttempt?:{release:()=>void};
   private stopInteraction?:()=>void;
   private stopInvalidation?:()=>void;
   private embeddedPublishing=false;
@@ -83,6 +84,8 @@ export class CompanionService {
   private nextConnectAt=0;
   private connectionEpoch=0;
   private connectionAbort?:AbortController;
+  /** The connection whose verified socket is waiting for the vendor IM page; that wait is not busy. */
+  private waitingConnection?:AbortController;
   private reconnecting?:{id:string;epoch:number;controller:AbortController;promise:Promise<ExternalComposer|undefined>;ready?:ExternalComposer;claimed:boolean;disposed:boolean};
   private dropReconnect(){const pending=this.reconnecting;this.reconnecting=undefined;if(!pending)return;pending.controller.abort();if(pending.ready&&!pending.claimed&&!pending.disposed){pending.disposed=true;void pending.ready.close().catch(()=>{});}}
   private order:PanelOrderState={identifier:'',status:'idle',error:null,fields:[]};
@@ -115,7 +118,7 @@ export class CompanionService {
     if(composer.reconnect&&this.state.targetInstanceId){
       this.dropReconnect();const controller=new AbortController();this.connectionAbort=controller;
       const pending:NonNullable<CompanionService['reconnecting']>={id:this.state.targetInstanceId,epoch:this.connectionEpoch,controller,promise:Promise.resolve(undefined),claimed:false,disposed:false};this.reconnecting=pending;
-      pending.promise=composer.reconnect(controller.signal).then(async next=>{
+      pending.promise=composer.reconnect(controller.signal,()=>this.composerWaiting(controller)).then(async next=>{
         if(this.closed||controller.signal.aborted||this.reconnecting!==pending||pending.id!==this.state.targetInstanceId||pending.epoch!==this.connectionEpoch){if(!pending.disposed){pending.disposed=true;await next.close().catch(()=>{});}return undefined;}
         pending.ready=next;return next;
       }).catch(()=>undefined);this.nextConnectAt=Date.now();
@@ -264,6 +267,12 @@ export class CompanionService {
     this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
   invalidate(){this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
+  /** A verified socket waiting for the IM page keeps its attempt open; release the panel controls meanwhile. */
+  private composerWaiting(controller:AbortController){
+    if(this.closed||controller.signal.aborted||this.connectionAbort!==controller)return;
+    this.waitingConnection=controller;if(this.state.phase==='reading')this.waitForMessagePage();
+    this.connectingAttempt?.release();
+  }
   /** No selected message page is a normal waiting state; the verified connection keeps observing. */
   private waitForMessagePage(){
     const keepFailure=this.state.phase==='failed';
@@ -340,9 +349,12 @@ export class CompanionService {
   async connectComposer(){
     // A verified local panel can show connecting/login state while remote authentication runs.
     if(this.closed)return;
+    // A waiting attempt connects on its own once the IM page appears. No caller, including the one
+    // that started it, awaits that wait: a pending Settings action keeps every control disabled.
     if(this.externalConnecting)return this.externalConnecting;
     const id=this.state.targetInstanceId;if(!id){this.fail(new Error('TARGET_REQUIRED'));return;}this.nextConnectAt=Date.now()+5000;
-    const attempt={};this.connectingAttempt=attempt;
+    let release!:()=>void;const released=new Promise<void>(resolve=>{release=resolve;});
+    const attempt={release};this.connectingAttempt=attempt;
     const current=()=>!this.closed&&this.connectingAttempt===attempt&&id===this.state.targetInstanceId;
     const operation=(async()=>{
       if(!await this.waitForObservation()||!current()||this.busy)return;
@@ -352,10 +364,11 @@ export class CompanionService {
       let composer:ExternalComposer|undefined;
       try{
         if(!current()||connectionAbort.signal.aborted)return;
+        if(warm&&this.waitingConnection===connectionAbort)this.composerWaiting(connectionAbort);
         composer=warm?await warm.promise:undefined;
         if(warm&&this.reconnecting===warm){this.reconnecting=undefined;warm.claimed=true;}
         if(!current()||connectionAbort.signal.aborted||epoch!==this.connectionEpoch){if(composer&&!warm?.disposed){if(warm)warm.disposed=true;await composer.close();}return;}
-        composer??=await connectExternalComposer(id,connectionAbort.signal);
+        composer??=await connectExternalComposer(id,connectionAbort.signal,()=>this.composerWaiting(connectionAbort));
         if(!current()||connectionAbort.signal.aborted||epoch!==this.connectionEpoch){await composer.close();return;}
         const connected=composer;this.external=connected;
         this.stopInteraction=connected.onInteraction?.(event=>this.interaction(event,connected));
@@ -375,9 +388,9 @@ export class CompanionService {
       }
     })().finally(()=>{
       if(this.connectingAttempt!==attempt)return;
-      this.nextConnectAt=Date.now()+5000;this.connectingAttempt=undefined;this.externalConnecting=undefined;
+      this.nextConnectAt=Date.now()+5000;this.connectingAttempt=undefined;this.externalConnecting=undefined;this.waitingConnection=undefined;
     });
-    this.externalConnecting=operation;return operation;
+    this.externalConnecting=Promise.race([operation,released]);return this.externalConnecting;
   }
   async translate(target:PanelTarget,automaticSignature?:string){
     if(!isPanelTarget(target)){this.fail(new Error('INVALID_LANGUAGE'));return;}
