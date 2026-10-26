@@ -13,6 +13,9 @@ export const TARGET_LABELS:Record<typeof PANEL_TARGETS[number],string>={en:'Engl
 const LANGUAGE_NAMES:Record<string,string>={zh:'中文',en:'英语',ja:'日语',ko:'韩语',th:'泰语',ar:'阿拉伯语',ru:'俄语',el:'希腊语',vi:'越南语',es:'西班牙语',fr:'法语',de:'德语',pt:'葡萄牙语',it:'意大利语',id:'印尼语',ms:'马来语','zh-TW':'繁体中文',tr:'土耳其语'};
 type Tone='ok'|'warn'|'bad'|'busy'|'muted';
 const STATUS:Record<PanelState['status'],[string,Tone]|null>={unavailable:['编辑器未就绪','warn'],idle:null,translating:['翻译中','busy'],ready:['译文就绪','ok'],stale:['待更新','busy'],failed:['翻译失败','bad'],needs_login:null};
+declare const __TMC_INJECTOR_VERSION__:string|undefined;
+/** Set only by one-time installer builds, so the more menu names the running injection. */
+export const INJECTOR_VERSION=typeof __TMC_INJECTOR_VERSION__==='string'?__TMC_INJECTOR_VERSION__:'';
 export const PANEL_HINT='替换后仍需您在原客户端手动发送';
 export const SEND_HINT='按 Enter 直接发送译文';
 export type PanelDensity='off'|'bar'|'card';
@@ -89,7 +92,7 @@ kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padd
 .option{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border-radius:7px;text-align:left;white-space:normal}
 .option:hover:not(:disabled){background:#f1f3f7}
 .option[aria-selected="true"],.option[aria-checked="true"]{color:var(--accent);font-weight:600}.option[aria-selected="true"]::after,.option[aria-checked="true"]::after{content:"✓";margin-left:auto}
-.option.mode span{display:grid;gap:1px}.menu .label{padding:4px 8px 2px;font-size:11px;color:var(--ink-3)}
+.option.mode span{display:grid;gap:1px}.menu .label{padding:4px 8px 2px;font-size:11px;color:var(--ink-3)}.menu .version{padding:2px 8px 4px;user-select:text}
 .option small{color:var(--ink-3);font-weight:400;font-size:11.5px}
 .option.follow{padding:9px 8px}.option.follow span{display:grid;gap:1px}
 .separator{height:1px;background:var(--line);margin:4px 2px}
@@ -149,7 +152,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   queryInput.type='text';queryInput.placeholder='输入订单 ID 或其他标识';queryInput.setAttribute('aria-label','明确输入或选择要查询的标识');queryInput.maxLength=100;queryInput.autocomplete='off';queryForm.append(queryInput,queryButton);query.append(make('h5','','查询其他订单'),queryForm,queryNote);
   const menu=make('div','pop menu'),pause=button('option'),pauseIcon=make('span'),pauseText=make('span'),disable=button('option');menu.setAttribute('role','menu');pauseIcon.style.display='contents';pause.append(pauseIcon,pauseText);disable.append(icon('power'),'关闭出站翻译');const modeLabel=make('div','label','Enter 键行为'),modes=([['send','Enter 直接发送','未出译文时等待译文后发送'],['replace','替换模式','Enter 保持原样，译文需手动替换']] as const).map(([mode,label,detail])=>{const option=button('option mode');option.setAttribute('role','menuitemradio');option.dataset.mode=mode;const text=make('span');text.append(make('span','',label),make('small','',detail));option.append(text);return option;});
   const accountLogin=button('option account-login','打开浏览器 TSim_CS'),accountLogout=button('option account-logout','断开助手会话');accountLogin.setAttribute('role','menuitem');accountLogout.setAttribute('role','menuitem');
-  menu.append(pause,disable,make('div','separator'),modeLabel,...modes,make('div','separator'),accountLogin,accountLogout);
+  menu.append(pause,disable,make('div','separator'),modeLabel,...modes,make('div','separator'),accountLogin,accountLogout,...(INJECTOR_VERSION?[make('div','separator'),make('div','label version',`注入版本 ${INJECTOR_VERSION}`)]:[]));
   const popovers:Record<Popover,[HTMLElement,HTMLButtonElement]>={languages:[languages,lang],query:[query,find],menu:[menu,more]};
   for(const [pop] of Object.values(popovers))pop.hidden=true;
   panel.append(bar,body);shadow.append(style,panel,languages,query,menu);

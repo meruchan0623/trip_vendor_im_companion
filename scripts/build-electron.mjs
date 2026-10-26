@@ -10,6 +10,16 @@ if(runtimePlatform==='win32'&&process.env.TMC_WINDOWS_DYNAMIC==='1')platformDefi
 if(process.env.TMC_WINDOWS_MANIFEST){
   throw new Error('WINDOWS_MANIFEST_MUST_BE_CREATED_AT_INSTALL_TIME');
 }
+if(process.env.TMC_INJECTOR_VERSION){
+  // One-time installer builds label the in-page more menu with their version.
+  if(!/^\d+\.\d+\.\d+$/.test(process.env.TMC_INJECTOR_VERSION))throw new Error('INVALID_INJECTOR_VERSION');
+  platformDefine.__TMC_INJECTOR_VERSION__=JSON.stringify(process.env.TMC_INJECTOR_VERSION);
+}
+if(process.env.TMC_MACOS_DYNAMIC==='1'){
+  // The one-time installer writes the client manifest; a compiled-in build would contradict it.
+  if(runtimePlatform!=='darwin'||process.env.TMC_MACOS_MANIFEST)throw new Error('MACOS_DYNAMIC_REQUIRES_DARWIN_WITHOUT_PATCHED_MANIFEST');
+  platformDefine.__TMC_MACOS_DYNAMIC__='true';
+}
 if(process.env.TMC_MACOS_MANIFEST){
   if(runtimePlatform!=='darwin')throw new Error('PATCHED_MANIFEST_REQUIRES_MACOS');
   const manifest=JSON.parse(await readFile(process.env.TMC_MACOS_MANIFEST,'utf8'));
