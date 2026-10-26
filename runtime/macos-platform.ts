@@ -54,9 +54,11 @@ const debugFlags=(args:string)=>[...args.matchAll(/(?:^|\s)(--?remote-debugging-
 const isMainImage=(row:ProcessRow)=>sameExecutablePath(row.executable,exe);
 const isMain=(row:ProcessRow)=>isMainImage(row)&&row.args!==undefined&&!row.args.includes('--type=');
 const isInstaller=(row:ProcessRow)=>{const path=nfc(row.executable);return path.includes('vbk-electron-updater')||path.startsWith(bundlePrefix)&&posix.basename(path)==='ShipIt';};
+/** Starts an independent read-only check now; awaiting the getter later reports its failure in the caller's original order. */
+function early<T>(promise:Promise<T>):()=>Promise<T>{promise.catch(()=>{});return()=>promise;}
 async function scan():Promise<ProcessRow[]>{
   let table:string,commands:string;
-  try{table=await run('/bin/ps',['-axww','-o','pid=,ppid=,lstart=,comm='],4_000_000);commands=await run('/bin/ps',['-axww','-o','pid=,args='],16_000_000);}catch{throw new Error('PROCESS_INSPECTION_FAILED');}
+  try{[table,commands]=await Promise.all([run('/bin/ps',['-axww','-o','pid=,ppid=,lstart=,comm='],4_000_000),run('/bin/ps',['-axww','-o','pid=,args='],16_000_000)]);}catch{throw new Error('PROCESS_INSPECTION_FAILED');}
   const args=parseArgs(commands);return parseTable(table).map(row=>args.has(row.pid)?{...row,args:args.get(row.pid)}:row);
 }
 async function listeners(port:number):Promise<{pid:number;address:string;port:number}[]>{
@@ -88,16 +90,19 @@ export class MacLaunchPlatform implements LaunchPlatform {
   async inspectReadOnly():Promise<VerifiedIdleSnapshot>{
     macos();
     const clients:number[]=[],main:number[]=[],installers:number[]=[];
-    for(const row of await scan()){
+    // Process listing, bundle version and file digests are independent reads; overlap them.
+    const rows=early(scan()),versionText=early(run('/usr/bin/plutil',['-extract','CFBundleVersion','raw','-o','-',posix.join(contents,'Info.plist')],64_000));
+    const verified=early(Promise.all([MACOS_DYNAMIC_RUNTIME?inspectMacDynamicPages():inspectMacPages(),this.executableHash(exe),this.hash(posix.join(contents,'Resources','app.asar'))]));
+    for(const row of await rows()){
       const path=nfc(row.executable);
       if(isInstaller(row)){installers.push(row.pid);continue;}
       if(path.startsWith(bundlePrefix)){if(isMainImage(row)&&row.args===undefined)throw new Error('CLIENT_IDENTITY_UNAVAILABLE');clients.push(row.pid);if(isMain(row))main.push(row.pid);continue;}
       if(posix.basename(path).startsWith(clientName))throw new Error('UNKNOWN_CLIENT_IMAGE');
     }
     let version:string;
-    try{version=(await run('/usr/bin/plutil',['-extract','CFBundleVersion','raw','-o','-',posix.join(contents,'Info.plist')],64_000)).replace(/\n$/,'');}catch{throw new Error('CLIENT_VERSION_UNAVAILABLE');}
+    try{version=(await versionText()).replace(/\n$/,'');}catch{throw new Error('CLIENT_VERSION_UNAVAILABLE');}
     if(!/^[0-9A-Za-z.-]{1,64}$/.test(version))throw new Error('CLIENT_VERSION_UNAVAILABLE');
-    const [pages,executableSha256,asarSha256]=await Promise.all([MACOS_DYNAMIC_RUNTIME?inspectMacDynamicPages():inspectMacPages(),this.executableHash(exe),this.hash(posix.join(contents,'Resources','app.asar'))]);
+    const [pages,executableSha256,asarSha256]=await verified();
     // The candidate carries the compiled-in or installer-recorded client identity.
     if(version!==pages.build.executableVersion||executableSha256!==pages.build.executableSha256||asarSha256!==pages.build.asarSha256)throw new Error('UNVERIFIED_BUILD');
     await pages.assertUnchanged();activateMacPageBuild(pages.build);
@@ -130,7 +135,7 @@ export class MacLaunchPlatform implements LaunchPlatform {
   private async identity(pid:number):Promise<ProcessIdentity>{
     macos();if(!Number.isSafeInteger(pid)||pid<=0)throw new Error('INVALID_PID');
     let table:string,text:string;
-    try{table=await run('/bin/ps',['-ww','-o','pid=,ppid=,lstart=,comm=','-p',String(pid)],64_000);text=await run('/usr/sbin/lsof',['-w','-nP','-a','-p',String(pid),'-d','txt','-Fn'],1_000_000);}catch{throw new Error('PROCESS_IDENTITY_UNAVAILABLE');}
+    try{[table,text]=await Promise.all([run('/bin/ps',['-ww','-o','pid=,ppid=,lstart=,comm=','-p',String(pid)],64_000),run('/usr/sbin/lsof',['-w','-nP','-a','-p',String(pid),'-d','txt','-Fn'],1_000_000)]);}catch{throw new Error('PROCESS_IDENTITY_UNAVAILABLE');}
     const rows=parseTable(table),lines=text.split('\n'),image=lines.find(line=>line.startsWith('n'))?.slice(1);
     if(rows.length!==1||rows[0].pid!==pid||lines[0]!==`p${pid}`||!image||!sameExecutablePath(rows[0].executable,image))throw new Error('PROCESS_IDENTITY_UNAVAILABLE');
     return{pid,executable:image,startedAt:rows[0].startedAt};
@@ -139,8 +144,9 @@ export class MacLaunchPlatform implements LaunchPlatform {
     macos();if(!Number.isSafeInteger(port)||port<1||port>65535)throw new Error('INVALID_DEBUG_PORT');
     const deadline=Date.now()+timeoutMs;
     while(Date.now()<deadline){
+      const listening=early(listeners(port));
       const identity=await this.identity(owner.pid);if(identity.startedAt!==owner.startedAt||!sameExecutablePath(identity.executable,owner.executable)||!sameExecutablePath(identity.executable,exe))throw new Error('PROCESS_CHANGED');
-      const found=await listeners(port);
+      const found=await listening();
       if(found.length){if(found.length!==1)throw new Error('AMBIGUOUS_LISTENER');return{...found[0],processStartedAt:identity.startedAt};}
       await pause(200);
     }
@@ -151,7 +157,7 @@ export class MacLaunchPlatform implements LaunchPlatform {
     macos();const required=()=>new Error('EXISTING_CLIENT_DEBUG_PORT_REQUIRED');
     if(!Number.isSafeInteger(pid)||pid<=0)throw required();
     let rows:ProcessRow[],args:Map<number,string>;
-    try{rows=parseTable(await run('/bin/ps',['-ww','-o','pid=,ppid=,lstart=,comm=','-p',String(pid)],64_000));args=parseArgs(await run('/bin/ps',['-ww','-o','pid=,args=','-p',String(pid)],256_000));}catch{throw required();}
+    try{const [table,commands]=await Promise.all([run('/bin/ps',['-ww','-o','pid=,ppid=,lstart=,comm=','-p',String(pid)],64_000),run('/bin/ps',['-ww','-o','pid=,args=','-p',String(pid)],256_000)]);rows=parseTable(table);args=parseArgs(commands);}catch{throw required();}
     const row=rows.length===1&&rows[0].pid===pid&&args.has(pid)?{...rows[0],args:args.get(pid)}:undefined;
     if(!row||!isMain(row))throw required();
     const flags=debugFlags(row.args!),m=flags.length===1?/^--remote-debugging-port=(\d{4,5})$/.exec(flags[0]):null,port=m?Number(m[1]):NaN;

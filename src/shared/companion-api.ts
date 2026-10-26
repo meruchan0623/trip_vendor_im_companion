@@ -18,6 +18,9 @@ export interface StandaloneState {
   error:string|null; language:PanelTarget; browserOpen:boolean;
   composerSource:'uia'|'verified-editor'|'unavailable';
   orderEntries:OrderEntry[]; orderViewport:OrderViewport|null;
+  /** Current-conversation field only; never an overlay range over vendor text. */
+  /** Undefined: no early-source capability. Null: recognized source has no admitted order; suppress fallback. */
+  currentOrderHint?:{identifier:string;conversationId:string}|null;
   messageSurface?:MessageSurface;
 }
 export interface StandaloneAPI {

@@ -46,7 +46,7 @@ export class RuntimeCDPPolicy {
   get session(){return this.sessionId;}
   get context(){return this.isolatedContextId;}
   get nativeReady(){return !!this.nativeObjectId;}
-  invalidateContext(){this.generation++;this.isolatedContextId=undefined;this.installed=false;}
+  invalidateContext(){this.generation++;this.isolatedContextId=undefined;this.installed=false;this.verifiedLoader=undefined;}
   private async owned(method:string,params:Record<string,unknown>):Promise<any>{const session=this.sessionId,generation=this.generation;if(!session)throw new Error('SESSION_REQUIRED');const result=await this.transport.send(method,params,session);if(session!==this.sessionId||generation!==this.generation)throw new Error('SESSION_CHANGED');return result;}
   constructor(private transport:CDPTransport,private target:RuntimeTarget,private ownBundleSha256:string){assertBuildFingerprint(target.fingerprint);if(!approvedDocumentURL(target.documentURL)||!target.targetId||!target.frameId||!target.contextNonce||!/^[0-9a-f]{64}$/.test(ownBundleSha256))throw new Error('UNVERIFIED_POLICY_TARGET');}
   async attachSession():Promise<void>{
@@ -80,11 +80,19 @@ export class RuntimeCDPPolicy {
     return{visible:value.visible,focused:value.focused};
   }
   async enableInspection(){await Promise.all([this.owned('Page.enable',{}),this.owned('Runtime.enable',{}),this.owned('Debugger.enable',{})]);}
+  /** Loader whose main resource already matched on this session; a navigation gets a new loaderId. */
+  private verifiedLoader?:{session:string;loaderId:string;url:string};
   async verifyExactDocument(){
-    const result=await this.owned('Page.getFrameTree',{});const frame=result?.frameTree?.frame;
+    const session=this.sessionId,result=await this.owned('Page.getFrameTree',{});const frame=result?.frameTree?.frame;
     if(!frame||frame.id!==this.target.frameId||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
+    const loaderId=typeof frame.loaderId==='string'&&frame.loaderId?frame.loaderId:undefined,known=this.verifiedLoader;
+    if(loaderId&&known&&known.session===session&&known.loaderId===loaderId&&known.url===frame.url)return;
     const resource=await this.owned('Page.getResourceContent',{frameId:this.target.frameId,url:this.target.documentURL});
     if(!resource||typeof resource.content!=='string'||resource.content.length>20000||resource.base64Encoded!==false||createHash('sha256').update(resource.content,'utf8').digest('hex')!==this.target.fingerprint.htmlSha256)throw new Error('LOADED_DOCUMENT_HASH_MISMATCH');
+    if(!loaderId||!session)return;
+    // Bind the hash to the loader that was current before and after the resource read.
+    const after=(await this.owned('Page.getFrameTree',{}))?.frameTree?.frame;
+    if(after?.id===frame.id&&after.loaderId===loaderId&&after.url===frame.url)this.verifiedLoader={session,loaderId,url:frame.url};
   }
   async verifyRenderer(scriptId:string){if(!/^[0-9]+$/.test(scriptId))throw new Error('INVALID_SCRIPT_ID');const result=await this.owned('Debugger.getScriptSource',{scriptId});if(!result||typeof result.scriptSource!=='string'||result.scriptSource.length>8_000_000||createHash('sha256').update(result.scriptSource,'utf8').digest('hex')!==VERIFIED_RUNTIME_BUILD.rendererSha256)throw new Error('LOADED_RENDERER_HASH_MISMATCH');}
   async inspectParentCaptures():Promise<ParentCapture[]>{
@@ -163,30 +171,66 @@ export class RuntimeCDPPolicy {
     }catch(error){await this.detachNavigation();if(error instanceof Error&&error.message==='CDP_COMMAND_REJECTED')throw new Error(`MESSAGE_NAV_${stage}_REJECTED`);throw error;}
   }
   private async detachNavigation(strict=false){const nav=this.navigation;this.navigation=undefined;if(nav)try{await this.transport.send('Target.detachFromTarget',{sessionId:nav.session});}catch(error){this.navigationCleanupFailed=true;if(strict)throw error;}}
+  private lastOrderRead='';
+  private reportOrderRead(code:string,count:number){const key=code+':'+count;if(key===this.lastOrderRead)return;this.lastOrderRead=key;console.log(JSON.stringify({event:'order-discovery',code,count}));}
   async readRightOrderEntries(geometry:NonNullable<NativePoll['orderFrame']>):Promise<OrderEntry[]>{
+    try{const entries=await this.inspectRightOrderEntries(geometry);this.reportOrderRead(entries.length?'ORDER_READY':'ORDER_UNAVAILABLE',entries.length);return entries;}
+    catch(error){this.reportOrderRead('ORDER_INSPECTION_FAILED',0);throw error;}
+  }
+  private async inspectRightOrderEntries(geometry:NonNullable<NativePoll['orderFrame']>):Promise<OrderEntry[]>{
     if(!this.isolatedContextId)throw new Error('ISOLATED_WORLD_REQUIRED');
-    const tree=await this.owned('Page.getFrameTree',{}),frames:any[]=[];
-    const walk=(node:any)=>{if(!node?.frame)return;frames.push(node.frame);for(const child of node.childFrames??[])walk(child);};walk(tree?.frameTree);
-    const remote=await this.owned('Runtime.evaluate',{expression:'document.querySelector(".customer_info:not(.close) iframe.customer_order-detail")',contextId:this.isolatedContextId,returnByValue:false,objectGroup:this.target.contextNonce});
-    if(remote?.exceptionDetails||typeof remote?.result?.objectId!=='string')return[];
-    let node:any;
-    try{node=(await this.owned('DOM.describeNode',{objectId:remote.result.objectId,depth:0})).node;}finally{await this.owned('Runtime.releaseObject',{objectId:remote.result.objectId});}
-    const match=frames.filter(frame=>frame.id===node?.frameId&&frame.parentId===this.target.frameId&&approvedOrderFrameURL(frame.url));if(match.length!==1||!Array.isArray(node?.attributes))return[];
-    const sourceAt=node.attributes.indexOf('src');if(sourceAt<0||!approvedOrderFrameURL(node.attributes[sourceAt+1]))return[];
-    const source=new URL(node.attributes[sourceAt+1]),actual=new URL(match[0].url);
-    // The verified vendor redirect omits serviceType; the conversation IDs and status must agree.
-    for(const key of ['groupid','sessionid','status'])if(!source.searchParams.get(key)||source.searchParams.get(key)!==actual.searchParams.get(key))return[];
-    const world=await this.owned('Page.createIsolatedWorld',{frameId:match[0].id,worldName:`tsim-order-${this.target.contextNonce}`,grantUniveralAccess:false});
-    if(!Number.isSafeInteger(world?.executionContextId)||world.executionContextId<=0)return[];
-    const read=await this.owned('Runtime.evaluate',{expression:`(${inspectRightOrderDocument.toString()})(document)`,contextId:world.executionContextId,returnByValue:true,awaitPromise:false});
-    const result=read?.result?.value;if(read?.exceptionDetails||!result||!Array.isArray(result.entries)||result.entries.length>1||!Number.isFinite(result.width)||!Number.isFinite(result.height)||result.width<=0||result.height<=0||Math.abs(result.width-geometry.clientWidth)>1||Math.abs(result.height-geometry.clientHeight)>1)return[];
-    const after=await this.owned('Page.getFrameTree',{}),afterFrames:any[]=[];const check=(item:any)=>{if(!item?.frame)return;afterFrames.push(item.frame);for(const child of item.childFrames??[])check(child);};check(after?.frameTree);
-    if(!afterFrames.some(frame=>frame.id===match[0].id&&frame.parentId===this.target.frameId&&frame.url===match[0].url))return[];
-    return result.entries.flatMap((entry:any)=>{
+    const session=this.sessionId,generation=this.generation;
+    const current=()=>{if(!session||session!==this.sessionId||generation!==this.generation)throw new Error('SESSION_CHANGED');};
+    const together=async<T,U>(first:Promise<T>,second:Promise<U>):Promise<[T,U]>=>{
+      const results=await Promise.allSettled([first,second] as const);current();
+      if(results[0].status==='rejected')throw results[0].reason;if(results[1].status==='rejected')throw results[1].reason;
+      return[results[0].value,results[1].value];
+    };
+    const frames=(tree:any):any[]=>{const result:any[]=[];const walk=(node:any)=>{if(!node?.frame)return;result.push(node.frame);for(const child of node.childFrames??[])walk(child);};walk(tree?.frameTree);return result;};
+    const readNode=async()=>{
+      const remote=await this.owned('Runtime.evaluate',{expression:'document.querySelector(".customer_info:not(.close) iframe.customer_order-detail")',contextId:this.isolatedContextId,returnByValue:false,objectGroup:this.target.contextNonce});
+      if(remote?.exceptionDetails||typeof remote?.result?.objectId!=='string')return;
+      try{return(await this.owned('DOM.describeNode',{objectId:remote.result.objectId,depth:0})).node;}finally{await this.owned('Runtime.releaseObject',{objectId:remote.result.objectId});}
+    };
+    const sourceOf=(node:any)=>{if(!Array.isArray(node?.attributes))return;const at=node.attributes.indexOf('src');return at>=0&&approvedOrderFrameURL(node.attributes[at+1])?node.attributes[at+1] as string:undefined;};
+    // These independent observations bracket the child read below. Keep both
+    // identity checks, but do not spend a separate CDP round trip on the tree.
+    const [node,tree]=await together(readNode(),this.owned('Page.getFrameTree',{}));
+    const sourceURL=sourceOf(node);if(!sourceURL||typeof node?.frameId!=='string')return[];
+    let orderSession:string|undefined;
+    try{
+      let matches=frames(tree).filter(frame=>frame.id===node.frameId&&frame.parentId===this.target.frameId&&approvedOrderFrameURL(frame.url));
+      if(matches.length===0){
+        // site-per-process moves the order iframe out of the parent's frame tree.
+        // Select by the actual DOM frame ID, never by URL or target-list order.
+        const targets=await this.transport.send('Target.getTargets',{}) as any;current();
+        const candidates=targets?.targetInfos?.filter((target:any)=>target.targetId===node.frameId&&target.type==='iframe'&&approvedOrderFrameURL(target.url));
+        if(!Array.isArray(candidates)||candidates.length!==1)return[];
+        const attached=await this.transport.send('Target.attachToTarget',{targetId:node.frameId,flatten:true}) as any;
+        if(typeof attached?.sessionId!=='string'||!attached.sessionId)throw new Error('INVALID_SESSION');orderSession=attached.sessionId;current();
+        const childTree=await this.transport.send('Page.getFrameTree',{},orderSession);current();
+        matches=frames(childTree).filter(frame=>frame.id===node.frameId&&frame.parentId===this.target.frameId&&approvedOrderFrameURL(frame.url));
+      }
+      if(matches.length!==1)return[];
+      const frame=matches[0],source=new URL(sourceURL),actual=new URL(frame.url);
+      for(const key of ['groupid','sessionid','status'])if(!source.searchParams.get(key)||source.searchParams.get(key)!==actual.searchParams.get(key))return[];
+      // Redirects may lowercase or omit serviceType; a present value must agree.
+      const service=actual.searchParams.get('servicetype')??actual.searchParams.get('serviceType');
+      if(service!==null&&service!==(source.searchParams.get('serviceType')??''))return[];
+      const send=async(method:string,params:Record<string,unknown>):Promise<any>=>{const result=orderSession?await this.transport.send(method,params,orderSession):await this.owned(method,params);current();return result;};
+      const world=await send('Page.createIsolatedWorld',{frameId:frame.id,worldName:`tsim-order-${this.target.contextNonce}`,grantUniveralAccess:false});
+      if(!Number.isSafeInteger(world?.executionContextId)||world.executionContextId<=0)return[];
+      const read=await send('Runtime.evaluate',{expression:`(${inspectRightOrderDocument.toString()})(document)`,contextId:world.executionContextId,returnByValue:true,awaitPromise:false});
+      const result=read?.result?.value;if(read?.exceptionDetails||!result||!Array.isArray(result.entries)||result.entries.length>1||!Number.isFinite(result.width)||!Number.isFinite(result.height)||result.width<=0||result.height<=0||Math.abs(result.width-geometry.clientWidth)>1||Math.abs(result.height-geometry.clientHeight)>1)return[];
+      const [after,afterNode]=await together(send('Page.getFrameTree',{}),readNode());
+      if(!frames(after).some(next=>next.id===frame.id&&next.parentId===this.target.frameId&&next.url===frame.url&&next.loaderId===frame.loaderId))return[];
+      if(afterNode?.frameId!==node.frameId||sourceOf(afterNode)!==sourceURL)return[];
+      return result.entries.flatMap((entry:any)=>{
       if(entry?.identifierType!=='order_number'||typeof entry.identifier!=='string'||!/^[A-Za-z0-9_-]{4,80}$/.test(entry.identifier)||!entry.rect||!['x','y','width','height'].every(key=>Number.isFinite(entry.rect[key])))return[];
       const r=entry.rect;if(r.x<0||r.y<0||r.width<=0||r.height<=0||r.x+r.width>result.width||r.y+r.height>result.height)return[];
       return[{identifier:entry.identifier,identifierType:'order_number' as const,rect:{x:geometry.rect.x+geometry.clientLeft+r.x,y:geometry.rect.y+geometry.clientTop+r.y,width:r.width,height:r.height}}];
-    });
+      });
+    }finally{if(orderSession)await this.transport.send('Target.detachFromTarget',{sessionId:orderSession});}
   }
   async renewNative(){if(!this.nativeObjectId)throw new Error('NATIVE_NOT_READY');const result=await this.owned('Runtime.callFunctionOn',{objectId:this.nativeObjectId,functionDeclaration:'function(){this.heartbeat();return true;}',returnByValue:true});if(result?.exceptionDetails||result?.result?.value!==true)throw new Error('NATIVE_LEASE_ENDED');}
   async replaceNative(expected:unknown,text:string){if(!this.nativeObjectId)throw new Error('NATIVE_NOT_READY');const result=await this.owned('Runtime.callFunctionOn',{objectId:this.nativeObjectId,functionDeclaration:'function(expected,text){return this.replaceDraft(expected,text);}',arguments:[{value:expected},{value:text}],returnByValue:true});if(result?.exceptionDetails)throw new Error('NATIVE_CAS_FAILED');}

@@ -22,6 +22,28 @@ export interface BrowserProfileSessionOptions {
   syncIntervalMs?:number;
   requestTimeoutMs?:number;
   backgroundPolling?:boolean;
+  /** Monotonic milliseconds for the outbound reuse window; tests inject a fake clock. */
+  now?:()=>number;
+}
+/**
+ * How long one successful full session check may stand in for the checks an outbound translation runs
+ * before its POST (CompanionService's pre-flight sync, then this service's own). Background polling
+ * (`syncIntervalMs`, 4 s by default) already re-verifies the attached session; 3 s keeps every reused check
+ * younger than one polling period, with margin for timer jitter and the check's own duration, while still
+ * covering the gap between the two pre-flight checks (one editor read). Measured from the check's start.
+ * The reused check must belong to the current auth generation; failed, revoked or in-flight checks are never
+ * reused. Server 401/423, the post-response token re-read and the authGeneration comparisons still run on
+ * every request.
+ *
+ * CompanionService.replaceDraft() uses the same window for its check before writing the reviewed translation
+ * and for each write/send authorization. Writes make no TSim request, so there is no post-response token
+ * re-read: a browser account switch inside the window is caught by the identity comparisons only once a
+ * check (background poll or an expired window) has observed it.
+ */
+export const OUTBOUND_SYNC_REUSE_MS=3000;
+export interface SessionSyncOptions {
+  /** Accept a successful check started within OUTBOUND_SYNC_REUSE_MS under the current auth generation. */
+  reuseRecent?:boolean;
 }
 const record=(value:unknown):value is Record<string,any>=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const keys=(value:object,allowed:string[])=>Object.keys(value).every(key=>allowed.includes(key));
@@ -81,6 +103,8 @@ export class BrowserProfileSessionService {
   private suspended=false;
   private closed=false;
   private syncing:Promise<void>|null=null;
+  /** The last fully successful check: when it started and under which auth generation. Revocation and failure clear it. */
+  private verified:{startedAt:number;generation:number}|undefined;
   private opening:Promise<void>|null=null;
   private loginIntent=0;
   private active=new Set<AbortController>();
@@ -104,7 +128,7 @@ export class BrowserProfileSessionService {
   /** The verified bearer for the TSim operator iframe, only while `identity` is still current. */
   operatorGrant(identity:PsimIdentity):OperatorSessionGrant|null{return same(identity,this.current)&&this.token&&!this.suspended&&!this.closed?{accessToken:this.token,sessionRef:null}:null;}
   private publish(){try{this.changed(this.identity());}catch{/* subscriber cannot affect revocation */}}
-  private revoke(){this.generation++;const hadIdentity=!!this.current;this.current=null;this.token=null;this.profile=null;for(const controller of this.active)controller.abort();this.active.clear();if(hadIdentity)this.publish();}
+  private revoke(){this.generation++;this.verified=undefined;const hadIdentity=!!this.current;this.current=null;this.token=null;this.profile=null;for(const controller of this.active)controller.abort();this.active.clear();if(hadIdentity)this.publish();}
   private async tokenAt(profile:BrowserProfile):Promise<string|null>{
     const value=await (this.options.readToken??((directory:string)=>readTsimToken(directory,{throwOnFailure:true})))(storage(profile));
     if(value===null)return null;
@@ -130,6 +154,8 @@ export class BrowserProfileSessionService {
     try{
       const response=await (this.options.fetcher??fetch)(`${API}${path}`,{method:body?'POST':'GET',headers:{Accept:'application/json',Authorization:`Bearer ${token}`,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:combined});
       if(this.closed||this.suspended||generation!==this.generation||token!==this.token)throw new Error('AUTH_CHANGED');
+      // Any auth or permission refusal makes the next outbound translation run a full check first.
+      if([401,403,422,423].includes(response.status))this.verified=undefined;
       if(response.status===401||response.status===423){if(path==='/agent/translate'){this.revoke();this.setStatus('needs_login');}throw new Error('PSIM_LOGIN_REQUIRED');}
       if(response.status===403||response.status===422)throw new Error(path.startsWith('/agent/package-query/')?'ORDER_PERMISSION_REQUIRED':'TRANSLATION_PERMISSION_REQUIRED');
       if(response.status===429)throw new Error('RATE_LIMITED');
@@ -148,13 +174,25 @@ export class BrowserProfileSessionService {
       throw new Error('SERVICE_UNAVAILABLE');
     }finally{this.active.delete(controller);}
   }
-  async sync():Promise<void>{
+  async sync(options:SessionSyncOptions={}):Promise<void>{
     if(this.options.enabled===false||this.closed||this.suspended)return;
+    // An in-flight check is always joined, never skipped: it may be the one observing an account change.
     if(this.syncing)return this.syncing;
+    if(options.reuseRecent&&this.recentlyVerified())return;
     if(!this.current)this.setStatus('connecting');
-    this.syncing=this.synchronize().finally(()=>{this.syncing=null;});return this.syncing;
+    const startedAt=this.now();
+    this.syncing=this.synchronize(startedAt).finally(()=>{this.syncing=null;});return this.syncing;
   }
-  private async synchronize():Promise<void>{
+  private now(){return this.options.now?this.options.now():performance.now();}
+  /** Only a completed, successful check of the still-current session counts; failures and revocations never do. */
+  private recentlyVerified(){
+    const verified=this.verified;
+    if(!verified||this.status!=='ready'||!this.current||!this.token||!this.profile)return false;
+    if(verified.generation!==this.generation||this.current.authGeneration!==this.generation)return false;
+    const age=this.now()-verified.startedAt;
+    return age>=0&&age<=OUTBOUND_SYNC_REUSE_MS;
+  }
+  private async synchronize(startedAt:number):Promise<void>{
     let expectedGeneration=this.generation;
     try{
       const readErrors:Error[]=[];
@@ -185,6 +223,7 @@ export class BrowserProfileSessionService {
           if(this.current&&(this.current.accountScope!==accountScope||JSON.stringify(this.current.permissions)!==JSON.stringify(permissions))){this.revoke();this.token=token;this.profile={...selected};}
           this.binding={...selected};
           const next={accountScope,permissions,authGeneration:this.generation};if(!same(next,this.current)){this.current=next;this.publish();}
+          if(!this.closed&&!this.suspended&&this.current?.authGeneration===this.generation)this.verified={startedAt,generation:this.generation};
           this.setStatus('ready');return;
         }catch(error){
           if(!bound&&!this.closed&&!this.suspended&&expectedGeneration===this.generation&&error instanceof Error&&['PSIM_LOGIN_REQUIRED','PROFILE_UNVERIFIED'].includes(error.message)){
@@ -195,15 +234,23 @@ export class BrowserProfileSessionService {
       }
       if(readErrors.length)throw readErrors.find(error=>error.message==='BROWSER_SESSION_ACCESS_DENIED')??readErrors[0];
       this.revoke();this.setStatus('needs_login');
-    }catch(error){if(expectedGeneration===this.generation&&!this.closed&&!this.suspended){this.revoke();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.setStatus(code==='PSIM_LOGIN_REQUIRED'?'needs_login':'failed',code==='PSIM_LOGIN_REQUIRED'?undefined:code);}throw error;}
+    }catch(error){this.verified=undefined;if(expectedGeneration===this.generation&&!this.closed&&!this.suspended){this.revoke();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.setStatus(code==='PSIM_LOGIN_REQUIRED'?'needs_login':'failed',code==='PSIM_LOGIN_REQUIRED'?undefined:code);}throw error;}
   }
-  async translate(body:OutboundBody,expectedIdentity:PsimIdentity,signal:AbortSignal):Promise<OutboundResponse>{
+  /**
+   * `superseded` is aborted when a newer revision of the same draft replaces this request. Before the POST
+   * it drops the request (`REQUEST_SUPERSEDED`); once sent, only `signal` aborts it, so the caller can let
+   * it finish and discard the result by its own version check.
+   */
+  async translate(body:OutboundBody,expectedIdentity:PsimIdentity,signal:AbortSignal,superseded?:AbortSignal):Promise<OutboundResponse>{
     if(this.options.enabled===false)throw new Error('BROWSER_SESSION_DISABLED');
     if(!record(body)||!keys(body,['text','target_lang','source_lang','purpose','draft_request_id','composer_content_version'])||typeof body.text!=='string'||!body.text.trim()||body.text.length>20000||!WORKBENCH_TARGETS.includes(body.target_lang)||body.source_lang!=='zh'||body.purpose!=='outbound'||typeof body.draft_request_id!=='string'||!/^[-a-z0-9]{1,100}$/.test(body.draft_request_id)||typeof body.composer_content_version!=='string'||body.composer_content_version.length>25000)throw new Error('INVALID_OUTBOUND_REQUEST');
     if(signal.aborted)throw new Error('REQUEST_ABORTED');
-    let abort!:()=>void;
-    try{await Promise.race([this.sync(),new Promise<never>((_,reject)=>{abort=()=>reject(new Error('REQUEST_ABORTED'));signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();})]);}finally{signal.removeEventListener('abort',abort);}
+    const dropSuperseded=()=>{if(superseded?.aborted)throw new Error('REQUEST_SUPERSEDED');};dropSuperseded();
+    let abort!:()=>void,supersede!:()=>void;
+    // Usually reuses the check CompanionService ran just before this call (see OUTBOUND_SYNC_REUSE_MS).
+    try{await Promise.race([this.sync({reuseRecent:true}),new Promise<never>((_,reject)=>{abort=()=>reject(new Error('REQUEST_ABORTED'));supersede=()=>reject(new Error('REQUEST_SUPERSEDED'));signal.addEventListener('abort',abort,{once:true});superseded?.addEventListener('abort',supersede,{once:true});if(signal.aborted)abort();else if(superseded?.aborted)supersede();})]);}finally{signal.removeEventListener('abort',abort);superseded?.removeEventListener('abort',supersede);}
     if(!this.current||!same(expectedIdentity,this.current)||!this.profile||!this.token)throw new Error('AUTH_CHANGED');
+    dropSuperseded();
     const generation=this.generation,token=this.token,profile={...this.profile};
     const result=await this.request('/agent/translate',{...body},signal);
     const freshToken=await this.checkedTokenAt(profile);

@@ -7,7 +7,10 @@ import {approvedDocumentURL,assertBuildFingerprint,VERIFIED_RUNTIME_BUILD,type B
 import type {RuntimeTarget,RuntimeDriver,OwnedRuntimeHandle} from './attachment';
 import type {CDPEvent,EventCDPTransport} from './transport';
 import {RuntimeCDPPolicy,type ParentCapture} from './cdp-policy';
+import {RUNTIME_PLATFORM} from './build-manifest';
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+/** One observation covers a heartbeat and the read that immediately follows it. */
+const ACTIVE_TARGET_REUSE_MS=300;
 /** Live diagnostics: reason codes only, never page text or payloads. */
 const diag=(event:string,fields:Record<string,unknown>)=>{try{console.log(JSON.stringify({event,...fields}));}catch{/* diagnostics are best effort */}};
 const reasonOf=(error:unknown)=>error instanceof Error&&/^[A-Z][A-Z0-9_]{1,100}$/.test(error.message)?error.message:'UNCLASSIFIED';
@@ -25,15 +28,48 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private constructor(private transport:EventCDPTransport,readonly target:RuntimeTarget,private bundle:string,sha256:string){
     this.policy=new RuntimeCDPPolicy(transport,target,sha256);this.stopEvent=transport.onEvent(event=>this.event(event));this.stopDisconnect=transport.onDisconnect(()=>this.invalidate('TRANSPORT_DISCONNECTED'));
   }
-  static async discover(transport:EventCDPTransport,fingerprint:BuildFingerprint,bundle:string,sha256:string,timeoutMs=60000):Promise<LiveRuntimeDriver>{
-    assertBuildFingerprint(fingerprint);const deadline=Date.now()+timeoutMs;let selected:{targetId:string;url:string}|undefined;
-    while(Date.now()<deadline){const matches=approvedImTargets(await transport.send('Target.getTargets',{}));if(matches.length>1){const observations=[];for(const target of matches)observations.push(await observeImTarget(transport,target,fingerprint,randomUUID()));if(!sameTargetInventory(matches,approvedImTargets(await transport.send('Target.getTargets',{}))))throw new Error('RUNTIME_TARGET_CHANGED');try{selected=chooseActiveImTarget(observations);break;}catch(error){if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;}}if(matches.length===1){selected=matches[0];break;}await pause(250);}
-    if(!selected)throw new Error('IM_TARGET_NOT_READY');
-    let session:string|undefined;
-    try{const result=await transport.send('Target.attachToTarget',{targetId:selected.targetId,flatten:true}) as {sessionId?:unknown};if(typeof result?.sessionId!=='string'||!result.sessionId)throw new Error('INVALID_SESSION');session=result.sessionId;
-      const tree=await transport.send('Page.getFrameTree',{},session) as any;const frame=tree?.frameTree?.frame;if(!frame||typeof frame.id!=='string'||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
-      return new LiveRuntimeDriver(transport,{targetId:selected.targetId,frameId:frame.id,documentURL:frame.url,contextNonce:randomUUID(),fingerprint},bundle,sha256);
-    }finally{if(session)await transport.send('Target.detachFromTarget',{sessionId:session});}
+  /** onWaiting fires once when every verified account is hidden and discovery starts waiting without a deadline. */
+  static async discover(transport:EventCDPTransport,fingerprint:BuildFingerprint,bundle:string,sha256:string,timeoutMs=60000,onWaiting?:()=>void):Promise<LiveRuntimeDriver>{
+    assertBuildFingerprint(fingerprint);let deadline=Date.now()+timeoutMs,waitingHidden=false,announced=false,disconnected=false,wake:(()=>void)|undefined;
+    const windows=RUNTIME_PLATFORM==='win32',selectionNonce=randomUUID();
+    const check=()=>{if(disconnected)throw new Error('CDP_DISCONNECTED');};
+    const stopDisconnect=transport.onDisconnect(()=>{disconnected=true;wake?.();});
+    try{
+      let selected:{targetId:string;url:string}|undefined;
+      while(waitingHidden||Date.now()<deadline){
+        check();waitingHidden=false;
+        const matches=approvedImTargets(await transport.send('Target.getTargets',{}));
+        if(matches.length>1){
+          const observations=[];
+          // Reuse the named selection world during a long background wait.
+          for(const target of matches)observations.push(await observeImTarget(transport,target,fingerprint,windows?selectionNonce:randomUUID()));
+          if(!sameTargetInventory(matches,approvedImTargets(await transport.send('Target.getTargets',{}))))throw new Error('RUNTIME_TARGET_CHANGED');
+          try{selected=chooseActiveImTarget(observations);break;}
+          catch(error){
+            if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;
+            if(windows){
+              // Hidden, verified accounts are healthy. Preserve this socket and
+              // the bounded no-target timeout until an account becomes visible.
+              waitingHidden=true;deadline=Date.now()+timeoutMs;
+              if(!announced){diag('runtime-waiting-visible',{});announced=true;onWaiting?.();}
+            }
+          }
+        }
+        if(matches.length===1){selected=matches[0];break;}
+        check();
+        await new Promise<void>(resolve=>{
+          const timer=setTimeout(()=>{wake=undefined;resolve();},waitingHidden?1000:250);
+          wake=()=>{clearTimeout(timer);wake=undefined;resolve();};
+          if(disconnected)wake();
+        });
+      }
+      check();if(!selected)throw new Error('IM_TARGET_NOT_READY');
+      let session:string|undefined;
+      try{const result=await transport.send('Target.attachToTarget',{targetId:selected.targetId,flatten:true}) as {sessionId?:unknown};if(typeof result?.sessionId!=='string'||!result.sessionId)throw new Error('INVALID_SESSION');session=result.sessionId;
+        const tree=await transport.send('Page.getFrameTree',{},session) as any;const frame=tree?.frameTree?.frame;if(!frame||typeof frame.id!=='string'||frame.parentId||!approvedDocumentURL(frame.url))throw new Error('UNVERIFIED_MAIN_FRAME');
+        check();return new LiveRuntimeDriver(transport,{targetId:selected.targetId,frameId:frame.id,documentURL:frame.url,contextNonce:randomUUID(),fingerprint},bundle,sha256);
+      }finally{if(session)await transport.send('Target.detachFromTarget',{sessionId:session});}
+    }finally{stopDisconnect();wake?.();}
   }
   private event(event:CDPEvent){
     if(event.method==='Target.targetDestroyed'&&event.params.targetId===this.target.targetId){this.invalidate('TARGET_DESTROYED');return;}
@@ -68,7 +104,8 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     this.target.executionContextId=[...this.defaultContexts][0];await this.policy.verifyRenderer(candidates()[0].id);this.current(epoch);await this.policy.createOwnedWorld();this.current(epoch);// Capture listeners are optional diagnostics, not an authorization gate.
     if(options.collectParentCaptures!==false){this.captures=await this.policy.inspectParentCaptures();this.current(epoch);}
   }
-  async mountCompanion(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<unknown>){
+  /** onWaiting fires once when mounting waits for a hidden document to become visible. */
+  async mountCompanion(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<unknown>,onWaiting?:()=>void){
     const epoch=this.epoch;this.current(epoch);if(this.mounted)throw new Error('ALREADY_ATTACHED');this.mounted=true;
     const stopBootstrap=this.keepBootstrapNativeLease(epoch);
     try{
@@ -76,7 +113,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       await this.policy.installOwnedArtifact(this.bundle);this.current(epoch);
       await this.policy.registerWorkbenchBinding(this.bindingName);this.current(epoch);this.companionAction=onAction;
       for(;;){
-        await this.waitUntilVisible(epoch);if(!await this.verifyActiveTarget(true))continue;this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
+        await this.waitUntilVisible(epoch,onWaiting);if(!await this.verifyActiveTarget(true))continue;this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);
         try{await this.policy.mountUi({leaseId:this.target.contextNonce,aresVersion:VERIFIED_RUNTIME_BUILD.aresVersion,htmlSha256:this.target.fingerprint.htmlSha256,rendererSha256:this.target.fingerprint.rendererSha256,keyboardBoundary:'isolated-world-shadow'},{bindingName:this.bindingName,state});break;}
         catch(error){this.current(epoch);if(!(error instanceof Error)||error.message!=='IM_TARGET_INACTIVE')throw error;}
       }
@@ -90,11 +127,15 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       detach:async()=>{if(detached)return;detached=true;await this.cleanupUi();},
     };
   }
-  private async waitUntilVisible(epoch:number){
+  private async waitUntilVisible(epoch:number,onWaiting?:()=>void){
     let announced=false;
     for(;;){
-      this.current(epoch);const activity=await this.policy.documentActivity();this.current(epoch);if(activity.visible)return;
-      if(!announced){diag('runtime-waiting-visible',{});announced=true;}
+      // A selected BrowserView may become hidden before mounting finishes. Keep
+      // checking the verified inventory so a different visible account can take
+      // ownership instead of waiting forever for this old document to reappear.
+      this.current(epoch);const active=RUNTIME_PLATFORM==='win32'?await this.verifyActiveTarget(true):true;this.current(epoch);
+      const activity=await this.policy.documentActivity();this.current(epoch);if(active&&activity.visible)return;
+      if(!announced){diag('runtime-waiting-visible',{});announced=true;onWaiting?.();}
       await new Promise<void>((resolve,reject)=>{
         const cancel=()=>{clearTimeout(timer);this.invalidators.delete(cancel);reject(new Error('RUNTIME_TARGET_CHANGED'));};
         const timer=setTimeout(()=>{this.invalidators.delete(cancel);resolve();},500);this.invalidators.add(cancel);
@@ -130,13 +171,30 @@ export class LiveRuntimeDriver implements RuntimeDriver {
   private disconnectTransport(){return this.transportClosing??=(async()=>{await this.transport.disconnect();})();}
   async disconnect(){if(this.closing)return this.closing;let resolve!:()=>void,reject!:(error:unknown)=>void;this.closing=new Promise<void>((done,fail)=>{resolve=done;reject=fail;});void(async()=>{try{await this.releaseForReconnect();}finally{await this.disconnectTransport();}})().then(resolve,reject);return this.closing;}
   async geometry(){this.current(this.epoch);return this.policy.geometry();}
+  /** Lease-only checks (heartbeat, read, publish) arrive back to back; they share one inventory
+   * observation per epoch. Writes pass allowInactive=false and always observe afresh. */
+  private sharedActiveCheck?:{epoch:number;settledAt?:number;promise:Promise<boolean>};
   private async verifyActiveTarget(allowInactive=false):Promise<boolean>{
     const epoch=this.epoch;this.current(epoch);
+    if(!allowInactive){if(!await this.observeActiveTarget(epoch))throw new Error('MESSAGE_PAGE_INACTIVE');return true;}
+    const shared=this.sharedActiveCheck;
+    if(shared&&shared.epoch===epoch&&(shared.settledAt===undefined||Date.now()-shared.settledAt<ACTIVE_TARGET_REUSE_MS))return shared.promise;
+    const next:NonNullable<LiveRuntimeDriver['sharedActiveCheck']>={epoch,promise:this.observeActiveTarget(epoch)};this.sharedActiveCheck=next;
+    // Failures invalidate this epoch, so only successful observations stay reusable.
+    next.promise.then(()=>{next.settledAt=Date.now();},()=>{if(this.sharedActiveCheck===next)this.sharedActiveCheck=undefined;});
+    return next.promise;
+  }
+  /** Resolves false only when every verified account is hidden; any other failure invalidates the epoch. */
+  private async observeActiveTarget(epoch:number):Promise<boolean>{
     try{
       const candidates=approvedImTargets(await this.transport.send('Target.getTargets',{}));this.current(epoch);
       if(!candidates.some(target=>target.targetId===this.target.targetId))throw new Error('RUNTIME_TARGET_CHANGED');
       if(candidates.length===1)return true;
-      const observations=[];for(const target of candidates){observations.push(await observeImTarget(this.transport,target,this.target.fingerprint,this.target.contextNonce));this.current(epoch);}
+      // Each probe owns a separate temporary CDP session. Wait for every
+      // finally/detach, including failed probes, before choosing or failing.
+      const settled=await Promise.allSettled(candidates.map(target=>observeImTarget(this.transport,target,this.target.fingerprint,this.target.contextNonce)));this.current(epoch);
+      const failure=settled.find(result=>result.status==='rejected');if(failure?.status==='rejected')throw failure.reason;
+      const observations=settled.flatMap(result=>result.status==='fulfilled'?[result.value]:[]);
       const currentInventory=approvedImTargets(await this.transport.send('Target.getTargets',{}));this.current(epoch);
       if(!sameTargetInventory(candidates,currentInventory))throw new Error('RUNTIME_TARGET_CHANGED');
       const selected=chooseActiveImTarget(observations);if(selected.targetId!==this.target.targetId||selected.frameId!==this.target.frameId)throw new Error('RUNTIME_TARGET_CHANGED');
@@ -144,7 +202,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     }catch(error){
       // All verified BrowserViews can be hidden while the official window is in the background.
       // Preserve only owned leases in that state; business reads/writes still require an active target.
-      if(error instanceof Error&&error.message==='IM_TARGET_INACTIVE'){if(allowInactive)return false;throw new Error('MESSAGE_PAGE_INACTIVE');}
+      if(error instanceof Error&&error.message==='IM_TARGET_INACTIVE')return false;
       this.invalidate('ACTIVE_TARGET_'+reasonOf(error));throw error;
     }
   }
@@ -161,16 +219,29 @@ export class LiveRuntimeDriver implements RuntimeDriver {
       read:async(authGeneration:number):Promise<NativePoll>=>{
         this.current(epoch);const active=await this.verifyActiveTarget(true);this.current(epoch);
         if(!active){await this.policy.renewNative();this.current(epoch);return observed({writeVerified:false,reason:'MESSAGE_PAGE_INACTIVE',messageSurface:{active:false,composerRect:null,toolbarRect:null},orderEntries:[]});}
-        await this.policy.verifyExactDocument();this.current(epoch);
-        // A foreground non-message page still calls read(), so renew before the nav gate without reading business text.
-        await this.policy.renewNative();this.current(epoch);
+        // Document identity, native lease renewal and the separate window's nav
+        // observation are independent. All must finish before reading business
+        // text; a foreground non-message page still renews its native lease.
+        const gates=await Promise.allSettled([
+          this.policy.verifyExactDocument(),this.policy.renewNative(),
+          this.policy.readMessageNavigation().then(value=>({value,error:null}),error=>({value:null,error:reasonOf(error)})),
+        ]);this.current(epoch);
+        for(const gate of gates)if(gate.status==='rejected')throw gate.reason;
+        const navigationGate=gates[2];if(navigationGate.status!=='fulfilled')throw new Error('MESSAGE_NAVIGATION_UNVERIFIED');const navigation=navigationGate.value;
         const inactive=(reason='MESSAGE_PAGE_INACTIVE'):NativePoll=>observed({writeVerified:false,reason,messageSurface:{active:false,composerRect:null,toolbarRect:null},orderEntries:[]});
-        let nav;try{nav=await this.policy.readMessageNavigation();}catch(error){this.current(epoch);return inactive(reasonOf(error));}this.current(epoch);if(!nav.active)return inactive();
+        const nav=navigation.value;if(!nav)return inactive(navigation.error??'MESSAGE_PAGE_INACTIVE');if(!nav.active)return inactive();
         const result=await this.policy.pollNative(authGeneration) as NativePoll;this.current(epoch);if(!result.messageSurface?.active)return inactive(result.reason??'COMPOSER_GEOMETRY_UNAVAILABLE');
+        const verifiedHint=(poll:NativePoll)=>{const hint=poll.currentOrderHint;if(hint===undefined)return;return hint&&typeof hint.identifier==='string'&&/^[A-Za-z0-9_-]{4,80}$/.test(hint.identifier)&&typeof hint.conversationId==='string'&&hint.conversationId===poll.snapshot?.conversationId?{identifier:hint.identifier,conversationId:hint.conversationId}:RUNTIME_PLATFORM==='darwin'?null:undefined;};
+        const hint=verifiedHint(result);
+        // Read the cross-origin order frame in its own isolated world. Parent DOM access
+        // cannot read this frame on Windows; keep failures local to order discovery.
+        // A verified current-conversation field needs no visible right panel or
+        // child-frame round trips. Visible ranges keep their independent reader.
+        const orderEntries=RUNTIME_PLATFORM==='win32'&&!hint&&result.orderFrame?await this.policy.readRightOrderEntries(result.orderFrame).catch(()=>[]):[];this.current(epoch);
         const after=await this.policy.pollNative(authGeneration) as NativePoll;this.current(epoch);
         if(!after.messageSurface?.active||!result.snapshot||!after.snapshot||JSON.stringify(result.snapshot)!==JSON.stringify(after.snapshot))return inactive();
         const navAfter=await this.policy.readMessageNavigation().catch(()=>null);this.current(epoch);if(!navAfter?.active||navAfter.dpr!==nav.dpr||navAfter.width!==nav.width||navAfter.height!==nav.height)return inactive();
-        return observed({...after,orderFrame:undefined,orderEntries:[]});
+        return observed({...after,currentOrderHint:JSON.stringify(hint)===JSON.stringify(verifiedHint(after))?hint:RUNTIME_PLATFORM==='darwin'?null:undefined,orderFrame:undefined,orderEntries:JSON.stringify(result.orderFrame)===JSON.stringify(after.orderFrame)?orderEntries:[]});
       },
       replace:async(expected:VerifiedComposerSnapshot,text:string,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>)=>{this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);const nav=await this.policy.readMessageNavigation();this.current(epoch);if(!nav.active)throw new Error('MESSAGE_PAGE_INACTIVE');const current=await this.policy.pollNative(expected.authGeneration) as NativePoll;this.current(epoch);if(!current.messageSurface?.active)throw new Error('MESSAGE_PAGE_INACTIVE');const navAfter=await this.policy.readMessageNavigation();this.current(epoch);if(!navAfter.active)throw new Error('MESSAGE_PAGE_INACTIVE');const finalAuthorize=await authorize();this.current(epoch);await this.verifyActiveTarget();this.current(epoch);const finalNav=await this.policy.readMessageNavigation();this.current(epoch);if(!finalNav.active)throw new Error('MESSAGE_PAGE_INACTIVE');if(typeof finalAuthorize==='function')finalAuthorize();await this.policy.replaceNative(expected,text);this.current(epoch);},
       send:async(expected:VerifiedComposerSnapshot,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>)=>{this.current(epoch);await this.verifyActiveTarget();this.current(epoch);await this.policy.verifyExactDocument();this.current(epoch);const nav=await this.policy.readMessageNavigation();this.current(epoch);if(!nav.active)throw new Error('MESSAGE_PAGE_INACTIVE');const current=await this.policy.pollNative(expected.authGeneration) as NativePoll;this.current(epoch);if(!current.messageSurface?.active)throw new Error('MESSAGE_PAGE_INACTIVE');const navAfter=await this.policy.readMessageNavigation();this.current(epoch);if(!navAfter.active)throw new Error('MESSAGE_PAGE_INACTIVE');const finalAuthorize=await authorize();this.current(epoch);await this.verifyActiveTarget();this.current(epoch);const finalNav=await this.policy.readMessageNavigation();this.current(epoch);if(!finalNav.active)throw new Error('MESSAGE_PAGE_INACTIVE');if(typeof finalAuthorize==='function')finalAuthorize();await this.policy.sendNative(expected);this.current(epoch);},

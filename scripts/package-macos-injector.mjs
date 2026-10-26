@@ -37,6 +37,10 @@ function run(command, commandArgs, env = process.env) {
 }
 const plist = (app, key) => run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(app, 'Contents/Info.plist')]);
 const APP = '旅游商家助手安装器.app', HELPER = '旅游商家助手.app';
+// The packaged components need the same platform-specific acceptance gates.
+for (const suite of ['macos-page-selection', 'macos-owned-session', 'macos-runtime-order', 'macos-native-parity', 'operator-overlay', 'macos-launcher-recovery', 'macos-dynamic-runtime']) {
+  run(process.execPath, [`tests/run-${suite}.mjs`]);
+}
 await mkdir(work, {recursive: true}); await mkdir(output, {recursive: true});
 
 // 1. Helper with the dynamic macOS runtime: it trusts only the manifest the installer writes on-device.

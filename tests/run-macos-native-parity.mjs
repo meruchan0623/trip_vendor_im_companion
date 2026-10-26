@@ -1,0 +1,15 @@
+import {build} from 'esbuild';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {spawn} from 'node:child_process';
+const directory=await mkdtemp(join(tmpdir(),'tsim-macos-native-parity-'));
+try{
+  const entries=['tests/macos-native-parity.test.ts','tests/native-adapter-ready.test.ts'];
+  const files=[];
+  for(let i=0;i<entries.length;i++){
+    const outfile=join(directory,`test-${i}.mjs`);files.push(outfile);
+    await build({entryPoints:[entries[i]],outfile,bundle:true,platform:'node',format:'esm',define:{__TMC_RUNTIME_PLATFORM__:'"darwin"'},logLevel:'warning'});
+  }
+  process.exitCode=await new Promise((resolve,reject)=>{const child=spawn(process.execPath,['--test',...files],{stdio:'inherit'});child.once('error',reject);child.once('exit',code=>resolve(code??1));});
+}finally{await rm(directory,{recursive:true,force:true});}

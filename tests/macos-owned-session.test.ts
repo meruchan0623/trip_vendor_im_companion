@@ -155,6 +155,7 @@ test('in-page operator receives the session only for the visible conversation an
     fixture.state={...service.getState(),auth:'needs_login',attached:true,targetInstanceId:'1:2:3',messageSurface:{active:true,composerRect:null,toolbarRect:null}};
     fixture.foreground=true;fixture.external={close:async()=>{}};
     fixture.captured={source:'verified-editor',snapshot:{conversationId:'customer',scopeGeneration:1,platformAccountScope:'vendor:1'}};
+    fixture.capture=async()=>fixture.captured;fixture.adopt=()=>{};
     const intent={identifier:'ABC123',identifierType:'order_number',conversationKey:fixture.context()};
     await assert.rejects(invokeEmbeddedAction(service,'operatorSession',[intent]),/PSIM_LOGIN_REQUIRED/);
     current=identity;fixture.state.auth='ready';

@@ -1,9 +1,10 @@
 import {matchesPageConversation} from './conversation';
+import {RUNTIME_PLATFORM} from '../build-manifest';
 import {customerLanguageEvidence} from './language';
 import type {OperatorSessionGrant,OrderWindowIntent,PanelState} from '../../src/shared/workbench';
 import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../../src/shared/customer-language';
 import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
-import {createOperatorOverlay,OPERATOR_FRAME_ID,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
+import {createOperatorOverlay,OPERATOR_FRAME_ID,PREWARM_DELAY_MS,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
 import {createOutboundPanel,PANEL_HOST_ID,type OutboundPanel,type PanelBridge} from './outbound-panel';
 export {TSIM_OPERATOR_ORIGIN};
 export const CUSTOMER_SCAN_DEBOUNCE_MS=300;
@@ -32,7 +33,14 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     overlay.open({identifier,identifierType});
   }}):undefined;
   let renderedBound:boolean|undefined;
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready')overlay.reset();else if(!currentBound)overlay.close();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});};
+  // One prewarm attempt per ready authorization; an auth reset or a newly shown order chip allows the next attempt
+  // (the overlay ignores it while a frame exists and caps failed standby boots).
+  let prewarmTimer:number|undefined,prewarmed=false,warmedOrder:string|undefined;
+  const canPrewarm=()=>!disposed&&!!options.bridge&&state?.auth==='ready'&&document.visibilityState!=='hidden'&&bound();
+  const schedulePrewarm=()=>{if(prewarmed||prewarmTimer!==undefined||!canPrewarm())return;prewarmTimer=view.setTimeout(()=>{prewarmTimer=undefined;if(prewarmed||!canPrewarm())return;prewarmed=true;overlay.prewarm();},options.prewarmDelayMs??PREWARM_DELAY_MS);};
+  /** A newly shown order chip opens the TLS connection the order page will need. */
+  const showOrder=(order:string|undefined)=>{panel?.setOrder(order);if(!order){warmedOrder=undefined;return;}if(order!==warmedOrder&&bound()){warmedOrder=order;overlay.warmConnection();prewarmed=false;schedulePrewarm();}};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready'){overlay.reset();prewarmed=false;}else if(!currentBound)overlay.close();schedulePrewarm();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});if(state.detectedOrder)showOrder(currentBound?state.detectedOrder.identifier??undefined:undefined);};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
@@ -77,7 +85,9 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   };
   // A throttle guarantees progress while scrolling/rendering continuously.
   const scheduleCustomer=()=>{if(customerTimer===undefined&&!disposed)customerTimer=view.setTimeout(scanCustomer,CUSTOMER_SCAN_DEBOUNCE_MS);};
-  const orderObservation=panel?startOrderObservation(document,order=>{if(!disposed&&document.visibilityState!=='hidden')panel.setOrder(order);},state?.conversationKey??null):undefined;
+  // macOS keeps its existing iframe observer when the pinned renderer cannot
+  // provide a verified early hint. Host hints take precedence while present.
+  const orderObservation=panel&&(RUNTIME_PLATFORM==='darwin'||!state?.detectedOrder)?startOrderObservation(document,order=>{if(!disposed&&document.visibilityState!=='hidden'&&!state?.detectedOrder)showOrder(order);},state?.conversationKey??null):undefined;
   let orderTimer:number|undefined;const syncOrder=()=>{orderTimer=undefined;if(!disposed&&document.visibilityState!=='hidden')orderObservation?.refresh();};
   const orderObserver=new view.MutationObserver(mutations=>{if(disposed||document.visibilityState==='hidden'||mutations.every(m=>{const target=m.target.nodeType===1?m.target as Element:m.target.parentElement;const changed=[...m.addedNodes,...m.removedNodes];return isOwned(target)||changed.length>0&&changed.every(n=>n.nodeType===1&&isOwned(n as Element));}))return;renderCurrent(true);if(orderTimer===undefined)orderTimer=view.setTimeout(syncOrder,150);scheduleCustomer();});
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','src']});syncOrder();}
@@ -115,6 +125,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;disposed=true;view.clearTimeout(prewarmTimer);clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
   };
 }

@@ -35,13 +35,15 @@ export const CUSTOMER_LANGUAGES=['unknown','zh','el',...PANEL_TARGETS] as const;
 export const isCustomerLanguage=(value:unknown):value is typeof CUSTOMER_LANGUAGES[number]=>typeof value==='string'&&(CUSTOMER_LANGUAGES as readonly string[]).includes(value);
 export type PanelStatus='unavailable'|'idle'|'translating'|'ready'|'stale'|'failed'|'needs_login';
 export type PanelAuth='ready'|'needs_login'|'connecting'|'failed';
+/** Host-verified Windows order read, bound to the surrounding PanelState conversation. */
+export interface DetectedOrderState {identifier:string|null}
 export interface PanelOrderState {identifier:string;status:'idle'|'loading'|'ready'|'empty'|'failed';error:string|null;fields:ReadOnlyOrderField[]}
 /** Node -> page state. Text only; no credentials, tokens or editor handles. */
 /** Agent bearer handed to the TSim operator iframe inside the merchant page. Never part of PanelState. */
 export interface OperatorSessionGrant {accessToken:string;sessionRef:string|null}
 export interface OrderWindowIntent {identifier:string;identifierType:'order_number'|'iccid'|'eiccid';conversationKey:string}
 export function isOrderWindowIntent(value:unknown):value is OrderWindowIntent {if(!value||typeof value!=='object'||Array.isArray(value))return false;const v=value as Record<string,unknown>;return Object.keys(v).sort().join(',')==='conversationKey,identifier,identifierType'&&typeof v.identifier==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v.identifier)&&['order_number','iccid','eiccid'].includes(String(v.identifierType))&&typeof v.conversationKey==='string'&&v.conversationKey.length>0&&v.conversationKey.length<=2048;}
-export interface PanelState {sessionMode?:'owned'|'browser';orderWindowMode?:'browser'|'owned';loginPopover?:LoginPopover;translationPaused?:boolean;order?:PanelOrderState;auth:PanelAuth;conversationKey:string|null;draft:{text:string;composing:boolean}|null;enabled:boolean;target:PanelTarget;followCustomer:{lang:string|null;following:boolean;manualEnabled:boolean;resolution?:CustomerLanguageResolution};fallbackTarget?:PanelTarget;status:PanelStatus;preview:string|null;error:string|null;busy:boolean;outboundMode?:OutboundMode;sendPending?:boolean}
+export interface PanelState {detectedOrder?:DetectedOrderState;sessionMode?:'owned'|'browser';orderWindowMode?:'browser'|'owned';loginPopover?:LoginPopover;translationPaused?:boolean;order?:PanelOrderState;auth:PanelAuth;conversationKey:string|null;draft:{text:string;composing:boolean}|null;enabled:boolean;target:PanelTarget;followCustomer:{lang:string|null;following:boolean;manualEnabled:boolean;resolution?:CustomerLanguageResolution};fallbackTarget?:PanelTarget;status:PanelStatus;preview:string|null;error:string|null;busy:boolean;outboundMode?:OutboundMode;sendPending?:boolean}
 export type PanelApplyMode='replace';
 export type OutboundMode='send'|'replace';
 export const isOutboundMode=(value:unknown):value is OutboundMode=>value==='send'||value==='replace';

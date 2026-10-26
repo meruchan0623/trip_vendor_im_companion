@@ -25,13 +25,13 @@ internal static partial class Program
     static uint ParentProcessId()
     {
         if (parentPid.HasValue) return parentPid.Value;
-        foreach (var p in ProcessRows($"ProcessId={Environment.ProcessId}")) parentPid = p.Pid == Environment.ProcessId ? p.ParentPid : null;
+        parentPid = NativeTargetBinding.ParentProcessId((uint)Environment.ProcessId);
         return parentPid ?? throw new InvalidOperationException("parent_unavailable");
     }
 
     // Bounded read-only CIM inspection also handles Chromium handing the launch PID to a broker.
     // Native COM SWbem automation is not dependable in a single-file .NET helper on every host.
-    static List<(uint Pid, uint ParentPid, string Path, string Command, long StartedTicks)> ProcessRows(string filter)
+    static List<(uint Pid, uint ParentPid, string Path, string Command, long StartedTicks)> ProcessRows(string filter, int timeoutMs = 3500)
     {
         var results = new List<(uint, uint, string, string, long)>();
         string script = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.UTF8Encoding]::new();$rows=@(Get-CimInstance Win32_Process -Filter '" + filter.Replace("'", "''") + "'|ForEach-Object {@{Pid=[uint32]$_.ProcessId;ParentPid=[uint32]$_.ParentProcessId;Path=[string]$_.ExecutablePath;Command=[string]$_.CommandLine;StartedTicks=([DateTime]$_.CreationDate).ToUniversalTime().Ticks.ToString()}});ConvertTo-Json -InputObject $rows -Compress";
@@ -39,7 +39,7 @@ internal static partial class Program
         foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) }) start.ArgumentList.Add(arg);
         using var reader = Process.Start(start) ?? throw new InvalidOperationException("process_inspection_failed");
         var stdout = reader.StandardOutput.ReadToEndAsync(); var stderr = reader.StandardError.ReadToEndAsync();
-        if (!reader.WaitForExit(3500)) { reader.Kill(); throw new InvalidOperationException("process_inspection_timeout"); }
+        if (!reader.WaitForExit(timeoutMs)) { reader.Kill(); throw new InvalidOperationException("process_inspection_timeout"); }
         string output = stdout.GetAwaiter().GetResult();
         if (reader.ExitCode != 0 || !string.IsNullOrWhiteSpace(stderr.GetAwaiter().GetResult()) || output.Length > 524288) throw new InvalidOperationException("process_inspection_failed");
         using var document = JsonDocument.Parse(output);

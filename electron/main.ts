@@ -12,7 +12,7 @@ import { startExternalClient } from './external-composer';
 import { lockContents, lockLocalSession } from './security';
 import { isPanelTarget, type PanelTarget } from '../src/shared/workbench';
 import { ResidentConnection } from './resident-connection';
-import {vendorOwnerPID,watchVendorOwner} from './vendor-owner';
+import {vendorOwnerPID,watchVendorOwner,vendorOwnerExitCode} from './vendor-owner';
 import {createLaunchPlatform,configureExplicitVendorDebugPort} from '../runtime/platform';
 import {configureFingerprintPersistence} from '../runtime/macos-platform';
 import {windowsPowerShell} from '../runtime/windows-powershell';
@@ -44,11 +44,12 @@ let lastPublished='';
 let acceptanceInput:ReadlineInterface|undefined;
 let stopOwnerWatch:(()=>void)|undefined;
 let ownerEpoch=0;
+let ownerExitCode=0;
 async function adoptVendorOwner(pid:number,args:readonly string[]=process.argv):Promise<void>{
   const epoch=++ownerEpoch,platform=createLaunchPlatform();
   // Owner handoff precedes resource verification/manifest activation at startup.
   const expectedExecutable=silentVendorRuntime?windowsInstallationFromHelper(process.execPath).executable:VERIFIED_RUNTIME_BUILD.executable;
-  const stop=await watchVendorOwner(pid,id=>platform.processIdentity(id),expectedExecutable,()=>{if(epoch===ownerEpoch)app.quit();});
+  const stop=await watchVendorOwner(pid,id=>platform.processIdentity(id),expectedExecutable,reason=>{if(epoch===ownerEpoch){ownerExitCode=vendorOwnerExitCode(reason);console.error(reason);app.quit();}});
   if(quitting||epoch!==ownerEpoch){stop();return;}
   if(process.platform==='win32')configureExplicitVendorDebugPort(args);stopOwnerWatch?.();stopOwnerWatch=stop;
   // The installed vendor shows startup progress above its composer until the panel mounts.
@@ -151,10 +152,15 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   if(process.platform==='darwin'&&!smokeMode)configureFingerprintPersistence(join(app.getPath('userData'),'cache','vendor-fingerprints.json'));
   const ownerPID=vendorOwnerPID(process.argv);
   if(silentVendorRuntime&&ownerPID===undefined){console.error('INSTALLED_VENDOR_OWNER_REQUIRED');app.quit();return;}
-  if(ownerPID!==undefined)await adoptVendorOwner(ownerPID);
+  let nativeStatus:string|undefined;
+  native=new NativeAdapter(helperPath(),stateChanged,status=>{nativeStatus=status;service?.setNativeStatus(status);},()=>{},()=>{},undefined,()=>resident?.notifyTargetAvailable());
+  // The helper validates its own owner binding before it reads any command; overlap that
+  // process query with owner adoption instead of running the two checks back to back.
+  const adopting=ownerPID!==undefined?adoptVendorOwner(ownerPID):undefined,helperStarted=residentPlatform&&!!adopting;
+  if(helperStarted)native.start();
+  try{await adopting;}catch(error){native.stop();throw error;}
   if(quitting)return;
   diagnostics?.lifecycle('ready',process.pid,ownerPID);
-  native=new NativeAdapter(helperPath(),stateChanged,status=>{service?.setNativeStatus(status);},()=>{},()=>{},undefined,()=>resident?.notifyTargetAvailable());
   // Orders open inside the merchant page on both platforms; no external browser windows are created.
   // macOS owns its TSIM account and encrypted credentials. Windows retains its verified browser profile.
   const ownedAccount=process.platform==='darwin';
@@ -165,10 +171,11 @@ if(ownsInstance)void app.whenReady().then(async()=>{
     if(ownedAccount){await ownedLogin!.open(url);return;}
     if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);
   },()=>{},sessionOptions,true,ownedStore?(changed,options)=>new PersistentSessionService(changed,{...options,embeddedLogin:false,closeLogin:()=>ownedLogin?.close()},ownedStore):undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')));service.onState(publish);
+  if(nativeStatus)service.setNativeStatus(nativeStatus);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
   // Installed Windows runs silently inside the vendor; standalone Windows retains tray settings.
-  if(residentPlatform){if(process.platform==='darwin'){app.setActivationPolicy('accessory');app.dock?.hide();}native.start();registerSettings();if(process.platform==='win32'&&!silentVendorRuntime)createResidentTray();if(!smokeMode)resident.start();}else service.setNativeStatus('windows_required');
+  if(residentPlatform){if(process.platform==='darwin'){app.setActivationPolicy('accessory');app.dock?.hide();}if(!helperStarted)native.start();registerSettings();if(process.platform==='win32'&&!silentVendorRuntime)createResidentTray();if(!smokeMode)resident.start();}else service.setNativeStatus('windows_required');
   if(smokeMode){console.log(JSON.stringify({event:'shell_started',electron:process.versions.electron,localWindows:0,trayAvailable:!!tray,residentMode:residentPlatform,embeddedBusinessUI:true,remoteNavigation:false}));setTimeout(()=>{void cleanup().then(()=>{console.log(JSON.stringify({event:'smoke_complete',remoteNavigation:false,credentialsAccessed:false}));app.exit(0);});},1500);}
 }).catch(error=>{console.error('SHELL_START_FAILED',error instanceof Error?error.message:'unknown');app.exit(1);});
 else app.quit();
@@ -181,5 +188,5 @@ app.on('second-instance',(_event,args)=>{
 });
 // OS activation (including vendor startup) must never summon the settings panel.
 app.on('window-all-closed',()=>{if(!quitting&&!residentPlatform)app.quit();});
-app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;diagnostics?.lifecycle('quit',process.pid);void cleanup().finally(()=>app.quit());});
+app.on('before-quit',event=>{if(quitting)return;event.preventDefault();quitting=true;diagnostics?.lifecycle('quit',process.pid);void cleanup().finally(()=>{if(ownerExitCode){windowsPowerShell.dispose();app.exit(ownerExitCode);}else app.quit();});});
 app.once('will-quit',()=>windowsPowerShell.dispose());

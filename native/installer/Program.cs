@@ -79,6 +79,11 @@ static class Program {
             var inspectionNote=new Label{Left=228,Top=236,Width=350,Height=25,Text="只读检测，可保持客户端运行。"};
             var details=new CheckBox{Left=606,Top=232,Width=170,Height=25,Text="完整检测详情"};
             var output=new TextBox{Left=22,Top=532,Width=755,Height=170,Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Text="操作日志路径（可选中复制）："+Environment.NewLine+logPath};
+            void ShowOutput(string value,bool forceScroll=false){
+                var changed=!string.Equals(output.Text,value,StringComparison.Ordinal);
+                if(changed)output.Text=value;
+                if(changed||forceScroll){output.SelectionStart=output.TextLength;output.SelectionLength=0;output.ScrollToCaret();}
+            }
             var note=new Label{Left=22,Top=719,Width=755,Height=65,Text="保留官方原始备份与安装收据；卸载保留登录和客户数据。\n普通用户可写目录直接安装；受保护目录按需提权。未知官方更新或文件漂移会停止操作。\n切换 Windows 用户提权时请手动退出客户端。日志路径见上方文本框。"};
             bool inspecting=false,operationBusy=false,updatingTargets=false,explicitSelection=options.Root!=null;
             string? selectedRoot=options.Root,manualRoot=options.Root;
@@ -118,18 +123,18 @@ static class Program {
             browse.Click+=async(_,_)=>{using var picker=new FolderBrowserDialog{Description="请选择包含旅游商家桌面版.exe 的客户端安装目录",UseDescriptionForTitle=true,ShowNewFolderButton=false};if(picker.ShowDialog(form)!=DialogResult.OK)return;manualRoot=picker.SelectedPath;selectedRoot=manualRoot;explicitSelection=true;await RefreshInspection();};
             refresh.Click+=async(_,_)=>await RefreshInspection();form.Shown+=async(_,_)=>await RefreshInspection();
             var names=new[]{("注入助手","install"),("卸载并恢复原资源","uninstall"),("恢复中断安装","recover")};
-            using var poll=new System.Windows.Forms.Timer{Interval=500};poll.Tick+=(_,_)=>{try{if(File.Exists(logPath))output.Text=File.ReadAllText(logPath);}catch{}};
+            using var poll=new System.Windows.Forms.Timer{Interval=500};poll.Tick+=(_,_)=>{try{if(File.Exists(logPath))ShowOutput(File.ReadAllText(logPath));}catch{}};
             for(var i=0;i<names.Length;i++){
                 var operation=names[i];var button=new Button{Left=22+i*255,Top=188,Width=245,Height=34,Text=operation.Item1};operationButtons.Add(button);
                 button.Click+=async(_,_)=>{if(operationBusy||inspecting||selectedRoot==null)return;string root;
                     try{root=InstallerTarget.Validate(selectedRoot);}catch(Exception error){MessageBox.Show(form,error.Message,"请选择有效客户端目录",MessageBoxButtons.OK,MessageBoxIcon.Warning);return;}
                     var choice=ClientExitChoice.Show(form);if(choice is not (DialogResult.Yes or DialogResult.No))return;var force=choice==DialogResult.No;operationBusy=true;UpdateButtons();try{
-                        output.Text="正在处理客户端目录："+root+Environment.NewLine+"正在校验和处理资源，请稍候……";poll.Start();
+                        ShowOutput("正在处理客户端目录："+root+Environment.NewLine+"正在校验和处理资源，请稍候……",true);poll.Start();
                         var code=await Task.Run(()=>{if(Elevate(operation.Item2,root,force,initiatingUser))return Environment.ExitCode;return Run(operation.Item2,root,force,initiatingUser);});
-                        if(File.Exists(logPath))output.Text=File.ReadAllText(logPath);
+                        if(File.Exists(logPath))ShowOutput(File.ReadAllText(logPath),true);
                         if(code==0&&operation.Item2=="install")InstallCompleteDialog.Show(form,root,Elevated(),Log);
                         else MessageBox.Show(form,code==0?"操作完成。日常请打开所选目录中的原旅游商家桌面版。":"操作未完成，请查看下方日志；没有通过校验的资源不会被覆盖。","旅游商家助手",MessageBoxButtons.OK,code==0?MessageBoxIcon.Information:MessageBoxIcon.Warning);
-                    }catch(Exception error){output.Text=error.Message;}finally{poll.Stop();await RefreshInspection();operationBusy=false;UpdateButtons();}};
+                    }catch(Exception error){ShowOutput(error.Message,true);}finally{poll.Stop();await RefreshInspection();operationBusy=false;UpdateButtons();}};
                 form.Controls.Add(button);
             }
             form.Controls.AddRange([intro,targetLabel,targets,browse,targetNote,refresh,inspectionNote,details,inspection,output,note]);UpdateButtons();Application.Run(form);return 0;

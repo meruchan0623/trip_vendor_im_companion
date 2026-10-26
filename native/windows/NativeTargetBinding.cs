@@ -1,7 +1,42 @@
 using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Text.RegularExpressions;
 
 internal static class NativeTargetBinding {
+    // Tool Help is a documented read-only process snapshot; it avoids a second
+    // PowerShell/CIM cold start merely to discover this helper's parent PID.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct ProcessEntry {
+        internal uint Size, Usage, ProcessId;
+        internal nuint DefaultHeapId;
+        internal uint ModuleId, Threads, ParentProcessId;
+        internal int Priority;
+        internal uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] internal string Image;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern SafeFileHandle CreateToolhelp32Snapshot(uint flags, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool Process32FirstW(SafeFileHandle snapshot, ref ProcessEntry entry);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool Process32NextW(SafeFileHandle snapshot, ref ProcessEntry entry);
+    internal static uint ParentProcessId(uint processId) {
+        Require(processId > 0);
+        using var snapshot = CreateToolhelp32Snapshot(0x00000002, 0);
+        Require(!snapshot.IsInvalid);
+        var entry = new ProcessEntry { Size = (uint)Marshal.SizeOf<ProcessEntry>(), Image = "" };
+        Require(Process32FirstW(snapshot, ref entry));
+        do {
+            if (entry.ProcessId == processId) {
+                Require(entry.ParentProcessId > 0 && entry.ParentProcessId != processId);
+                return entry.ParentProcessId;
+            }
+        } while (Process32NextW(snapshot, ref entry));
+        throw new InvalidOperationException("native_parent_unavailable");
+    }
     internal const string NativeSuffix = @"\resources\TripVendorCompanion\resources\native\windows\TravelMerchant.WindowHelper.exe";
     internal static string DefaultExecutable => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"vbk-electron","旅游商家桌面版.exe");
     internal static bool InstalledImage(string image)=>image.EndsWith(NativeSuffix,StringComparison.OrdinalIgnoreCase);
