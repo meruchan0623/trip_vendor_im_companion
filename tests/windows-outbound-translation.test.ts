@@ -107,8 +107,27 @@ test('a permission refusal keeps the session but makes the next translation re-c
   }finally{f.session.dispose();}
 });
 
+test('a superseded request is dropped before its POST but runs to completion once sent',async()=>{
+  const f=await verifiedSession();
+  try{
+    const early=new AbortController();early.abort();
+    await assert.rejects(f.session.translate(outbound(),f.identity,live(),early.signal),/REQUEST_SUPERSEDED/);assert.equal(f.posts(),0);
+    // Superseded while the pre-send check is still running.
+    f.world.clock=OUTBOUND_SYNC_REUSE_MS+1;const gate=deferred();f.world.profileGate=gate.promise;
+    const checking=new AbortController(),pending=f.session.translate(outbound(),f.identity,live(),checking.signal);
+    await settle();checking.abort();await assert.rejects(pending,/REQUEST_SUPERSEDED/);gate.resolve();await settle();assert.equal(f.posts(),0);
+    // Once on the wire only the hard signal aborts it.
+    f.world.profileGate=undefined;const sent=deferred();f.world.translateGate=sent.promise;
+    const revision=new AbortController(),request=f.session.translate(outbound(),f.identity,live(),revision.signal);
+    await settle();assert.equal(f.posts(),1);revision.abort();sent.resolve();
+    assert.equal((await request).data.translated_text,'Hello');
+  }finally{f.session.dispose();}
+});
+
+type Pending={body:any;identity:any;signal:AbortSignal;revision?:AbortSignal;resolve:(value:unknown)=>void;reject:(error:unknown)=>void};
 const snapshot=(text:string,overrides:Record<string,unknown>={})=>({text,conversationId:'customer-1',revision:text.length,composing:false,scopeGeneration:1,authGeneration:1,editorIdentity:'editor-1',docFingerprint:`doc:${text}`,isPlainText:true,platformAccountScope:'vendor:1',composerId:'composer-1',documentGeneration:1,...overrides});
 const captured=(value:ReturnType<typeof snapshot>)=>({source:'verified-editor',snapshot:value,orderEntries:[],orderViewport:null,messageSurface:{active:true,composerRect:null,toolbarRect:null},currentOrderHint:null});
+const reply=(request:Pending,text:string)=>request.resolve({success:true,data:{translated_text:text,draft_request_id:request.body.draft_request_id,composer_content_version:request.body.composer_content_version}});
 /** Puts the service on a verified, foreground draft with automatic translation armed (500 ms debounce running). */
 function attachDraft(fixture:any){
   Object.assign(fixture.state,{auth:'ready',attached:true,targetInstanceId:'1:2:3',autoTranslate:true,translationPaused:false,messageSurface:{active:true,composerRect:null,toolbarRect:null}});
@@ -118,6 +137,87 @@ function attachDraft(fixture:any){
   // Each edit is what the settle read or the safety observation adopts.
   return(text:string,overrides:Record<string,unknown>={})=>{draft=snapshot(text,overrides);fixture.adopt(captured(draft));};
 }
+async function companion(t:any){
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  let identity={accountScope:'psim:7',authGeneration:1,permissions:[] as string[]},changed!:(value:unknown)=>void;
+  const requests:Pending[]=[],syncs:unknown[]=[];
+  const session={identity:()=>identity,sync:async(options?:unknown)=>{syncs.push(options);},setBackgroundPolling(){},getBrowserProfile:()=>null,operatorGrant:()=>null,
+    translate:(body:any,requestIdentity:unknown,signal:AbortSignal,revision?:AbortSignal)=>new Promise((resolve,reject)=>{requests.push({body,identity:requestIdentity,signal,revision,resolve,reject});signal.addEventListener('abort',()=>reject(new Error('REQUEST_ABORTED')),{once:true});}),
+    queryOriginalIdentifier:async()=>{throw new Error('unused');},openLogin:async()=>{},logout:async()=>{},dispose(){}};
+  const service=new CompanionService({} as never,async()=>{},()=>{},{enabled:false},true,(callback:any)=>{changed=callback;return session as never;}),fixture=service as any;
+  await fixture.sessionStarting;await fixture.translationOptionsStarting;
+  changed(identity);// the initial publication, as the real session does after its first check
+  const edit=attachDraft(fixture);
+  return{service,fixture,requests,syncs,edit,tick:(ms:number)=>t.mock.timers.tick(ms),
+    switchAccount(){identity={accountScope:'psim:8',authGeneration:2,permissions:[]};changed(identity);}};
+}
+
+test('edits during an in-flight translation send only the latest draft once it settles',async t=>{
+  const f=await companion(t);
+  try{
+    f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();
+    assert.equal(f.requests.length,1);const first=f.requests[0];assert.equal(first.body.text,'你好');
+    f.edit('你好，请问');f.edit('你好，请问订单');
+    assert.equal(first.signal.aborted,false,'a same-draft edit does not abort the request on the wire');assert.equal(first.revision?.aborted,true);
+    assert.equal(f.fixture.state.preview,null);
+    f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();
+    assert.equal(f.requests.length,1,'no second request is queued behind the one in flight');assert.equal(f.fixture.state.phase,'waiting');
+    reply(first,'Hi');await settle();f.tick(1);await settle();
+    assert.equal(f.requests.length,2);assert.equal(f.requests[1].body.text,'你好，请问订单');
+    assert.equal(f.fixture.state.preview,null,'the superseded result is discarded by the version check');
+    reply(f.requests[1],'Hello, about the order');await settle();
+    assert.equal(f.fixture.state.preview,'Hello, about the order');assert.equal(f.fixture.state.phase,'ready');
+    assert.deepEqual(f.syncs.slice(1),[{reuseRecent:true},{reuseRecent:true}],'each translation asks for a reusable pre-flight check');
+  }finally{await f.service.dispose();}
+});
+
+test('a request that settles early still lets the latest draft finish its 500 ms debounce',async t=>{
+  const f=await companion(t);
+  try{
+    f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();const first=f.requests[0];
+    f.edit('你好，再见');reply(first,'Hi');await settle();
+    assert.equal(f.requests.length,1);
+    f.tick(AUTO_TRANSLATE_DELAY_MS-1);await settle();assert.equal(f.requests.length,1);
+    f.tick(1);await settle();assert.equal(f.requests.length,2);assert.equal(f.requests[1].body.text,'你好，再见');
+  }finally{await f.service.dispose();}
+});
+
+test('a superseded request dropped before its POST surfaces no error and the latest draft follows',async t=>{
+  const f=await companion(t);
+  try{
+    f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();const first=f.requests[0];
+    f.edit('你好，请问');first.reject(new Error('REQUEST_SUPERSEDED'));await settle();
+    assert.equal(f.fixture.state.error,null);assert.equal(first.signal.aborted,false);
+    f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();assert.equal(f.requests.length,2);assert.equal(f.requests[1].body.text,'你好，请问');
+  }finally{await f.service.dispose();}
+});
+
+test('conversation, cleared draft, account, foreground, pause and language changes still abort at once',async t=>{
+  for(const mode of ['conversation','cleared','account','foreground','pause','language'])for(const stage of ['sending','superseded'])await t.test(`${mode} while ${stage}`,async st=>{
+    const f=await companion(st);
+    try{
+      f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();assert.equal(f.requests.length,1);const first=f.requests[0];
+      if(stage==='superseded'){
+        f.edit('你好，请问');f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();
+        assert.equal(first.signal.aborted,false);assert.equal(f.fixture.latestPending,true);
+      }
+      if(mode==='conversation')f.edit('你好，请问',{conversationId:'customer-2'});
+      if(mode==='cleared')f.edit('');
+      if(mode==='account')f.switchAccount();
+      if(mode==='foreground')f.service.setWindowState({targetInstanceId:'1:2:3',bounds:{x:0,y:0,width:800,height:600},visible:true,minimized:false,foreground:false,groupForeground:false,dpi:96} as any);
+      if(mode==='pause')await f.service.cancelTranslation();
+      if(mode==='language')await f.service.setTranslationOptions({language:'ja'});
+      assert.equal(first.signal.aborted,true,`${mode} aborts the request immediately`);
+      assert.equal(f.fixture.superseded,undefined);assert.equal(f.fixture.latestPending,false);
+      await settle();f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();
+      // The obsolete pending version is never sent; only a new target may start its own request.
+      if(mode==='language')assert.ok(f.requests.slice(1).every(request=>request.body.target_lang==='ja'));
+      else if(mode==='account')assert.ok(f.requests.slice(1).every(request=>request.identity.accountScope==='psim:8'));
+      else assert.equal(f.requests.length,1);
+    }finally{await f.service.dispose();}
+  });
+});
+
 test('Windows translation runs at most one full session check, and none right after a recent one',async t=>{
   t.mock.timers.enable({apis:['setTimeout','setInterval']});
   const browser=browserWorld();

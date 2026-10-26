@@ -149,7 +149,10 @@ export class CompanionService {
     if(event.type==='send-shortcut'){if(event.sendGeneration===this.nativeSendGeneration)void this.sendShortcut(event.snapshot);return;}
     if(event.type!=='draft-changed')return;
     // Revoke immediately, before CDP reads or the 500 ms safety observation can finish.
-    this.clearPendingSend(false);this.translationIntent++;this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.interactionRefresh=true;this.publish();
+    // The notice carries no content, so it is handled as a revision of the same draft: a request already
+    // handed to the session may finish. The settle read below classifies the edit; adopt() aborts that
+    // request for a cleared draft or another conversation/editor, and every other path still aborts at once.
+    this.clearPendingSend(false);this.translationIntent++;this.reviseDraft();this.attempted=undefined;this.suppressed=undefined;this.interactionRefresh=true;this.publish();
     if(this.interactionTask)return;
     const task=(async()=>{while(this.interactionRefresh&&!this.closed&&this.external===external){
       // Coalesce a typing burst into one read; every read also runs script in the vendor renderer.
@@ -175,6 +178,12 @@ export class CompanionService {
   private lastWritten?:VerifiedComposerSnapshot;
   private clearPendingSend(revokeNative=true){this.sendIntentGeneration++;if(revokeNative)this.nativeSendGeneration++;this.pendingSend=undefined;this.state.sendPending=false;}
   private epoch=0; private request?:AbortController; private closed=false;
+  /** The translation request currently handed to the session; `revision` is aborted when a newer revision of the same draft supersedes it. */
+  private outbound?:{request:AbortController;revision:AbortController};
+  /** At most one superseded outbound request, allowed to finish; its result fails the epoch check. invalidate() aborts it. */
+  private superseded?:AbortController;
+  /** The latest draft's debounce elapsed while `superseded` was in flight; it is sent as soon as that request settles. */
+  private latestPending=false;
   private busy=false; private foreground=false; private poll?:ReturnType<typeof setInterval>;
   private editorIdle:Promise<void>=Promise.resolve();
   private releaseEditor?:()=>void;
@@ -193,14 +202,15 @@ export class CompanionService {
   /** Language and pause preferences belong to the customer, across editor remounts. */
   private customerContext(capture=this.captured){return capture?.source==='verified-editor'?JSON.stringify([this.state.targetInstanceId,capture.snapshot.conversationId,capture.snapshot.platformAccountScope,capture.snapshot.documentGeneration]):this.context(capture);}
   private signature(capture=this.captured){return capture?JSON.stringify([capture.source,capture.snapshot,this.state.language,this.state.accountScope]):'';}
-  private stopTimer(){if(this.autoTimer)clearTimeout(this.autoTimer);this.autoTimer=undefined;}
+  private stopTimer(){if(this.autoTimer)clearTimeout(this.autoTimer);this.autoTimer=undefined;this.latestPending=false;}
   private schedule(delay=this.pendingSend?0:AUTO_TRANSLATE_DELAY_MS){
     const capture=this.captured,key=this.signature();
     if(this.state.followCustomerLanguage!==false&&!this.automaticTarget())return;
     if(this.closed||!this.foreground||!this.state.autoTranslate||this.state.translationPaused||this.state.auth!=='ready'||capture?.source!=='verified-editor'||!capture.snapshot.isPlainText||capture.snapshot.composing||!capture.snapshot.text.trim()||key===this.attempted||key===this.suppressed)return;
     if(this.autoTimer){this.state.phase='waiting';return;}
     this.state.phase='waiting';
-    this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.busy||this.externalConnecting){this.schedule(this.pendingSend?25:AUTO_TRANSLATE_DELAY_MS);return;}this.attempted=key;void this.translate(this.state.language,key);},delay);
+    // One request in flight plus the latest pending draft: never queue a second request behind a superseded one.
+    this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.superseded){this.latestPending=true;return;}if(this.busy||this.externalConnecting){this.schedule(this.pendingSend?25:AUTO_TRANSLATE_DELAY_MS);return;}this.attempted=key;void this.translate(this.state.language,key);},delay);
   }
   async setTranslationOptions(options:{fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}){
     if(options.fallbackTarget!==undefined){
@@ -277,9 +287,26 @@ export class CompanionService {
     if(id!==this.state.targetInstanceId){this.connectionEpoch++;this.connectingAttempt=undefined;this.externalConnecting=undefined;this.connectionAbort?.abort();this.dropReconnect();this.nextConnectAt=0;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';const previous=this.external;this.retireInteractions();this.external=undefined;void previous?.close().catch(()=>{});}
     if(id!==this.state.targetInstanceId){this.pausedContext=undefined;this.state.translationPaused=false;this.attempted=undefined;this.suppressed=undefined;}
     const wasForeground=this.foreground;
-    this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
+    this.state.targetInstanceId=id;this.state.attached=!!window;this.foreground=!!window&&window.visible&&!window.minimized&&(window.foreground||('groupForeground' in window&&window.groupForeground===true));this.updatePolling();if(wasForeground&&!this.foreground){this.clearPendingSend();this.stopTimer();this.abortSuperseded();if(this.state.phase==='translating'){this.invalidate();this.attempted=undefined;}else if(this.state.phase==='waiting'){this.state.phase='idle';}}this.schedule();this.publish();
   }
-  invalidate(){this.verifiedAt=undefined;this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
+  /** Revokes the preview and aborts every translation request at once, including a superseded one still finishing. */
+  invalidate(){this.abortSuperseded();this.revokeTranslation();}
+  /**
+   * A content edit of the same draft (same conversation, account scope, document and editor). Revokes the
+   * preview and restarts the debounce like invalidate(), but a request already handed to the session is not
+   * aborted: the session drops it before the POST, or it completes and its result fails the epoch check.
+   * Only one superseded request is kept; the debounced latest draft is sent once it settles (schedule()).
+   * Conversation, target, account, cleared-draft, foreground and pause changes keep using invalidate().
+   */
+  private reviseDraft(){
+    const outbound=this.outbound;
+    if(outbound&&this.request===outbound.request){this.abortSuperseded();this.superseded=outbound.request;this.request=undefined;outbound.revision.abort();}
+    this.revokeTranslation();
+  }
+  private abortSuperseded(){const superseded=this.superseded;this.superseded=undefined;this.latestPending=false;superseded?.abort();}
+  /** The superseded request settled; send the latest draft now if its debounce already elapsed. */
+  private supersededSettled(){this.superseded=undefined;if(!this.latestPending)return;this.latestPending=false;this.schedule(0);}
+  private revokeTranslation(){this.verifiedAt=undefined;this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
   /** A verified socket waiting for the IM page keeps its attempt open; release the panel controls meanwhile. */
   private composerWaiting(controller:AbortController){
     if(this.closed||controller.signal.aborted||this.connectionAbort!==controller)return;
@@ -316,18 +343,21 @@ export class CompanionService {
     const snapshot=await this.native.readDraft();if(snapshot.targetInstanceId!==id)throw new Error('TARGET_REQUIRED');
     return{source:'uia',snapshot};
   }
+  private draftTarget(capture:Extract<Captured,{source:'verified-editor'}>){return JSON.stringify([this.context(capture),capture.snapshot.editorIdentity,capture.snapshot.composerId,capture.snapshot.documentGeneration]);}
+  /** Non-empty new content in the same verified draft target; a cleared draft or any target change is not a revision. */
+  private revisesDraft(previous:Captured,next:Captured){return previous.source==='verified-editor'&&next.source==='verified-editor'&&!!next.snapshot.text.trim()&&this.draftTarget(previous)===this.draftTarget(next);}
   private adopt(capture:Captured,invalidateChanged=true){
     this.surfaceMeasurementRevision++;
     if(capture.source==='verified-editor'){
       const customerContext=this.customerContext(capture);
       if(this.verifiedCustomerContext===undefined)this.resetCustomerLanguage();
-      const context=JSON.stringify([this.context(capture),capture.snapshot.editorIdentity,capture.snapshot.composerId,capture.snapshot.documentGeneration]);
+      const context=this.draftTarget(capture);
       if(this.verifiedCustomerContext!==undefined&&this.verifiedCustomerContext!==customerContext)this.contextChanged();
       else if(this.verifiedContext!==undefined&&this.verifiedContext!==context){this.invalidate();this.lastWritten=undefined;this.clearPendingSend();this.clearOrder();this.onContextChanged();}
       this.verifiedCustomerContext=customerContext;this.verifiedContext=context;
     }
     const changed=!this.captured||JSON.stringify(this.captured.snapshot)!==JSON.stringify(capture.snapshot)||this.captured.source!==capture.source;
-    if(invalidateChanged&&this.captured&&changed){this.invalidate();this.attempted=undefined;}
+    if(invalidateChanged&&this.captured&&changed){if(this.revisesDraft(this.captured,capture))this.reviseDraft();else this.invalidate();this.attempted=undefined;}
     if(this.pausedContext!==undefined&&this.pausedContext!==this.customerContext(capture)){this.pausedContext=undefined;this.state.translationPaused=false;}
     if(changed&&this.suppressed!==this.signature(capture))this.suppressed=undefined;
     this.captured=capture;this.state.composerSource=capture.source;
@@ -445,7 +475,9 @@ export class CompanionService {
     finally{this.setBusy(false);}
     try{
       const version=createHash('sha256').update(JSON.stringify(capture.snapshot)).digest('hex');
-      const result=await this.psim.translate({text:capture.snapshot.text,target_lang:target,source_lang:'zh',purpose:'outbound',draft_request_id:randomUUID(),composer_content_version:version},identity,request.signal);
+      const revision=new AbortController();this.outbound={request,revision};
+      const result=await this.psim.translate({text:capture.snapshot.text,target_lang:target,source_lang:'zh',purpose:'outbound',draft_request_id:randomUUID(),composer_content_version:version},identity,request.signal,revision.signal);
+      if(this.outbound?.request===request)this.outbound=undefined;
       if(this.closed||epoch!==this.epoch||!await this.waitForObservation()||epoch!==this.epoch)return;
       await this.acquireEditor();
       try{
@@ -457,7 +489,7 @@ export class CompanionService {
         this.reviewed={capture,identity,text:result.data.translated_text};this.state.preview=result.data.translated_text;this.state.phase='ready';this.publish();
       }finally{this.setBusy(false);}
       void this.flushPendingSend();
-    }catch(error){if(epoch===this.epoch)this.fail(error);}finally{if(this.request===request)this.request=undefined;}
+    }catch(error){if(epoch===this.epoch)this.fail(error);}finally{if(this.request===request)this.request=undefined;if(this.outbound?.request===request)this.outbound=undefined;if(this.superseded===request)this.supersededSettled();}
   }
   /** Send mode: a plain Enter sends the reviewed translation, waiting for it if the request is still pending. */
   private async sendShortcut(snapshot:VerifiedComposerSnapshot){

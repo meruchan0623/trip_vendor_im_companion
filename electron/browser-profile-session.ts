@@ -231,14 +231,21 @@ export class BrowserProfileSessionService {
       this.revoke();this.setStatus('needs_login');
     }catch(error){this.verified=undefined;if(expectedGeneration===this.generation&&!this.closed&&!this.suspended){this.revoke();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.setStatus(code==='PSIM_LOGIN_REQUIRED'?'needs_login':'failed',code==='PSIM_LOGIN_REQUIRED'?undefined:code);}throw error;}
   }
-  async translate(body:OutboundBody,expectedIdentity:PsimIdentity,signal:AbortSignal):Promise<OutboundResponse>{
+  /**
+   * `superseded` is aborted when a newer revision of the same draft replaces this request. Before the POST
+   * it drops the request (`REQUEST_SUPERSEDED`); once sent, only `signal` aborts it, so the caller can let
+   * it finish and discard the result by its own version check.
+   */
+  async translate(body:OutboundBody,expectedIdentity:PsimIdentity,signal:AbortSignal,superseded?:AbortSignal):Promise<OutboundResponse>{
     if(this.options.enabled===false)throw new Error('BROWSER_SESSION_DISABLED');
     if(!record(body)||!keys(body,['text','target_lang','source_lang','purpose','draft_request_id','composer_content_version'])||typeof body.text!=='string'||!body.text.trim()||body.text.length>20000||!WORKBENCH_TARGETS.includes(body.target_lang)||body.source_lang!=='zh'||body.purpose!=='outbound'||typeof body.draft_request_id!=='string'||!/^[-a-z0-9]{1,100}$/.test(body.draft_request_id)||typeof body.composer_content_version!=='string'||body.composer_content_version.length>25000)throw new Error('INVALID_OUTBOUND_REQUEST');
     if(signal.aborted)throw new Error('REQUEST_ABORTED');
-    let abort!:()=>void;
+    const dropSuperseded=()=>{if(superseded?.aborted)throw new Error('REQUEST_SUPERSEDED');};dropSuperseded();
+    let abort!:()=>void,supersede!:()=>void;
     // Usually reuses the check CompanionService ran just before this call (see OUTBOUND_SYNC_REUSE_MS).
-    try{await Promise.race([this.sync({reuseRecent:true}),new Promise<never>((_,reject)=>{abort=()=>reject(new Error('REQUEST_ABORTED'));signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();})]);}finally{signal.removeEventListener('abort',abort);}
+    try{await Promise.race([this.sync({reuseRecent:true}),new Promise<never>((_,reject)=>{abort=()=>reject(new Error('REQUEST_ABORTED'));supersede=()=>reject(new Error('REQUEST_SUPERSEDED'));signal.addEventListener('abort',abort,{once:true});superseded?.addEventListener('abort',supersede,{once:true});if(signal.aborted)abort();else if(superseded?.aborted)supersede();})]);}finally{signal.removeEventListener('abort',abort);superseded?.removeEventListener('abort',supersede);}
     if(!this.current||!same(expectedIdentity,this.current)||!this.profile||!this.token)throw new Error('AUTH_CHANGED');
+    dropSuperseded();
     const generation=this.generation,token=this.token,profile={...this.profile};
     const result=await this.request('/agent/translate',{...body},signal);
     const freshToken=await this.checkedTokenAt(profile);
