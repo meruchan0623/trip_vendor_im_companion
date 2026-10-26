@@ -21,6 +21,7 @@ export class PersistentSessionService {
     this.setBackgroundPolling(options.backgroundPolling!==false);
   }
   identity(){return this.service.identity();}
+  outboundWaitBounds(){return this.service.outboundWaitBounds();}
   getBrowserProfile(){return null;}
   operatorGrant(identity:PsimIdentity){return this.closed||this.suspended?null:this.service.operatorGrant(identity);}
   private publish(status:BrowserSessionStatus,code?:string){

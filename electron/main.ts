@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import { NativeAdapter, type WindowState } from './native-adapter';
 import { CompanionService } from './companion-service';
+import {FileOutboundWaitStore} from './outbound-wait-store';
 import {FileTranslationOptionsStore} from './translation-options-store';
 import { startExternalClient } from './external-composer';
 import { lockContents, lockLocalSession } from './security';
@@ -170,7 +171,7 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   service=new CompanionService(native,async url=>{
     if(ownedAccount){await ownedLogin!.open(url);return;}
     if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);
-  },()=>{},sessionOptions,true,ownedStore?(changed,options)=>new PersistentSessionService(changed,{...options,embeddedLogin:false,closeLogin:()=>ownedLogin?.close()},ownedStore):undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')));service.onState(publish);
+  },()=>{},sessionOptions,true,ownedStore?(changed,options)=>new PersistentSessionService(changed,{...options,embeddedLogin:false,closeLogin:()=>ownedLogin?.close()},ownedStore):undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')),undefined,new FileOutboundWaitStore(join(app.getPath('userData'),'outbound-wait.json')));service.onState(publish);
   if(nativeStatus)service.setNativeStatus(nativeStatus);
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();

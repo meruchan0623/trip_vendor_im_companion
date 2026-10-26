@@ -1,3 +1,5 @@
+import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
+import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import {WORKBENCH_TARGETS,type OperatorSessionGrant,type OutboundBody,type OutboundResponse,type PsimIdentity} from '../src/shared/workbench';
 export const PSIM_API_ORIGIN='https://csapi.tsim.tech';
 const READ_PATHS=new Set(['/agent/profile','/agent/package-query/dataplan-list','/agent/package-query/detail','/agent/package-query/live-detail']);
@@ -26,6 +28,8 @@ function scalar(value:unknown):string|undefined{if(typeof value==='string'&&valu
 function id(value:unknown):string{const text=scalar(value);if(!text||!/^[-A-Za-z0-9_]{1,128}$/.test(text))throw fail('INVALID_READ_IDENTIFIER');return text;}
 /** Runs inside the owned auth child. Server response envelopes never leave this process; the bearer leaves only via `operatorGrant`. */
 export class OwnedPsimService {
+  private waitBounds:OutboundWaitBounds|null=null;
+  outboundWaitBounds(){return this.waitBounds?{...this.waitBounds}:null;}
   private token:string|null=null;private sessionRef:string|null=null;private accountId:string|null=null;private permissions:string[]=[];private epoch=0;private verified=false;private closed=false;private authQueue=Promise.resolve();
   private active=new Set<AbortController>();
   private revision=0;private storeQueue:Promise<void>=Promise.resolve();private refreshedAt=0;private dirty=false;
@@ -39,7 +43,7 @@ export class OwnedPsimService {
   }
   private async rejectSession(){this.clear();await this.forgetStored();}
   identity():PsimIdentity|null{return this.verified&&this.token&&this.accountId?{accountScope:`psim:${this.accountId}`,authGeneration:this.epoch,permissions:[...this.permissions]}:null;}
-  private revoke(){this.epoch++;this.verified=false;for(const controller of this.active)controller.abort();this.active.clear();this.changed(null);}
+  private revoke(){this.waitBounds=null;this.epoch++;this.verified=false;for(const controller of this.active)controller.abort();this.active.clear();this.changed(null);}
   private clear(){this.revoke();this.token=null;this.sessionRef=null;this.accountId=null;this.permissions=[];this.dirty=false;}
   private serialAuth<T>(operation:()=>Promise<T>):Promise<T>{const result=this.authQueue.then(()=>{if(this.closed)throw fail('OWNED_SERVICE_CLOSED');return operation();});this.authQueue=result.then(()=>{},()=>{});return result;}
   private async request(method:'GET'|'POST',path:string,body:unknown,signal?:AbortSignal,token=this.token):Promise<any>{
@@ -76,6 +80,7 @@ export class OwnedPsimService {
     if(response?.success!==true||data?.is_active!==true||!Array.isArray(data.permissions)||!data.permissions.every((permission:unknown)=>typeof permission==='string'&&permission.length<=100)){await this.rejectSession();throw fail('PROFILE_UNVERIFIED');}
     const permissions=[...new Set<string>(data.permissions)].sort(),wasVerified=this.verified;let changed=false;
     if(this.accountId!==account||JSON.stringify(this.permissions)!==JSON.stringify(permissions)){this.epoch++;for(const controller of this.active)controller.abort();this.accountId=account;this.permissions=permissions;changed=true;}
+    this.waitBounds=parseOutboundWaitBounds(data.outbound_wait);
     this.verified=true;if(changed||!wasVerified)this.changed(this.identity());const identity=this.identity();if(!identity)throw fail('PROFILE_UNVERIFIED');return identity;
   }
   restore():Promise<PsimIdentity|null>{return this.serialAuth(()=>this.restoreInternal(this.revision));}

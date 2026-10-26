@@ -8,6 +8,8 @@ import type { NativeAdapter, NativeDraftSnapshot, WindowState } from './native-a
 import { connectExternalComposer, type ExternalComposer } from './external-composer';
 import { embeddedPanelState, invokeEmbeddedAction } from './embedded-host';
 import {collectingCustomerLanguage,emptyLanguageCounts,isCustomerLanguageResolution,resolveCustomerLanguage,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../src/shared/customer-language';
+import {createOutboundWaitController,type OutboundWaitController,type OutboundWaitPersisted} from '../runtime/outbound-wait-controller';
+import type {OutboundWaitStore} from './outbound-wait-store';
 import type {TranslationOptionsStore} from './translation-options-store';
 import type {BrowserProfile} from './browser-profile-session';
 import type {OperatorSelection} from './system-browser';
@@ -55,15 +57,13 @@ const messages:Record<string,string>={
   NATIVE_SEND_FAILED:'未能自动发送，请确认输入框内容后再按 Enter。',
   SEND_UNAVAILABLE:'当前编辑器不支持自动发送，请切换为替换模式。',
 };
-/** Quiet period after the last edit before an automatic outbound translation request. */
-export const AUTO_TRANSLATE_DELAY_MS=500;
 export const CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS=5000;
 /** Idle lease renewal cadence: four attempts inside the 6 s page and native leases. */
 const LEASE_RENEW_MS=1500;
 const DRAFT_SETTLE_MS=120;
 /** A verified capture this recent, under the same epoch, lets the operator grant skip a second read. */
 export const OPERATOR_CAPTURE_FRESH_MS=1000;
-export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'>;
+export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'|'outboundWaitBounds'>;
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
 export class CompanionService {
@@ -182,15 +182,38 @@ export class CompanionService {
   private outbound?:{request:AbortController;revision:AbortController};
   /** At most one superseded outbound request, allowed to finish; its result fails the epoch check. invalidate() aborts it. */
   private superseded?:AbortController;
-  /** The latest draft's debounce elapsed while `superseded` was in flight; it is sent as soon as that request settles. */
-  private latestPending=false;
   private busy=false; private foreground=false; private poll?:ReturnType<typeof setInterval>;
   private editorIdle:Promise<void>=Promise.resolve();
   private releaseEditor?:()=>void;
   private setBusy(value:boolean){this.busy=value;if(value)this.editorIdle=new Promise(resolve=>{this.releaseEditor=resolve;});else{this.releaseEditor?.();this.releaseEditor=undefined;}}
   private async acquireEditor(){while(this.busy)await this.editorIdle;this.setBusy(true);}
   private observation?:Promise<void>;
-  private autoTimer?:ReturnType<typeof setTimeout>;
+  private waitController!:OutboundWaitController;
+  private waitScope:string|null=null;
+  private waitLoading=false;
+  private waitStarting:Promise<void>=Promise.resolve();
+  private outboundSeq=0;
+  private translationPreparing=false;
+  private manualPending?:{signature:string;target:PanelTarget;intent:number;sendGeneration?:number};
+  private waitStoreFailure(error:unknown){const code=error instanceof Error&&/^OUTBOUND_WAIT_[A-Z_]+$/.test(error.message)?error.message:'OUTBOUND_WAIT_STORE_FAILED';console.warn(JSON.stringify({event:'outbound-wait-store-failed',code}));}
+  private newWaitController(scope:string|null,persisted:OutboundWaitPersisted|null=null){
+    return createOutboundWaitController({clock:{now:()=>performance.now(),setTimeout:(fn,ms)=>setTimeout(fn,ms),clearTimeout:handle=>clearTimeout(handle as ReturnType<typeof setTimeout>)},
+      persisted,bounds:this.psim?.outboundWaitBounds?.()??null,onDue:()=>this.translateDue(),
+      onPersist:state=>{if(scope&&this.waitScope===scope&&!this.closed)void this.outboundWaitStore?.save(scope,state).catch(error=>this.waitStoreFailure(error));}});
+  }
+  private switchWaitScope(scope:string|null){
+    if(this.waitController&&scope===this.waitScope)return;
+    this.waitController?.dispose();this.waitScope=scope;const controller=this.waitController=this.newWaitController(scope);
+    this.waitLoading=!!scope&&!!this.outboundWaitStore;
+    this.waitStarting=(this.waitLoading?this.outboundWaitStore!.load(scope!).catch(error=>{this.waitStoreFailure(error);return null;}):Promise.resolve(null)).then(saved=>{
+      if(this.closed||this.waitController!==controller)return;
+      if(saved){controller.dispose();this.waitController=this.newWaitController(scope,saved);}
+      this.waitLoading=false;this.schedule();
+    });
+  }
+  private applyWaitBounds(){this.waitController.applyBounds(this.psim?.outboundWaitBounds?.()??null);}
+  /** Numeric diagnostics only: no draft, translation, customer or conversation identifiers. */
+  getOutboundWaitDiagnostics(){return this.waitController.snapshot();}
   private attempted?:string;
   private translationIntent=0;
   private suppressed?:string;
@@ -202,15 +225,25 @@ export class CompanionService {
   /** Language and pause preferences belong to the customer, across editor remounts. */
   private customerContext(capture=this.captured){return capture?.source==='verified-editor'?JSON.stringify([this.state.targetInstanceId,capture.snapshot.conversationId,capture.snapshot.platformAccountScope,capture.snapshot.documentGeneration]):this.context(capture);}
   private signature(capture=this.captured){return capture?JSON.stringify([capture.source,capture.snapshot,this.state.language,this.state.accountScope]):'';}
-  private stopTimer(){if(this.autoTimer)clearTimeout(this.autoTimer);this.autoTimer=undefined;this.latestPending=false;}
-  private schedule(delay=this.pendingSend?0:AUTO_TRANSLATE_DELAY_MS){
-    const capture=this.captured,key=this.signature();
-    if(this.state.followCustomerLanguage!==false&&!this.automaticTarget())return;
-    if(this.closed||!this.foreground||!this.state.autoTranslate||this.state.translationPaused||this.state.auth!=='ready'||capture?.source!=='verified-editor'||!capture.snapshot.isPlainText||capture.snapshot.composing||!capture.snapshot.text.trim()||key===this.attempted||key===this.suppressed)return;
-    if(this.autoTimer){this.state.phase='waiting';return;}
+  private stopTimer(){this.waitController.cancel();this.manualPending=undefined;}
+  private canSchedule(){
+    const capture=this.captured;
+    return !(this.state.followCustomerLanguage!==false&&!this.automaticTarget())&&!this.closed&&!this.waitLoading&&this.foreground&&this.state.autoTranslate&&!this.state.translationPaused&&this.state.auth==='ready'&&capture?.source==='verified-editor'&&capture.snapshot.isPlainText&&!!capture.snapshot.text.trim();
+  }
+  private schedule(immediate=false){
+    if(!this.canSchedule()){this.waitController.cancel();return;}
+    if(this.signature()===this.attempted||this.signature()===this.suppressed)return;
     this.state.phase='waiting';
-    // One request in flight plus the latest pending draft: never queue a second request behind a superseded one.
-    this.autoTimer=setTimeout(()=>{this.autoTimer=undefined;if(key!==this.signature())return;if(this.superseded){this.latestPending=true;return;}if(this.busy||this.externalConnecting){this.schedule(this.pendingSend?25:AUTO_TRANSLATE_DELAY_MS);return;}this.attempted=key;void this.translate(this.state.language,key);},delay);
+    // Enter reserves the latest verified draft immediately, while the old HTTP request retains the only slot.
+    if(immediate&&this.pendingSend&&(this.translationPreparing||this.waitController.snapshot().inFlightId!==null))this.manualPending={signature:this.signature(),target:this.state.language,intent:this.translationIntent,sendGeneration:this.pendingSend.generation};
+    if(immediate&&!this.waitController.snapshot().inFlightId&&!this.translationPreparing&&!(this.captured?.source==='verified-editor'&&this.captured.snapshot.composing)){this.waitController.cancel();this.translateDue();return;}
+    if(!this.waitController.snapshot().pending)this.waitController.onEdit('typing');
+  }
+  private translateDue(){
+    if(!this.canSchedule()||this.signature()===this.attempted||this.signature()===this.suppressed)return;
+    if(this.captured?.source==='verified-editor'&&this.captured.snapshot.composing)return;
+    if(this.busy||this.externalConnecting||this.translationPreparing){this.waitController.onEdit('typing');return;}
+    const key=this.signature();this.attempted=key;void this.translate(this.state.language,key);
   }
   async setTranslationOptions(options:{fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}){
     if(options.fallbackTarget!==undefined){
@@ -239,7 +272,8 @@ export class CompanionService {
   private sessionError:string|null=null;
   private sourceFailure=false;
   private surfaceMeasurementRevision=0;
-  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort){
+  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort,private outboundWaitStore?:OutboundWaitStore){
+    this.switchWaitScope(null);
     this.state.sessionMode=process.platform==='darwin'?'owned':'browser';
     this.translationOptionsStarting=(translationOptionsStore?.load()??Promise.resolve({fallbackTarget:'en' as const})).then(options=>{if(this.closed)return;const previous=this.automaticTarget();this.state.fallbackTarget=options.fallbackTarget;if(this.state.followCustomerLanguage!==false&&previous!==this.automaticTarget()){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();}).catch(error=>{if(!this.closed)this.fail(error);});
     this.psim=sessionFactory(identity=>{
@@ -248,7 +282,7 @@ export class CompanionService {
       const sessionIdentity=identity?.accountScope;
       if(sessionIdentity!==undefined&&this.sessionIdentity!==undefined&&sessionIdentity!==this.sessionIdentity){this.contextChanged();this.verifiedContext=undefined;this.verifiedCustomerContext=undefined;}
       if(sessionIdentity!==undefined)this.sessionIdentity=sessionIdentity;
-      this.clearOrder();this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.state.auth=identity?'ready':'connecting';this.state.accountScope=identity?.accountScope??'unknown';
+      this.clearOrder();this.invalidate();this.attempted=undefined;this.suppressed=undefined;this.state.auth=identity?'ready':'connecting';this.state.accountScope=identity?.accountScope??'unknown';this.switchWaitScope(identity?.accountScope??null);
       if(identity&&[messages.BROWSER_BRIDGE_UNAVAILABLE,messages.BROWSER_BRIDGE_TIMEOUT,messages.PSIM_LOGIN_REQUIRED].includes(this.state.error??'')){this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';}
       this.schedule();this.publish();
     },{...sessionOptions,openExternal:openLoginURL,backgroundPolling:false,onStatus:(status,code)=>{
@@ -258,6 +292,8 @@ export class CompanionService {
       else if(status==='ready'||status==='needs_login'){if(this.sessionError&&this.state.error===this.sessionError){this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';}this.sessionError=null;}
       sessionOptions.onStatus?.(status,code);this.schedule();this.publish();
     }});
+    const sync=this.psim.sync.bind(this.psim);
+    this.psim.sync=async options=>{try{await sync(options);}finally{if(!this.closed)this.applyWaitBounds();}};
     this.sessionStarting=this.psim.sync().catch(error=>{if(!this.closed){if(this.state.auth!=='needs_login')this.state.auth='failed';this.fail(error);this.sessionError=this.state.error;}});
   }
   private updatePolling(){
@@ -301,12 +337,10 @@ export class CompanionService {
   private reviseDraft(){
     const outbound=this.outbound;
     if(outbound&&this.request===outbound.request){this.abortSuperseded();this.superseded=outbound.request;this.request=undefined;outbound.revision.abort();}
-    this.revokeTranslation();
+    this.revokeTranslation(false);this.waitController.onEdit('typing');
   }
-  private abortSuperseded(){const superseded=this.superseded;this.superseded=undefined;this.latestPending=false;superseded?.abort();}
-  /** The superseded request settled; send the latest draft now if its debounce already elapsed. */
-  private supersededSettled(){this.superseded=undefined;if(!this.latestPending)return;this.latestPending=false;this.schedule(0);}
-  private revokeTranslation(){this.verifiedAt=undefined;this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
+  private abortSuperseded(){const superseded=this.superseded;this.superseded=undefined;superseded?.abort();}
+  private revokeTranslation(cancelWait=true){this.verifiedAt=undefined;if(cancelWait)this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
   /** A verified socket waiting for the IM page keeps its attempt open; release the panel controls meanwhile. */
   private composerWaiting(controller:AbortController){
     if(this.closed||controller.signal.aborted||this.connectionAbort!==controller)return;
@@ -348,6 +382,9 @@ export class CompanionService {
   private revisesDraft(previous:Captured,next:Captured){return previous.source==='verified-editor'&&next.source==='verified-editor'&&!!next.snapshot.text.trim()&&this.draftTarget(previous)===this.draftTarget(next);}
   private adopt(capture:Captured,invalidateChanged=true){
     this.surfaceMeasurementRevision++;
+    const composing=capture.source==='verified-editor'&&capture.snapshot.composing;
+    if(composing&&!this.waitController.snapshot().composing)this.waitController.onCompositionStart();
+    else if(!composing&&this.waitController.snapshot().composing)this.waitController.onCompositionEnd();
     if(capture.source==='verified-editor'){
       const customerContext=this.customerContext(capture);
       if(this.verifiedCustomerContext===undefined)this.resetCustomerLanguage();
@@ -440,10 +477,23 @@ export class CompanionService {
   }
   async translate(target:PanelTarget,automaticSignature?:string){
     if(!isPanelTarget(target)){this.fail(new Error('INVALID_LANGUAGE'));return;}
+    if(!automaticSignature&&target!==this.state.language)await this.setTranslationOptions({language:target});
+    if(this.translationPreparing||this.waitController.snapshot().inFlightId!==null){
+      if(!automaticSignature&&this.signature()!==this.attempted)this.manualPending={signature:this.signature(),target,intent:this.translationIntent};
+      this.schedule();return;
+    }
+    this.translationPreparing=true;
+    try{await this.runTranslation(target,automaticSignature);}finally{
+      this.translationPreparing=false;const pending=this.manualPending;this.manualPending=undefined;
+      if(pending&&!this.closed&&this.foreground&&!this.state.translationPaused&&pending.intent===this.translationIntent&&pending.signature===this.signature()&&(pending.sendGeneration===undefined||pending.sendGeneration===this.sendIntentGeneration&&pending.sendGeneration===this.pendingSend?.generation))void this.translate(pending.target);
+    }
+  }
+  private async runTranslation(target:PanelTarget,automaticSignature?:string){
+    if(!isPanelTarget(target)){this.fail(new Error('INVALID_LANGUAGE'));return;}
     let intent=this.translationIntent;
     await this.sessionStarting;
     if(intent!==this.translationIntent||!this.foreground||this.state.translationPaused)return;
-    await this.translationOptionsStarting;
+    await this.translationOptionsStarting;await this.waitStarting;
     if(!automaticSignature&&target!==this.state.language)await this.setTranslationOptions({language:target});
     if(this.state.followCustomerLanguage!==false&&!this.automaticTarget())return;
     // Authentication may publish a newly recovered identity and revoke old reviews.
@@ -473,9 +523,11 @@ export class CompanionService {
       this.attempted=this.signature();
     }catch(error){if(epoch===this.epoch)this.fail(error);return;}
     finally{this.setBusy(false);}
+    const controller=this.waitController,id=++this.outboundSeq;let outcome:'shown'|'superseded'|'failed'|'cancelled'|'rate_limited'='superseded';
     try{
       const version=createHash('sha256').update(JSON.stringify(capture.snapshot)).digest('hex');
       const revision=new AbortController();this.outbound={request,revision};
+      controller.onRequestSent(id);
       const result=await this.psim.translate({text:capture.snapshot.text,target_lang:target,source_lang:'zh',purpose:'outbound',draft_request_id:randomUUID(),composer_content_version:version},identity,request.signal,revision.signal);
       if(this.outbound?.request===request)this.outbound=undefined;
       if(this.closed||epoch!==this.epoch||!await this.waitForObservation()||epoch!==this.epoch)return;
@@ -486,10 +538,10 @@ export class CompanionService {
         if(this.closed||epoch!==this.epoch)return;
         if(!same(capture,after)){this.adopt(after);this.publish();return;}
         if(!result.data.translated_text.trim())throw new Error('EMPTY_TRANSLATION');
-        this.reviewed={capture,identity,text:result.data.translated_text};this.state.preview=result.data.translated_text;this.state.phase='ready';this.publish();
+        this.reviewed={capture,identity,text:result.data.translated_text};this.state.preview=result.data.translated_text;this.state.phase='ready';outcome='shown';controller.onResponse(id,outcome);this.publish();
       }finally{this.setBusy(false);}
       void this.flushPendingSend();
-    }catch(error){if(epoch===this.epoch)this.fail(error);}finally{if(this.request===request)this.request=undefined;if(this.outbound?.request===request)this.outbound=undefined;if(this.superseded===request)this.supersededSettled();}
+    }catch(error){const code=error instanceof Error?error.message:'';outcome=request.signal.aborted?'cancelled':code==='RATE_LIMITED'||code==='PSIM_HTTP_429'?'rate_limited':code==='REQUEST_ABORTED'?'cancelled':code==='REQUEST_SUPERSEDED'?'superseded':'failed';if(epoch===this.epoch)this.fail(error);}finally{if(this.request===request)this.request=undefined;if(this.outbound?.request===request)this.outbound=undefined;if(this.superseded===request)this.superseded=undefined;if(outcome!=='shown')controller.onResponse(id,request.signal.aborted?'cancelled':outcome);}
   }
   /** Send mode: a plain Enter sends the reviewed translation, waiting for it if the request is still pending. */
   private async sendShortcut(snapshot:VerifiedComposerSnapshot){
@@ -520,7 +572,7 @@ export class CompanionService {
     const reviewed=this.reviewed;
     if(this.state.phase==='ready'&&reviewed?.capture.source==='verified-editor'&&sameVerifiedDraft(reviewed.capture.snapshot,snapshot)){await this.flushPendingSend();return;}
     // An in-flight request flushes the pending send when it completes.
-    if(this.state.phase!=='translating'){this.stopTimer();this.attempted=undefined;this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';this.schedule();if(!this.autoTimer)this.clearPendingSend();}
+    if(this.state.phase!=='translating'){this.stopTimer();this.attempted=undefined;this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';this.schedule(true);if(!this.waitController.snapshot().pending&&!this.translationPreparing&&this.waitController.snapshot().inFlightId===null)this.clearPendingSend();}
     this.publish();
   }
   private async flushPendingSend(){
@@ -550,7 +602,7 @@ export class CompanionService {
     // A user's Enter must not be dropped because a background read holds the editor.
     if(intent==='send')await this.acquireEditor();else if(this.busy)return;else this.setBusy(true);
     if(!this.reviewed||!this.foreground||shortcutSnapshot&&(this.reviewed!==shortcutReview||!allowed()||this.state.translationPaused||this.state.phase!=='ready')){this.setBusy(false);return;}
-    const reviewed=this.reviewed,epoch=this.epoch;this.stopTimer();this.state.error=null;this.state.phase='replacing';this.publish();
+    const reviewed=this.reviewed,epoch=this.epoch;this.state.error=null;this.state.phase='replacing';this.publish();
     try{
       // Like translation, writing and sending reuse a successful check of the same auth generation started
       // within OUTBOUND_SYNC_REUSE_MS (Windows); the identity comparisons below still run before every write.
@@ -569,6 +621,7 @@ export class CompanionService {
       this.adopt(after,false);
       if(epoch!==this.epoch)throw new Error('DRAFT_CHANGED');
       if(current.source==='verified-editor'&&(after.source!=='verified-editor'||after.snapshot.conversationId!==current.snapshot.conversationId||after.snapshot.scopeGeneration!==current.snapshot.scopeGeneration||after.snapshot.platformAccountScope!==current.snapshot.platformAccountScope||after.snapshot.documentGeneration!==current.snapshot.documentGeneration||after.snapshot.editorIdentity!==current.snapshot.editorIdentity||after.snapshot.composerId!==current.snapshot.composerId))throw new Error('DRAFT_CHANGED');
+      this.waitController.onDraftSent();
       this.lastWritten=after.source==='verified-editor'?after.snapshot:undefined;
       this.suppressed=this.signature(after);this.attempted=this.suppressed;this.reviewed=undefined;this.state.preview=null;this.state.phase='replaced';
       if(intent==='send'&&after.source==='verified-editor'){this.publish();await this.external!.send!(after.snapshot,authorize);this.lastWritten=undefined;this.state.phase='idle';}
@@ -665,9 +718,10 @@ export class CompanionService {
   }
   async openLogin(){const opening={epoch:this.connectionEpoch,generation:this.loginGeneration};this.loginOpening=opening;try{await this.psim.openLogin();}catch(error){if(!this.closed&&this.loginOpening===opening&&opening.epoch===this.connectionEpoch&&opening.generation===this.loginGeneration)this.fail(error);}finally{if(this.loginOpening===opening)this.loginOpening=undefined;}}
   async logout(){
+    const scope=this.waitScope??this.sessionIdentity??null;this.sessionIdentity=undefined;this.switchWaitScope(null);const cleared=scope?this.outboundWaitStore?.clear(scope):undefined;
     this.loginGeneration++;this.loginPopover=undefined;this.clearPendingSend();this.clearOrder();this.translationIntent++;this.invalidate();this.lastWritten=undefined;this.attempted=undefined;this.suppressed=undefined;this.state.auth='connecting';this.state.error=null;this.publish();
-    try{await this.psim.logout();this.state.auth='needs_login';this.state.accountScope='unknown';this.state.phase='idle';this.state.error=null;this.publish();}
+    try{await Promise.all([this.psim.logout(),cleared]);this.state.auth='needs_login';this.state.accountScope='unknown';this.state.phase='idle';this.state.error=null;this.publish();}
     catch(error){this.state.auth='failed';this.fail(error);}
   }
-  async dispose(){this.loginPopover=undefined;this.closed=true;clearTimeout(this.customerResolutionTimer);this.customerResolutionGeneration++;this.connectionAbort?.abort();this.dropReconnect();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
+  async dispose(){this.loginPopover=undefined;this.closed=true;clearTimeout(this.customerResolutionTimer);this.customerResolutionGeneration++;this.connectionAbort?.abort();this.dropReconnect();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.waitController.dispose();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
 }

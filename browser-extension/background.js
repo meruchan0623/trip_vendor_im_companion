@@ -44,7 +44,9 @@ async function pageRequest(action,request,expectedHash,id){
     // Validate account on every request as well as token: a token can outlive an account/permission change.
     const profile=await fetchJSON('/agent/profile'),p=profile?.data;
     if(profile?.success!==true||p?.is_active!==true||!/^[-A-Za-z0-9_]{1,128}$/.test(String(p?.id??''))||!Array.isArray(p.permissions)||p.permissions.length>200||!p.permissions.every(v=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v)))return fail('PROFILE_UNVERIFIED');
-    const identity={accountScope:`psim:${p.id}`,permissions:[...new Set(p.permissions)].sort(),hash:fingerprint};
+    const wait=p.outbound_wait;
+    const outboundWait=wait&&typeof wait==='object'&&!Array.isArray(wait)&&typeof wait.enabled==='boolean'&&Number.isInteger(wait.min_ms)&&Number.isInteger(wait.max_ms)&&wait.min_ms>=100&&wait.min_ms<=wait.max_ms&&wait.max_ms<=3000?{enabled:wait.enabled,min_ms:wait.min_ms,max_ms:wait.max_ms}:null;
+    const identity={accountScope:`psim:${p.id}`,permissions:[...new Set(p.permissions)].sort(),hash:fingerprint,...(outboundWait?{outbound_wait:outboundWait}:{})};
     if(action==='sync'){if(!fresh())return fail('AUTH_CHANGED');return {ok:true,value:identity};}
     if(identity.accountScope!==request.expectedAccount||JSON.stringify(identity.permissions)!==JSON.stringify(request.expectedPermissions))return fail('AUTH_CHANGED');
     const result=await fetchJSON('/agent/translate',request.body),d=result?.data;
@@ -60,8 +62,8 @@ async function sync(id){
   for(const tab of await tabs()){
     let result;try{result=await inject(tab.id,'sync',null,null,id);}catch{continue;}
     if(!result.ok){if(['PSIM_LOGIN_REQUIRED','PROFILE_UNVERIFIED'].includes(result.error))continue;throw Error(result.error);}
-    const p=result.value;if(!exact(p,['accountScope','permissions','hash'])||!/^[a-f0-9]{64}$/.test(p.hash))throw Error('INVALID_BROWSER_RESPONSE');
-    selected={...p,tabId:tab.id};return {accountScope:p.accountScope,permissions:p.permissions,sessionKey:`${p.hash}:${tab.id}`};
+    const p=result.value;if(!exact(p,['accountScope','permissions','hash','outbound_wait'])||!/^[a-f0-9]{64}$/.test(p.hash))throw Error('INVALID_BROWSER_RESPONSE');
+    selected={...p,tabId:tab.id};return {accountScope:p.accountScope,permissions:p.permissions,sessionKey:`${p.hash}:${tab.id}`,...(p.outbound_wait===undefined?{}:{outbound_wait:p.outbound_wait})};
   }
   selected=null;return null;
 }

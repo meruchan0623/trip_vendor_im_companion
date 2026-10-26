@@ -1,0 +1,1168 @@
+{
+  "params": {
+    "minMs": 300,
+    "maxMs": 1000,
+    "initialMs": 800,
+    "stepUpMs": 150,
+    "stepDownMs": 50,
+    "settleMs": 600,
+    "rateLimitHoldMs": 60000,
+    "staleAfterMs": 1209600000
+  },
+  "cases": [
+    {
+      "name": "typing then pause fires once at wait",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 300,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 1100,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 2000,
+          "type": "response",
+          "id": 1,
+          "outcome": "shown"
+        }
+      ],
+      "expect": {
+        "due": [
+          1100
+        ],
+        "waitAfter": [
+          {
+            "t": 2600,
+            "waitMs": 750
+          }
+        ],
+        "counters": {
+          "sent": 1,
+          "useful": 1,
+          "wasted": 0,
+          "neutral": 0
+        }
+      }
+    },
+    {
+      "name": "composition pauses and restarts full wait",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 400,
+          "type": "compositionStart"
+        },
+        {
+          "t": 500,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 2000,
+          "type": "compositionEnd"
+        }
+      ],
+      "expect": {
+        "due": [
+          2800
+        ],
+        "waitAfter": [],
+        "counters": {}
+      }
+    },
+    {
+      "name": "in flight keeps only latest overdue edit",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 800,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 900,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 1000,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 1100,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 2200,
+          "type": "response",
+          "id": 1,
+          "outcome": "superseded"
+        }
+      ],
+      "expect": {
+        "due": [
+          800,
+          2200
+        ],
+        "waitAfter": [
+          {
+            "t": 2200,
+            "waitMs": 950
+          }
+        ],
+        "counters": {
+          "sent": 1,
+          "wasted": 1
+        }
+      }
+    },
+    {
+      "name": "in flight preserves future deadline",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 800,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 900,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 1000,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 1100,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 1200,
+          "type": "response",
+          "id": 1,
+          "outcome": "failed"
+        }
+      ],
+      "expect": {
+        "due": [
+          800,
+          1900
+        ],
+        "waitAfter": [],
+        "counters": {}
+      }
+    },
+    {
+      "name": "four superseded results clamp maximum",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 0
+        },
+        {
+          "t": 10,
+          "type": "response",
+          "id": 0,
+          "outcome": "superseded"
+        },
+        {
+          "t": 100,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 110,
+          "type": "response",
+          "id": 1,
+          "outcome": "superseded"
+        },
+        {
+          "t": 200,
+          "type": "sent",
+          "id": 2
+        },
+        {
+          "t": 210,
+          "type": "response",
+          "id": 2,
+          "outcome": "superseded"
+        },
+        {
+          "t": 300,
+          "type": "sent",
+          "id": 3
+        },
+        {
+          "t": 310,
+          "type": "response",
+          "id": 3,
+          "outcome": "superseded"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 400,
+            "waitMs": 1000
+          }
+        ],
+        "counters": {
+          "wasted": 4,
+          "sent": 4
+        }
+      }
+    },
+    {
+      "name": "shown followed by edit is neutral",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 100,
+          "type": "response",
+          "id": 1,
+          "outcome": "shown"
+        },
+        {
+          "t": 300,
+          "type": "edit",
+          "kind": "typing"
+        }
+      ],
+      "expect": {
+        "due": [
+          1100
+        ],
+        "waitAfter": [
+          {
+            "t": 1000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "neutral": 1,
+          "useful": 0
+        }
+      }
+    },
+    {
+      "name": "draft send immediately adopts shown result",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 800,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1000,
+          "type": "response",
+          "id": 1,
+          "outcome": "shown"
+        },
+        {
+          "t": 1200,
+          "type": "draftSent"
+        }
+      ],
+      "expect": {
+        "due": [
+          800
+        ],
+        "waitAfter": [
+          {
+            "t": 1200,
+            "waitMs": 750
+          }
+        ],
+        "counters": {
+          "useful": 1
+        }
+      }
+    },
+    {
+      "name": "instant uses minimum",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "instant"
+        }
+      ],
+      "expect": {
+        "due": [
+          300
+        ],
+        "waitAfter": [],
+        "counters": {}
+      }
+    },
+    {
+      "name": "rate limited holds instant and typing then resumes",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 10,
+          "type": "response",
+          "id": 1,
+          "outcome": "rate_limited"
+        },
+        {
+          "t": 20,
+          "type": "edit",
+          "kind": "instant"
+        },
+        {
+          "t": 2000,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 60010,
+          "type": "edit",
+          "kind": "typing"
+        }
+      ],
+      "expect": {
+        "due": [
+          1020,
+          3000,
+          60810
+        ],
+        "waitAfter": [
+          {
+            "t": 61000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "failed": 1
+        }
+      }
+    },
+    {
+      "name": "disabled forces instant maximum and suppresses adjustment",
+      "events": [
+        {
+          "t": 0,
+          "type": "bounds",
+          "bounds": {
+            "enabled": false,
+            "minMs": 300,
+            "maxMs": 1000
+          }
+        },
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "instant"
+        },
+        {
+          "t": 1000,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1010,
+          "type": "response",
+          "id": 1,
+          "outcome": "superseded"
+        }
+      ],
+      "expect": {
+        "due": [
+          1000
+        ],
+        "waitAfter": [
+          {
+            "t": 1200,
+            "waitMs": 800
+          }
+        ],
+        "counters": {}
+      }
+    },
+    {
+      "name": "remote minimum raises saved wait",
+      "events": [
+        {
+          "t": 0,
+          "type": "bounds",
+          "bounds": {
+            "enabled": true,
+            "minMs": 500,
+            "maxMs": 1000
+          }
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 0,
+            "waitMs": 500
+          }
+        ],
+        "counters": {}
+      },
+      "persisted": {
+        "v": 1,
+        "waitMs": 300,
+        "updatedAt": 0,
+        "sent": 2,
+        "wasted": 1,
+        "useful": 1
+      }
+    },
+    {
+      "name": "cancel discards pending and cancellation does not adjust",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 200,
+          "type": "cancel"
+        },
+        {
+          "t": 1000,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1100,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 1200,
+          "type": "cancel"
+        },
+        {
+          "t": 1300,
+          "type": "response",
+          "id": 1,
+          "outcome": "cancelled"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 2000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "failed": 1
+        }
+      }
+    },
+    {
+      "name": "stale saved state ignored",
+      "events": [],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 0,
+            "waitMs": 800
+          }
+        ],
+        "counters": {}
+      },
+      "persisted": {
+        "v": 1,
+        "waitMs": 300,
+        "updatedAt": -1209600001,
+        "sent": 2,
+        "wasted": 1,
+        "useful": 1
+      }
+    },
+    {
+      "name": "wrong saved version ignored",
+      "events": [],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 0,
+            "waitMs": 800
+          }
+        ],
+        "counters": {}
+      },
+      "persisted": {
+        "v": 2,
+        "waitMs": 300,
+        "updatedAt": 0,
+        "sent": 2,
+        "wasted": 1,
+        "useful": 1
+      }
+    },
+    {
+      "name": "valid saved state restored and clamped",
+      "events": [],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 0,
+            "waitMs": 1000
+          }
+        ],
+        "counters": {
+          "sent": 2,
+          "wasted": 1,
+          "useful": 1
+        }
+      },
+      "persisted": {
+        "v": 1,
+        "waitMs": 2000,
+        "updatedAt": 0,
+        "sent": 2,
+        "wasted": 1,
+        "useful": 1
+      }
+    },
+    {
+      "name": "fourteen useful results reach minimum then stay",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 0
+        },
+        {
+          "t": 10,
+          "type": "response",
+          "id": 0,
+          "outcome": "shown"
+        },
+        {
+          "t": 1000,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1010,
+          "type": "response",
+          "id": 1,
+          "outcome": "shown"
+        },
+        {
+          "t": 2000,
+          "type": "sent",
+          "id": 2
+        },
+        {
+          "t": 2010,
+          "type": "response",
+          "id": 2,
+          "outcome": "shown"
+        },
+        {
+          "t": 3000,
+          "type": "sent",
+          "id": 3
+        },
+        {
+          "t": 3010,
+          "type": "response",
+          "id": 3,
+          "outcome": "shown"
+        },
+        {
+          "t": 4000,
+          "type": "sent",
+          "id": 4
+        },
+        {
+          "t": 4010,
+          "type": "response",
+          "id": 4,
+          "outcome": "shown"
+        },
+        {
+          "t": 5000,
+          "type": "sent",
+          "id": 5
+        },
+        {
+          "t": 5010,
+          "type": "response",
+          "id": 5,
+          "outcome": "shown"
+        },
+        {
+          "t": 6000,
+          "type": "sent",
+          "id": 6
+        },
+        {
+          "t": 6010,
+          "type": "response",
+          "id": 6,
+          "outcome": "shown"
+        },
+        {
+          "t": 7000,
+          "type": "sent",
+          "id": 7
+        },
+        {
+          "t": 7010,
+          "type": "response",
+          "id": 7,
+          "outcome": "shown"
+        },
+        {
+          "t": 8000,
+          "type": "sent",
+          "id": 8
+        },
+        {
+          "t": 8010,
+          "type": "response",
+          "id": 8,
+          "outcome": "shown"
+        },
+        {
+          "t": 9000,
+          "type": "sent",
+          "id": 9
+        },
+        {
+          "t": 9010,
+          "type": "response",
+          "id": 9,
+          "outcome": "shown"
+        },
+        {
+          "t": 10000,
+          "type": "sent",
+          "id": 10
+        },
+        {
+          "t": 10010,
+          "type": "response",
+          "id": 10,
+          "outcome": "shown"
+        },
+        {
+          "t": 11000,
+          "type": "sent",
+          "id": 11
+        },
+        {
+          "t": 11010,
+          "type": "response",
+          "id": 11,
+          "outcome": "shown"
+        },
+        {
+          "t": 12000,
+          "type": "sent",
+          "id": 12
+        },
+        {
+          "t": 12010,
+          "type": "response",
+          "id": 12,
+          "outcome": "shown"
+        },
+        {
+          "t": 13000,
+          "type": "sent",
+          "id": 13
+        },
+        {
+          "t": 13010,
+          "type": "response",
+          "id": 13,
+          "outcome": "shown"
+        },
+        {
+          "t": 14000,
+          "type": "sent",
+          "id": 14
+        },
+        {
+          "t": 14010,
+          "type": "response",
+          "id": 14,
+          "outcome": "shown"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 13610,
+            "waitMs": 300
+          },
+          {
+            "t": 14610,
+            "waitMs": 300
+          }
+        ],
+        "counters": {
+          "useful": 15
+        }
+      },
+      "params": {
+        "initialMs": 1000
+      }
+    },
+    {
+      "name": "rate hold suppresses superseded and useful tuning",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1,
+          "type": "response",
+          "id": 1,
+          "outcome": "rate_limited"
+        },
+        {
+          "t": 10,
+          "type": "sent",
+          "id": 2
+        },
+        {
+          "t": 20,
+          "type": "response",
+          "id": 2,
+          "outcome": "superseded"
+        },
+        {
+          "t": 30,
+          "type": "sent",
+          "id": 3
+        },
+        {
+          "t": 40,
+          "type": "response",
+          "id": 3,
+          "outcome": "shown"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 1000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "useful": 1,
+          "wasted": 1
+        }
+      }
+    },
+    {
+      "name": "bounds changes rearm earlier instant pending to maximum",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "instant"
+        },
+        {
+          "t": 100,
+          "type": "bounds",
+          "bounds": {
+            "enabled": false,
+            "minMs": 300,
+            "maxMs": 1000
+          }
+        }
+      ],
+      "expect": {
+        "due": [
+          1100
+        ],
+        "waitAfter": [],
+        "counters": {}
+      }
+    },
+    {
+      "name": "disjoint remote bounds use remote maximum",
+      "events": [
+        {
+          "t": 0,
+          "type": "bounds",
+          "bounds": {
+            "enabled": true,
+            "minMs": 1500,
+            "maxMs": 2000
+          }
+        },
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "instant"
+        }
+      ],
+      "expect": {
+        "due": [
+          2000
+        ],
+        "waitAfter": [
+          {
+            "t": 2000,
+            "waitMs": 2000
+          }
+        ],
+        "counters": {}
+      }
+    },
+    {
+      "name": "invalid remote bounds fall back to defaults",
+      "events": [
+        {
+          "t": 0,
+          "type": "bounds",
+          "bounds": {
+            "enabled": false,
+            "minMs": 2000,
+            "maxMs": 100
+          }
+        },
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        }
+      ],
+      "expect": {
+        "due": [
+          800
+        ],
+        "waitAfter": [],
+        "counters": {}
+      }
+    },
+    {
+      "name": "unknown and duplicate responses ignored",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1,
+          "type": "response",
+          "id": 99,
+          "outcome": "superseded"
+        },
+        {
+          "t": 2,
+          "type": "response",
+          "id": 1,
+          "outcome": "failed"
+        },
+        {
+          "t": 3,
+          "type": "response",
+          "id": 1,
+          "outcome": "superseded"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 1000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "sent": 1,
+          "failed": 1,
+          "wasted": 0
+        }
+      }
+    },
+    {
+      "name": "second sent cannot replace active request",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1,
+          "type": "sent",
+          "id": 2
+        },
+        {
+          "t": 2,
+          "type": "response",
+          "id": 2,
+          "outcome": "superseded"
+        },
+        {
+          "t": 3,
+          "type": "response",
+          "id": 1,
+          "outcome": "failed"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [],
+        "counters": {
+          "sent": 1,
+          "failed": 1,
+          "wasted": 0
+        }
+      }
+    },
+    {
+      "name": "dispose clears scheduled and shown timers",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1,
+          "type": "response",
+          "id": 1,
+          "outcome": "shown"
+        },
+        {
+          "t": 2,
+          "type": "dispose"
+        },
+        {
+          "t": 3,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 4,
+          "type": "sent",
+          "id": 2
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 1000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "sent": 1,
+          "useful": 0
+        }
+      }
+    },
+    {
+      "name": "future saved timestamp ignored",
+      "events": [],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 0,
+            "waitMs": 800
+          }
+        ],
+        "counters": {}
+      },
+      "persisted": {
+        "v": 1,
+        "waitMs": 300,
+        "updatedAt": 1,
+        "sent": 2,
+        "wasted": 1,
+        "useful": 1
+      }
+    },
+    {
+      "name": "same remote bounds never postpone deadline",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 500,
+          "type": "bounds",
+          "bounds": {
+            "enabled": true,
+            "minMs": 300,
+            "maxMs": 1000
+          }
+        }
+      ],
+      "expect": {
+        "due": [
+          800
+        ],
+        "waitAfter": [],
+        "counters": {}
+      }
+    },
+    {
+      "name": "cancel closes shown without useful feedback",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1,
+          "type": "response",
+          "id": 1,
+          "outcome": "shown"
+        },
+        {
+          "t": 100,
+          "type": "cancel"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 1000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "useful": 0,
+          "neutral": 0
+        }
+      }
+    },
+    {
+      "name": "composition start closes shown as neutral",
+      "events": [
+        {
+          "t": 0,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 1,
+          "type": "response",
+          "id": 1,
+          "outcome": "shown"
+        },
+        {
+          "t": 100,
+          "type": "compositionStart"
+        }
+      ],
+      "expect": {
+        "due": [],
+        "waitAfter": [
+          {
+            "t": 1000,
+            "waitMs": 800
+          }
+        ],
+        "counters": {
+          "useful": 0,
+          "neutral": 1
+        }
+      }
+    },
+    {
+      "name": "rate limited extends already pending instant deadline",
+      "events": [
+        {
+          "t": 0,
+          "type": "edit",
+          "kind": "typing"
+        },
+        {
+          "t": 800,
+          "type": "sent",
+          "id": 1
+        },
+        {
+          "t": 900,
+          "type": "edit",
+          "kind": "instant"
+        },
+        {
+          "t": 1000,
+          "type": "response",
+          "id": 1,
+          "outcome": "rate_limited"
+        }
+      ],
+      "expect": {
+        "due": [
+          800,
+          2000
+        ],
+        "waitAfter": [],
+        "counters": {
+          "failed": 1
+        }
+      }
+    }
+  ]
+}

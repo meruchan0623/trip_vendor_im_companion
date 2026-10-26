@@ -1,3 +1,5 @@
+import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
+import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import { access, readdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
@@ -88,6 +90,8 @@ export async function discoverBrowserProfiles(env:NodeJS.ProcessEnv=process.env,
 }
 /** Reads only the allowlisted browser storage key. Secrets remain in this main-process object. */
 export class BrowserProfileSessionService {
+  private waitBounds:OutboundWaitBounds|null=null;
+  outboundWaitBounds(){return this.waitBounds?{...this.waitBounds}:null;}
   private status:BrowserSessionStatus='connecting';
   private statusError:string|undefined;
   private setStatus(status:BrowserSessionStatus,errorCode?:string){
@@ -128,7 +132,7 @@ export class BrowserProfileSessionService {
   /** The verified bearer for the TSim operator iframe, only while `identity` is still current. */
   operatorGrant(identity:PsimIdentity):OperatorSessionGrant|null{return same(identity,this.current)&&this.token&&!this.suspended&&!this.closed?{accessToken:this.token,sessionRef:null}:null;}
   private publish(){try{this.changed(this.identity());}catch{/* subscriber cannot affect revocation */}}
-  private revoke(){this.generation++;this.verified=undefined;const hadIdentity=!!this.current;this.current=null;this.token=null;this.profile=null;for(const controller of this.active)controller.abort();this.active.clear();if(hadIdentity)this.publish();}
+  private revoke(){this.waitBounds=null;this.generation++;this.verified=undefined;const hadIdentity=!!this.current;this.current=null;this.token=null;this.profile=null;for(const controller of this.active)controller.abort();this.active.clear();if(hadIdentity)this.publish();}
   private async tokenAt(profile:BrowserProfile):Promise<string|null>{
     const value=await (this.options.readToken??((directory:string)=>readTsimToken(directory,{throwOnFailure:true})))(storage(profile));
     if(value===null)return null;
@@ -221,6 +225,7 @@ export class BrowserProfileSessionService {
           if(this.closed||this.suspended||expectedGeneration!==this.generation)return;
           const accountScope=`psim:${data.id}`,permissions=[...new Set<string>(data.permissions)].sort();
           if(this.current&&(this.current.accountScope!==accountScope||JSON.stringify(this.current.permissions)!==JSON.stringify(permissions))){this.revoke();this.token=token;this.profile={...selected};}
+          this.waitBounds=parseOutboundWaitBounds(data.outbound_wait);
           this.binding={...selected};
           const next={accountScope,permissions,authGeneration:this.generation};if(!same(next,this.current)){this.current=next;this.publish();}
           if(!this.closed&&!this.suspended&&this.current?.authGeneration===this.generation)this.verified={startedAt,generation:this.generation};
