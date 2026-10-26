@@ -21,7 +21,7 @@ const sdk=await access(localSdk).then(()=>localSdk,()=>process.env.TMC_DOTNET||'
 const buildEnv={...process.env,TMC_RUNTIME_PLATFORM:'win32',TMC_WINDOWS_DYNAMIC:'1'};delete buildEnv.TMC_WINDOWS_MANIFEST;
 run('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File','native/windows/build.ps1','-Dotnet',sdk],buildEnv);
 run(process.execPath,['node_modules/typescript/bin/tsc','--noEmit'],buildEnv);
-for(const suite of ['windows-owner-recovery','windows-lifecycle','windows-panel-recovery','windows-order','native-adapter-ready'])run(process.execPath,[`tests/run-${suite}.mjs`],buildEnv);
+for(const suite of ['windows-owner-recovery','windows-lifecycle','windows-panel-recovery','windows-order','windows-outbound-translation','native-adapter-ready'])run(process.execPath,[`tests/run-${suite}.mjs`],buildEnv);
 run(sdk,['build','tests/native-target-binding/NativeTargetBindingTests.csproj','-c','Release'],buildEnv);
 run(resolve('tests/native-target-binding/bin/Release/net10.0-windows/NativeTargetBindingTests.exe'),[String(process.pid)],{...buildEnv,DOTNET_ROOT:dirname(sdk)});
 // The in-page order window logic (session handoff, warm-frame reuse) is shared with macOS; gate the payload on it.

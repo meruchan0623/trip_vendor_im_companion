@@ -419,7 +419,9 @@ export class CompanionService {
     // Authentication may publish a newly recovered identity and revoke old reviews.
     // Complete that step before creating this translation's epoch, so a manual retry survives recovery.
     intent=this.translationIntent;const intendedWindow=this.state.targetInstanceId,expectedCustomerContext=this.verifiedCustomerContext;
-    try{await this.psim.sync();}catch(error){if(intent===this.translationIntent&&!this.closed)this.fail(error);return;}
+    // Windows reuses a successful check of the same auth generation started within OUTBOUND_SYNC_REUSE_MS
+    // (usually the 4 s background poll); an in-flight, failed or revoked check is never reused.
+    try{await this.psim.sync({reuseRecent:true});}catch(error){if(intent===this.translationIntent&&!this.closed)this.fail(error);return;}
     if(intent!==this.translationIntent||this.closed||!this.foreground||this.state.translationPaused||target!==this.state.language||intendedWindow!==this.state.targetInstanceId)return;
     const expectedEpoch=this.epoch;
     if(!await this.waitForObservation()||this.busy||expectedEpoch!==this.epoch||intent!==this.translationIntent||this.state.translationPaused||!this.foreground||target!==this.state.language)return;
