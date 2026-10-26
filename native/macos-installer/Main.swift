@@ -7,8 +7,20 @@ func loadManifest() throws -> InjectorManifest {
     guard sha(try Data(contentsOf: file)) == InstallerConfiguration.manifestSha256 else { try fail("安装清单校验失败，请重新获取安装器") }
     return try readJSON(InjectorManifest.self, file)
 }
+func loadBuilder() -> InjectionBuilder { InjectionBuilder(components: resources().appendingPathComponent("components")) }
 func loadEngine(_ target: String) throws -> InjectorEngine {
-    try InjectorEngine(manifest: loadManifest(), payload: resources().appendingPathComponent("payload.app"), target: URL(fileURLWithPath: target))
+    try InjectorEngine(manifest: loadManifest(), builder: loadBuilder(), target: URL(fileURLWithPath: target))
+}
+/// Adapts a copy of `source` into a new directory only: packaging acceptance and on-site compatibility diagnosis.
+func dryRun(_ source: String, _ output: String) throws -> String {
+    let manifest = try loadManifest(), builder = loadBuilder(), app = URL(fileURLWithPath: source).standardizedFileURL, folder = URL(fileURLWithPath: output).standardizedFileURL
+    guard folder.path.range(of: "^/(Applications|System|Library)(/|$)|^/Users/[^/]+/Applications(/|$)", options: .regularExpression) == nil, !exists(folder) else { try fail("试注入输出目录必须是新的临时目录，且不能位于应用程序目录") }
+    try builder.verifyComponents(manifest.componentsSha256)
+    guard mkdir(folder.path, 0o700) == 0 else { try fail("无法创建试注入输出目录") }
+    let built = try builder.build(from: app, into: folder.appendingPathComponent(app.lastPathComponent), expected: try treeDigest(app))
+    let report: [String: Any] = ["stage": folder.appendingPathComponent(app.lastPathComponent).path, "digest": built.digest, "version": built.vendor.version, "build": built.vendor.build,
+                                 "electron": built.vendor.electron, "chromiumMajor": built.vendor.chromiumMajor, "page": built.vendor.page, "tested": manifest.testedVendorVersions.contains(built.vendor.version)]
+    return String(decoding: try compactJSON(report), as: UTF8.self)
 }
 func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 func appleQuote(_ value: String) -> String {
@@ -57,11 +69,11 @@ final class InstallerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         log.isEditable = false; log.isSelectable = true; log.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         log.autoresizingMask = [.width]; log.textContainer?.widthTracksTextView = true; scroll.documentView = log
         body.addArrangedSubview(scroll)
-        let note = NSTextField(wrappingLabelWithString: "版本、官方签名和完整文件校验通过后才可注入。安装器保留官方原件和收据；更新与卸载会检查文件变化。官方已升级时会停止，请重新安装对应官方原版。")
+        let note = NSTextField(wrappingLabelWithString: "安装器在本机基于检测到的官方客户端（1.2.11 及以上）现场适配并注入，保留官方原件和收据。官方重新安装或更新覆盖注入后，可直接再次安装；卸载只恢复或清理安装器自己的备份。")
         note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor; body.addArrangedSubview(note)
         for view in [intro, row, controls, status, scroll, note] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        append("安装器版本：\(InstallerConfiguration.version)\n支持的官方版本：\(InstallerConfiguration.vendorVersion) / Apple Silicon Mac\n请先点击检查状态。")
+        append("安装器版本：\(InstallerConfiguration.version)\n支持的官方版本：\(InstallerConfiguration.vendorSupport) / Apple Silicon Mac\n请先点击检查状态。")
         updateButtons(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
     func append(_ value: String) { log.string += value + "\n"; log.scrollToEndOfDocument(nil) }
@@ -134,11 +146,10 @@ final class InstallerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !args.isEmpty {
             do {
                 if args == ["--verify-package"] {
-                    let manifest = try loadManifest(), payload = resources().appendingPathComponent("payload.app")
-                    guard try treeDigest(payload) == manifest.payloadSha256 else { try fail("安装载荷校验失败") }
-                    _ = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", payload.path])
+                    let manifest = try loadManifest(); try loadBuilder().verifyComponents(manifest.componentsSha256)
                     print(String(decoding: try JSONEncoder().encode(manifest), as: UTF8.self)); return
                 }
+                if args.count == 5, args[0] == "--dry-run", args[1] == "--source", args[3] == "--output" { print(try dryRun(args[2], args[4])); return }
                 guard args.count == 4, args[0] == "--engine", ["check", "install", "restore"].contains(args[1]), args[2] == "--target" else { try fail("参数无效") }
                 let engine = try loadEngine(args[3])
                 switch args[1] {

@@ -7,7 +7,9 @@ enum InstallFailure: Error, CustomStringConvertible {
     var description: String { switch self { case .message(let text): return text } }
 }
 func fail(_ text: String) throws -> Never { throw InstallFailure.message(text) }
-let injectorKind = "trip-vendor-macos-injector-v1"
+let packageKind = "trip-vendor-macos-injector-v2"
+// Receipts keep the v1 schema (new fields are optional) so earlier installations stay updatable and recoverable.
+let receiptKind = "trip-vendor-macos-injector-v1"
 let officialRequirement = "=anchor apple generic and identifier \"com.ctrip.vbooking\" and certificate leaf[subject.OU] = \"RPQ7NNQCK8\""
 let fm = FileManager.default
 func run(_ path: String, _ args: [String]) throws -> String {
@@ -21,6 +23,12 @@ func run(_ path: String, _ args: [String]) throws -> String {
     return text.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 func sha(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+func fileDigest(_ url: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
+    var hash = SHA256()
+    while let data = try handle.read(upToCount: 4 * 1024 * 1024), !data.isEmpty { hash.update(data: data) }
+    return hash.finalize().map { String(format: "%02x", $0) }.joined()
+}
 func exists(_ url: URL) -> Bool { var info = stat(); return lstat(url.path, &info) == 0 }
 func secureDirectory(_ url: URL) throws {
     var info = stat()
@@ -57,18 +65,22 @@ struct InjectorManifest: Codable {
     var version: String
     var architecture: String
     var bundleId: String
-    var vendorVersion: String
-    var officialSha256: String
-    var payloadSha256: String
+    var minimumVendorVersion: String
+    var testedVendorVersions: [String]
+    var componentsSha256: String
 }
 struct Receipt: Codable {
-    var kind: String = injectorKind
+    var kind: String = receiptKind
     var target: String
     var originalSha256: String
     var installedSha256: String
     var version: String
     var state: String
     var hadInstalled: Bool
+    var vendorVersion: String? = nil
+    var componentsSha256: String? = nil
+    /// Pending journals only: the target build this transaction moves aside. Older journals use the receipt's build.
+    var previousSha256: String? = nil
 }
 struct Inspection: Codable {
     var state: String
@@ -96,10 +108,23 @@ func syncDirectory(_ url: URL) throws {
     guard fsync(fd) == 0 else { try fail("无法同步目录：\(url.path)") }
 }
 
+/// What the target and the private store currently hold, and what installing or restoring would do.
+struct Assessment {
+    var state: String
+    var message: String
+    var receipt: Receipt? = nil
+    /// Official bundle to adapt (the target or the retained backup); nil when installation is impossible.
+    var source: URL? = nil
+    var sourceSha256: String? = nil
+    var targetSha256: String? = nil
+    /// Injector data no longer describes the target: installing clears it first, restoring only clears it.
+    var retire = false
+    var canRestore = false
+}
+
 final class InjectorEngine {
-    let manifest: InjectorManifest, payload: URL, target: URL, store: URL
-    let verifyOfficial: (URL) throws -> Void, verifyPayload: (URL) throws -> Void
-    let assertIdle: () throws -> Void, copy: (URL, URL) throws -> Void
+    let manifest: InjectorManifest, builder: InjectionBuilder, target: URL, store: URL
+    let officialSignature: (URL) -> String?, assertIdle: () throws -> Void
     var log: (String) -> Void = { print($0) }
     var receiptURL: URL { store.appendingPathComponent("receipt.json") }
     var pendingURL: URL { store.appendingPathComponent("pending.json") }
@@ -107,14 +132,12 @@ final class InjectorEngine {
     var stage: URL { store.appendingPathComponent("stage.app") }
     var previous: URL { store.appendingPathComponent("previous.app") }
 
-    init(manifest: InjectorManifest, payload: URL, target: URL,
-         verifyOfficial: ((URL) throws -> Void)? = nil,
-         verifyPayload: ((URL) throws -> Void)? = nil,
-         assertIdle: (() throws -> Void)? = nil,
-         copy: ((URL, URL) throws -> Void)? = nil) throws {
-        guard manifest.kind == injectorKind, manifest.architecture == "arm64", manifest.bundleId == "com.ctrip.vbooking",
-              !manifest.version.isEmpty, [manifest.officialSha256, manifest.payloadSha256].allSatisfy({ $0.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil }) else { try fail("安装载荷清单无效") }
-        self.manifest = manifest; self.payload = payload.standardizedFileURL; self.target = target.standardizedFileURL
+    init(manifest: InjectorManifest, builder: InjectionBuilder, target: URL,
+         officialSignature: ((URL) -> String?)? = nil,
+         assertIdle: (() throws -> Void)? = nil) throws {
+        guard manifest.kind == packageKind, manifest.architecture == "arm64", manifest.bundleId == "com.ctrip.vbooking", !manifest.version.isEmpty,
+              supportedVendorVersion(manifest.minimumVendorVersion), manifest.componentsSha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { try fail("安装包清单无效") }
+        self.manifest = manifest; self.builder = builder; self.target = target.standardizedFileURL
         #if !INSTALLER_TESTING
         guard self.target.path == "/Applications/旅游商家桌面版.app" else { try fail("本版仅支持应用程序目录的官方客户端：/Applications/旅游商家桌面版.app") }
         #endif
@@ -122,16 +145,9 @@ final class InjectorEngine {
               self.target.path == self.target.resolvingSymlinksInPath().path else { try fail("请选择真实的客户端 .app，不能使用符号链接") }
         try secureDirectory(self.target.deletingLastPathComponent())
         self.store = self.target.deletingLastPathComponent().appendingPathComponent(".tsim-injector-" + String(sha(Data(self.target.path.utf8)).prefix(20)))
-        self.verifyOfficial = verifyOfficial ?? { app in
-            try secureDirectory(app)
-            _ = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--test-requirement", officialRequirement, app.path])
-            let identity = try run("/usr/bin/plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", app.appendingPathComponent("Contents/Info.plist").path])
-            let version = try run("/usr/bin/plutil", ["-extract", "CFBundleShortVersionString", "raw", "-o", "-", app.appendingPathComponent("Contents/Info.plist").path])
-            guard identity == manifest.bundleId, version == manifest.vendorVersion, try treeDigest(app) == manifest.officialSha256 else { try fail("客户端版本或文件不兼容。仅支持本安装包验证的官方 \(manifest.vendorVersion)，请重新安装对应官方原版。") }
-        }
-        self.verifyPayload = verifyPayload ?? { app in
-            guard try treeDigest(app) == manifest.payloadSha256 else { try fail("注入载荷校验失败，请重新获取安装包") }
-            _ = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+        self.officialSignature = officialSignature ?? { app in
+            do { _ = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--test-requirement", officialRequirement, app.path]); return nil }
+            catch { return String(describing: error).split(separator: "\n").dropFirst().last.map { "官方签名校验未通过：" + $0 } ?? "官方签名校验未通过" }
         }
         self.assertIdle = assertIdle ?? {
             let listing = try run("/bin/ps", ["-axww", "-o", "pid=,comm="])
@@ -144,7 +160,6 @@ final class InjectorEngine {
                 }
             }
         }
-        self.copy = copy ?? { from, to in _ = try run("/usr/bin/ditto", [from.path, to.path]) }
     }
     func validateStore() throws {
         try secureDirectory(store)
@@ -160,47 +175,92 @@ final class InjectorEngine {
         defer { flock(fd, LOCK_UN) }
         return try action()
     }
-    func verifyReceipt(_ value: Receipt) throws {
-        guard value.kind == injectorKind, value.target == target.path, value.state == "installed",
-              value.originalSha256 == manifest.officialSha256 else { try fail("安装收据不兼容，不能覆盖或恢复此客户端") }
-        guard try treeDigest(backup) == value.originalSha256 else { try fail("官方备份已变化，已停止操作") }
-        guard try treeDigest(target) == value.installedSha256 else { try fail("客户端已被官方更新或文件已变化，已停止操作。请重新安装官方客户端。") }
+    func blocked(_ message: String) -> Assessment { Assessment(state: "blocked", message: message) }
+    /// Reports the state even when `source` cannot be adapted; installation is then disabled with the reason.
+    func adapt(_ state: String, _ lead: String, from source: URL, sourceSha256: String, targetSha256: String, receipt: Receipt? = nil) -> Assessment {
+        var result = Assessment(state: state, message: lead, receipt: receipt, targetSha256: targetSha256, canRestore: receipt != nil)
+        do {
+            let vendor = try builder.preflight(source)
+            let tested = manifest.testedVendorVersions.contains(vendor.version) ? "此安装包已验证该版本" : "此安装包未专门验证该版本，将按结构兼容规则适配"
+            result.source = source; result.sourceSha256 = sourceSha256
+            result.message = "\(lead)\n可注入的官方客户端 \(vendor.version)（Electron \(vendor.electron)，页面 \(vendor.page["aresVersion"] ?? "?")）：\(tested)。"
+        } catch { result.message = "\(lead)\n无法注入：\(error)" }
+        return result
     }
-    func inspect() throws -> Inspection {
+    func assess() throws -> Assessment {
         if exists(store) {
             try validateStore()
-            if exists(pendingURL) { return Inspection(state: "recovery", message: "上次操作中断。请完全退出客户端，点击安装 / 更新以恢复事务并重新检测。", version: manifest.version, target: target.path, canInstall: true, canRestore: true) }
-            if exists(receiptURL) {
-                let receipt = try readJSON(Receipt.self, receiptURL); try verifyReceipt(receipt)
-                return Inspection(state: "installed", message: "已安装助手 \(receipt.version)，官方原件备份完整。", version: receipt.version, target: target.path, canInstall: true, canRestore: true)
-            }
-            guard !exists(backup), !exists(previous), !exists(stage) else { try fail("存在无收据的备份或暂存文件，请保留并人工检查：\(store.path)") }
+            if exists(pendingURL) { return Assessment(state: "recovery", message: "上次操作中断。请完全退出客户端，点击安装 / 更新以恢复事务并重新检测。", canRestore: true) }
         }
-        try verifyOfficial(target)
-        return Inspection(state: "compatible", message: "官方客户端 \(manifest.vendorVersion) 的版本、签名及完整文件校验通过。", version: manifest.version, target: target.path, canInstall: true, canRestore: false)
+        guard exists(target) else { return blocked("未找到客户端：\(target.path)。请先从官方 DMG 安装旅游商家桌面版，再点击检查。") }
+        let info = try readPlist(target.appendingPathComponent("Contents/Info.plist")).value
+        guard info["CFBundleIdentifier"] as? String == manifest.bundleId else { return blocked("所选应用不是旅游商家桌面版（Bundle ID 不符）。") }
+        let injected = info["CFBundleExecutable"] as? String == launcherName, targetSha256 = try treeDigest(target)
+        if exists(store), exists(receiptURL) {
+            let receipt = try readJSON(Receipt.self, receiptURL)
+            guard receipt.kind == receiptKind, receipt.target == target.path, receipt.state == "installed" else { return blocked("安装收据不兼容，已停止。请保留并人工检查：\(store.path)") }
+            let backupIntact = exists(backup) && (try? treeDigest(backup)) == receipt.originalSha256
+            if targetSha256 == receipt.installedSha256 {
+                guard backupIntact else { return blocked("官方原件备份已变化或缺失，无法更新或卸载。请从官方 DMG 重新安装旅游商家桌面版（直接覆盖），然后点击检查。") }
+                return adapt("installed", "已安装助手 \(receipt.version)，官方原件备份完整。", from: backup, sourceSha256: receipt.originalSha256, targetSha256: targetSha256, receipt: receipt)
+            }
+            let signature = injected ? nil : officialSignature(target)
+            if !injected && (signature == nil || !backupIntact) {
+                var result = adapt("replaced", "官方客户端已覆盖之前的注入（重新安装或官方更新）\(signature.map { "；" + $0 } ?? "")。安装会基于当前客户端重新注入并更新官方原件备份；卸载只清理旧备份，不改动当前客户端。", from: target, sourceSha256: targetSha256, targetSha256: targetSha256)
+                result.retire = true; result.canRestore = true
+                return result
+            }
+            guard backupIntact else { return blocked("当前客户端与安装记录不一致，且官方原件备份已变化或缺失。请从官方 DMG 重新安装旅游商家桌面版（直接覆盖），然后点击检查。") }
+            return adapt("drifted", "当前客户端与安装记录不一致（\(signature ?? "可能来自其他版本的安装器或手动复制")）。安装会基于完整的官方原件备份重新注入；卸载会恢复该官方原版。", from: backup, sourceSha256: receipt.originalSha256, targetSha256: targetSha256, receipt: receipt)
+        }
+        if exists(store), [backup, previous, stage].contains(where: exists) {
+            guard !injected else { return blocked("存在无收据的备份或暂存文件，且客户端已被注入。请保留并人工检查：\(store.path)") }
+            var result = adapt("replaced", "发现之前遗留的助手备份文件；安装或卸载会先清理这些文件，不改动当前客户端。", from: target, sourceSha256: targetSha256, targetSha256: targetSha256)
+            result.retire = true; result.canRestore = true
+            return result
+        }
+        guard !injected else { return blocked("此客户端已被注入，但本机没有对应的官方原件备份。请从官方 DMG 重新安装旅游商家桌面版（直接覆盖），然后点击检查。") }
+        let signature = officialSignature(target)
+        return adapt("compatible", signature.map { "\($0)。仍可尝试注入；卸载时会恢复为当前这份客户端。" } ?? "官方签名校验通过。", from: target, sourceSha256: targetSha256, targetSha256: targetSha256)
+    }
+    func inspect() throws -> Inspection {
+        let result = try assess()
+        return Inspection(state: result.state, message: result.message, version: result.receipt?.version ?? manifest.version, target: target.path,
+                          canInstall: result.source != nil || result.state == "recovery", canRestore: result.canRestore)
+    }
+    /// Journaled removal of injector data that no longer describes the target. The target is never touched.
+    func retire(_ targetSha256: String) throws {
+        try atomicJSON(Receipt(target: target.path, originalSha256: targetSha256, installedSha256: targetSha256, version: manifest.version, state: "retiring", hadInstalled: false), pendingURL)
+        try finishRetire()
+    }
+    func finishRetire() throws {
+        for item in [receiptURL, backup, stage, previous] where exists(item) { try fm.removeItem(at: item) }
+        try fm.removeItem(at: pendingURL); try syncDirectory(store)
+        log("已清理旧的助手备份与收据，当前客户端未改动。")
     }
     func recover() throws {
         guard exists(pendingURL) else { return }
         let pending = try readJSON(Receipt.self, pendingURL)
-        guard pending.kind == injectorKind, pending.target == target.path, pending.originalSha256 == manifest.officialSha256,
-              ["preparing", "installing", "restoring"].contains(pending.state) else { try fail("中断事务收据不匹配") }
+        guard pending.kind == receiptKind, pending.target == target.path,
+              ["preparing", "installing", "restoring", "retiring"].contains(pending.state) else { try fail("中断事务收据不匹配，请保留并人工检查：\(store.path)") }
+        if pending.state == "retiring" {
+            guard exists(target), try treeDigest(target) == pending.originalSha256 else { try fail("中断的清理无法继续：客户端已变化，备份保留于：\(store.path)") }
+            try finishRetire(); return
+        }
         // A fully committed target may be finalized after the last rename but before receipt fsync.
         if pending.state == "installing", exists(target), try treeDigest(target) == pending.installedSha256 {
             guard try treeDigest(backup) == pending.originalSha256 else { try fail("恢复事务时原版备份校验失败") }
-            var completed = pending; completed.state = "installed"; try atomicJSON(completed, receiptURL)
+            var completed = pending; completed.state = "installed"; completed.previousSha256 = nil; try atomicJSON(completed, receiptURL)
         } else if pending.state == "restoring", exists(target), try treeDigest(target) == pending.originalSha256 {
             try? fm.removeItem(at: receiptURL)
         } else {
             let source = pending.hadInstalled ? previous : backup
+            let expected = pending.hadInstalled ? try pending.previousSha256 ?? readJSON(Receipt.self, receiptURL).installedSha256 : pending.originalSha256
             if exists(source) {
                 if exists(target) { try fail("目标变化，无法自动恢复；所有备份已保留：\(store.path)") }
-                let expected: String
-                if pending.hadInstalled { expected = try readJSON(Receipt.self, receiptURL).installedSha256 }
-                else { expected = pending.originalSha256 }
                 guard try treeDigest(source) == expected else { try fail("恢复文件校验失败，所有备份已保留") }
                 try fm.moveItem(at: source, to: target)
             } else {
-                let expected = pending.hadInstalled ? try readJSON(Receipt.self, receiptURL).installedSha256 : pending.originalSha256
                 guard exists(target), try treeDigest(target) == expected else { try fail("中断事务无法自动恢复，备份保留于：\(store.path)") }
             }
         }
@@ -210,28 +270,32 @@ final class InjectorEngine {
         log("已恢复上次中断的操作。")
     }
     func install() throws {
-        try assertIdle(); try verifyPayload(payload)
+        try assertIdle(); try builder.verifyComponents(manifest.componentsSha256)
         try withLock {
-            try recover(); let inspection = try inspect()
-            let updating = inspection.state == "installed"
-            if updating, try readJSON(Receipt.self, receiptURL).installedSha256 == manifest.payloadSha256 { log("当前已是本安装包版本，无需重复注入。"); return }
-            log("正在准备助手，保留官方原件。")
-            var receipt = Receipt(target: target.path, originalSha256: manifest.officialSha256, installedSha256: manifest.payloadSha256, version: manifest.version, state: "preparing", hadInstalled: updating)
-            try atomicJSON(receipt, pendingURL)
+            try recover(); var assessment = try assess()
+            guard let source = assessment.source, let sourceSha256 = assessment.sourceSha256, let targetSha256 = assessment.targetSha256 else { try fail(assessment.message) }
+            if assessment.state == "installed", let receipt = assessment.receipt, receipt.version == manifest.version, receipt.componentsSha256 == manifest.componentsSha256 { log("当前已是本安装包版本，无需重复注入。"); return }
+            if assessment.retire { try retire(targetSha256); assessment.receipt = nil }
+            // With a receipt the retained official backup is adapted and the current target moves aside.
+            let updating = assessment.receipt != nil
+            log(updating ? "正在基于官方原件备份重新注入助手。" : "正在基于当前官方客户端注入助手，并保留官方原件。")
+            var journal = Receipt(target: target.path, originalSha256: sourceSha256, installedSha256: "", version: manifest.version, state: "preparing", hadInstalled: updating,
+                                  componentsSha256: manifest.componentsSha256, previousSha256: updating ? targetSha256 : nil)
+            try atomicJSON(journal, pendingURL)
             do {
-                // Journal preparation too: a crash during ditto leaves a recoverable partial stage.
-                try copy(payload, stage); try verifyPayload(stage)
-                receipt.state = "installing"; try atomicJSON(receipt, pendingURL)
+                // Journal preparation too: a crash while building leaves a recoverable partial stage.
+                let built = try builder.build(from: source, into: stage, expected: sourceSha256)
+                journal.installedSha256 = built.digest; journal.vendorVersion = built.vendor.version; journal.state = "installing"; try atomicJSON(journal, pendingURL)
                 try assertIdle()
-                if updating { try verifyReceipt(try readJSON(Receipt.self, receiptURL)) } else { try verifyOfficial(target) }
+                guard try treeDigest(target) == targetSha256, try !updating || treeDigest(backup) == sourceSha256 else { try fail("客户端或官方备份在安装过程中发生变化，已停止") }
                 try fm.moveItem(at: target, to: updating ? previous : backup)
                 try fm.moveItem(at: stage, to: target)
                 try syncDirectory(target.deletingLastPathComponent()); try syncDirectory(store)
-                try verifyPayload(target)
-                var committed = receipt; committed.state = "installed"; try atomicJSON(committed, receiptURL)
+                guard try treeDigest(target) == built.digest else { try fail("安装后的客户端校验失败") }
+                var committed = journal; committed.state = "installed"; committed.previousSha256 = nil; try atomicJSON(committed, receiptURL)
                 if exists(previous) { try fm.removeItem(at: previous) }
                 try fm.removeItem(at: pendingURL); try syncDirectory(store)
-                log("安装完成。以后直接打开旅游商家桌面版，并在助手内登录 TSIM 账号。")
+                log("安装完成（官方客户端 \(built.vendor.version)）。以后直接打开旅游商家桌面版，并在助手内登录 TSIM 账号。")
             } catch {
                 // Leave every journal and backup intact when an external write prevents recovery.
                 do { try recover() } catch { log("需恢复事务：\(error)。备份保留在 \(store.path)") }
@@ -242,12 +306,15 @@ final class InjectorEngine {
     func restore() throws {
         try assertIdle()
         try withLock {
-            try recover()
-            guard exists(receiptURL) else { try fail("此客户端没有可恢复的安装收据") }
-            var receipt = try readJSON(Receipt.self, receiptURL); try verifyReceipt(receipt)
-            receipt.state = "restoring"; receipt.hadInstalled = true; try atomicJSON(receipt, pendingURL)
+            try recover(); let assessment = try assess()
+            guard assessment.canRestore, let targetSha256 = assessment.targetSha256 else { try fail(assessment.state == "compatible" ? "此客户端没有可恢复的安装收据" : assessment.message) }
+            if assessment.retire { try retire(targetSha256); return }
+            guard let receipt = assessment.receipt else { try fail("此客户端没有可恢复的安装收据") }
+            var journal = receipt; journal.state = "restoring"; journal.hadInstalled = true; journal.previousSha256 = targetSha256
+            try atomicJSON(journal, pendingURL)
             do {
-                try assertIdle(); try verifyReceipt(try readJSON(Receipt.self, receiptURL))
+                try assertIdle()
+                guard try treeDigest(target) == targetSha256, try treeDigest(backup) == receipt.originalSha256 else { try fail("客户端或官方备份在操作过程中发生变化，已停止") }
                 try fm.moveItem(at: target, to: previous); try fm.moveItem(at: backup, to: target)
                 guard try treeDigest(target) == receipt.originalSha256 else { try fail("恢复后的原版校验失败") }
                 try syncDirectory(target.deletingLastPathComponent()); try syncDirectory(store)
