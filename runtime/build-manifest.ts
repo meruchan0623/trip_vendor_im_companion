@@ -1,10 +1,13 @@
 /** Static compatibility manifests, one per vendor build; safe to bundle into an isolated renderer world. */
 import{validateWindowsPage,validateWindowsRuntimeManifest,type WindowsPageManifest,type WindowsRuntimeManifest}from'./windows-compatibility.mjs';
-import {macPageBuild,validateMacPageBuild} from './macos-page-compatibility.mjs';
+import {macPageBuild,validateMacPageBuild,macDynamicPageBuild,validateMacRuntimeManifest,type MacRuntimeManifest,type MacPageManifest} from './macos-page-compatibility.mjs';
 declare const __TMC_RUNTIME_PLATFORM__:string|undefined;
 declare const __TMC_WINDOWS_DYNAMIC__:boolean|undefined;
 declare const __TMC_MACOS_PATCHED_BUILD__:{executableSha256:string;asarSha256:string}|undefined;
+declare const __TMC_MACOS_DYNAMIC__:boolean|undefined;
 export const MACOS_PATCHED_BUILD=typeof __TMC_MACOS_PATCHED_BUILD__!=='undefined';
+/** The one-time macOS installer records the detected client in a manifest instead of a compiled-in build. */
+export const MACOS_DYNAMIC_RUNTIME=typeof __TMC_MACOS_DYNAMIC__!=='undefined'&&__TMC_MACOS_DYNAMIC__;
 export const WINDOWS_RUNTIME_BUILD = Object.freeze({
   executable: 'C:\\Program Files\\vbk-electron\\旅游商家桌面版.exe',
   executableVersion: '1.2.12.2679625', packageVersion: '1.2.12', aresVersion: '1.2.15',
@@ -50,9 +53,26 @@ export function activateMacPageBuild(build:RuntimeBuild){
   if(RUNTIME_PLATFORM!=='darwin')throw new Error('MACOS_REQUIRED');
   VERIFIED_RUNTIME_BUILD=validateMacRuntimeBuild(build);
 }
-/** Renderer checks an exact reconstruction from the same reviewed page allowlist. */
+/** Identity from the installer manifest plus a page the host probed; the executable path stays fixed. */
+export function macRuntimeBuild(manifest:MacRuntimeManifest,page:MacPageManifest,distURL:string):RuntimeBuild{
+  validateMacRuntimeManifest(manifest);
+  if(page.packageVersion!==manifest.bundledPage.packageVersion)throw new Error('INVALID_MACOS_RUNTIME_PAGE');
+  return Object.freeze({...MACOS_RUNTIME_BUILD,executableVersion:manifest.executableVersion,executableSha256:manifest.executableSha256,asarSha256:manifest.asarSha256,chromiumMajor:manifest.chromiumMajor,...macDynamicPageBuild(page,distURL)});
+}
+/** Renderer checks an exact reconstruction from the same reviewed page allowlist, or the dynamic rules. */
 export function validateMacRuntimeBuild(value:RuntimeBuild):RuntimeBuild{
   if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('INVALID_MACOS_RUNTIME_PAGE');
+  if(MACOS_DYNAMIC_RUNTIME){
+    let checked:RuntimeBuild;
+    try{
+      const document=new URL(value.documentURL),navigationRendererName=decodeURIComponent(new URL(value.navigationRendererURL).pathname).split('/').at(-1)!;
+      if(!document.pathname.endsWith('/src/pages/imPlus/index.html')||document.search||document.hash)throw new Error();
+      const page={packageVersion:value.packageVersion,aresVersion:value.aresVersion,rendererName:value.rendererName,navigationRendererName,htmlSha256:value.htmlSha256,rendererSha256:value.rendererSha256,navigationHtmlSha256:value.navigationHtmlSha256,navigationRendererSha256:value.navigationRendererSha256};
+      checked=macRuntimeBuild({schemaVersion:1,executable:value.executable,executableVersion:value.executableVersion,executableSha256:value.executableSha256,asarSha256:value.asarSha256,chromiumMajor:value.chromiumMajor,bundledPage:page},page,new URL('../../../',document).href);
+    }catch{throw new Error('INVALID_MACOS_RUNTIME_PAGE');}
+    if(Object.keys(value).length!==Object.keys(checked).length||Object.entries(checked).some(([key,entry])=>(value as unknown as Record<string,unknown>)[key]!==entry))throw new Error('INVALID_MACOS_RUNTIME_PAGE');
+    return checked;
+  }
   const pageKeys=['packageVersion','aresVersion','rendererName','htmlSha256','rendererSha256','navigationHtmlSha256','navigationRendererSha256','documentURL','rendererURL','navigationURL','navigationRendererURL'] as const;
   const page=validateMacPageBuild(Object.fromEntries(pageKeys.map(key=>[key,value[key]])));
   const checked=macRuntimePageBuild(page.aresVersion,new URL('../../../',page.documentURL).href);

@@ -5,8 +5,8 @@ import {posix} from 'node:path';
 import {fingerprintFile as hash} from './file-fingerprint';
 import {createFingerprintCache,createFileFingerprintStore,type FingerprintStore} from './fingerprint-cache';
 import {fingerprintMacExecutable} from './macho-fingerprint';
-import {MACOS_PATCHED_BUILD,MACOS_RUNTIME_BUILD,activateMacPageBuild} from './build-manifest';
-import {inspectMacPages} from './macos-pages';
+import {MACOS_PATCHED_BUILD,MACOS_DYNAMIC_RUNTIME,activateMacPageBuild} from './build-manifest';
+import {inspectMacPages,inspectMacDynamicPages} from './macos-pages';
 import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,assertBuildFingerprint,sameExecutablePath,type ProcessIdentity,type ListenerIdentity} from './identity';
 import type {LaunchPlatform,VerifiedIdleSnapshot} from './launcher';
 const execute=promisify(execFile);
@@ -78,7 +78,9 @@ let fingerprintStore:FingerprintStore|undefined;
 export function configureFingerprintPersistence(file:string){fingerprintStore=createFileFingerprintStore(file);}
 // Shared by every platform instance: each connection attempt creates one, and the vendor is still loading meanwhile.
 const sharedHash=createFingerprintCache(hash,()=>fingerprintStore,'sha256');
-const sharedExecutableHash=createFingerprintCache(MACOS_PATCHED_BUILD?fingerprintMacExecutable:hash,()=>fingerprintStore,MACOS_PATCHED_BUILD?'macho-unsigned-sha256':'sha256');
+// Injected bundles are re-signed ad hoc, so their identity excludes the embedded signature.
+const injected=MACOS_PATCHED_BUILD||MACOS_DYNAMIC_RUNTIME;
+const sharedExecutableHash=createFingerprintCache(injected?fingerprintMacExecutable:hash,()=>fingerprintStore,injected?'macho-unsigned-sha256':'sha256');
 /** Read-only process/file inspection; the client is only ever started through LaunchServices so TCC stays attributed to it. */
 export class MacLaunchPlatform implements LaunchPlatform {
   private hash=sharedHash;
@@ -95,8 +97,9 @@ export class MacLaunchPlatform implements LaunchPlatform {
     let version:string;
     try{version=(await run('/usr/bin/plutil',['-extract','CFBundleVersion','raw','-o','-',posix.join(contents,'Info.plist')],64_000)).replace(/\n$/,'');}catch{throw new Error('CLIENT_VERSION_UNAVAILABLE');}
     if(!/^[0-9A-Za-z.-]{1,64}$/.test(version))throw new Error('CLIENT_VERSION_UNAVAILABLE');
-    const [pages,executableSha256,asarSha256]=await Promise.all([inspectMacPages(),this.executableHash(exe),this.hash(posix.join(contents,'Resources','app.asar'))]);
-    if(version!==MACOS_RUNTIME_BUILD.executableVersion||executableSha256!==MACOS_RUNTIME_BUILD.executableSha256||asarSha256!==MACOS_RUNTIME_BUILD.asarSha256)throw new Error('UNVERIFIED_BUILD');
+    const [pages,executableSha256,asarSha256]=await Promise.all([MACOS_DYNAMIC_RUNTIME?inspectMacDynamicPages():inspectMacPages(),this.executableHash(exe),this.hash(posix.join(contents,'Resources','app.asar'))]);
+    // The candidate carries the compiled-in or installer-recorded client identity.
+    if(version!==pages.build.executableVersion||executableSha256!==pages.build.executableSha256||asarSha256!==pages.build.asarSha256)throw new Error('UNVERIFIED_BUILD');
     await pages.assertUnchanged();activateMacPageBuild(pages.build);
     const fingerprint={executable:exe,executableVersion:version,packageVersion:pages.build.packageVersion,aresVersion:pages.build.aresVersion,executableSha256,asarSha256,htmlSha256:pages.build.htmlSha256,rendererSha256:pages.build.rendererSha256};assertBuildFingerprint(fingerprint);
     return{verified:true,fingerprint,clientProcessIds:clients,clientMainProcessIds:main,installerProcessIds:installers};
