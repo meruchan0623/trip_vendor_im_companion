@@ -45,7 +45,7 @@ test('outbound translation reuses a successful check started within the window a
     f.world.clock=OUTBOUND_SYNC_REUSE_MS+1;
     await f.session.translate(outbound(),f.identity,live());
     assert.equal(f.checks(),2,'outside the window the translation runs its own full check');assert.equal(f.posts(),2);
-    // Callers that do not opt in (background poll, order lookup, replace/send) always run a full check.
+    // Callers that do not opt in (background poll, order lookup) always run a full check.
     await f.session.sync();assert.equal(f.checks(),3);
   }finally{f.session.dispose();}
 });
@@ -230,5 +230,50 @@ test('Windows translation runs at most one full session check, and none right af
     assert.equal(fixture.state.preview,'Hello');
     browser.world.clock=10_000;edit('你好，请问');t.mock.timers.tick(AUTO_TRANSLATE_DELAY_MS);await settle();
     assert.equal(browser.posts(),2);assert.equal(browser.checks(),2,'a stale check is repeated once, then reused by the session');
+  }finally{await service.dispose();}
+});
+
+/** Gives the attached fake editor replace/send; capture() reads back the written text until it is sent. */
+function writableEditor(fixture:any){
+  const writes:string[]=[],sent:string[]=[],read=fixture.capture;let written:string|undefined;
+  fixture.capture=async()=>written===undefined?read():captured(snapshot(written));
+  Object.assign(fixture.external,{
+    replace:async(_current:unknown,text:string,authorize:()=>Promise<()=>void>)=>{(await authorize())();written=text;writes.push(text);},
+    send:async(current:{text:string},authorize:()=>Promise<()=>void>)=>{(await authorize())();sent.push(current.text);written=undefined;}});
+  return{writes,sent};
+}
+
+test('replace and send ask for reusable checks, and an account change seen while authorizing still blocks the write',async t=>{
+  const f=await companion(t);
+  try{
+    const editor=writableEditor(f.fixture);
+    f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();reply(f.requests[0],'Hello');await settle();assert.equal(f.fixture.state.phase,'ready');
+    let before=f.syncs.length;
+    await f.service.replaceDraft(undefined,'send');
+    assert.deepEqual(editor.writes,['Hello']);assert.deepEqual(editor.sent,['Hello']);
+    assert.deepEqual(f.syncs.slice(before),[{reuseRecent:true},{reuseRecent:true},{reuseRecent:true}],'pre-write check, write and send authorizations');
+    f.edit('你好，请问');f.tick(AUTO_TRANSLATE_DELAY_MS);await settle();reply(f.requests.at(-1)!,'Hi, may I ask');await settle();assert.equal(f.fixture.state.phase,'ready');
+    const sync=f.fixture.psim.sync;let calls=0;before=f.syncs.length;
+    // The write authorization's check observes a new account (as a full check or background poll would).
+    f.fixture.psim.sync=async(options:unknown)=>{await sync(options);if(++calls===2)f.switchAccount();};
+    await f.service.replaceDraft(undefined,'send');
+    assert.deepEqual(editor.writes,['Hello'],'the write is refused');assert.deepEqual(editor.sent,['Hello']);
+    assert.equal(f.syncs.length-before,2);
+  }finally{await f.service.dispose();}
+});
+
+test('Windows replace and send reuse a recent check and repeat an expired one once',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval']});
+  const browser=browserWorld();
+  const service=new CompanionService({} as never,async()=>{},()=>{},browser.options,true),fixture=service as any;
+  try{
+    await fixture.sessionStarting;assert.equal(browser.checks(),1);
+    const edit=attachDraft(fixture),editor=writableEditor(fixture);
+    browser.world.clock=1000;t.mock.timers.tick(AUTO_TRANSLATE_DELAY_MS);await settle();assert.equal(fixture.state.preview,'Hello');
+    browser.world.clock=2000;await service.replaceDraft(undefined,'send');
+    assert.deepEqual(editor.sent,['Hello']);assert.equal(browser.checks(),1,'the pre-write check and both authorizations reuse the check started 2 s ago');
+    edit('你好，请问');browser.world.clock=2500;t.mock.timers.tick(AUTO_TRANSLATE_DELAY_MS);await settle();assert.equal(fixture.state.preview,'Hello');
+    browser.world.clock=OUTBOUND_SYNC_REUSE_MS+1;await service.replaceDraft(undefined,'send');
+    assert.deepEqual(editor.sent,['Hello','Hello']);assert.equal(browser.checks(),2,'an expired check runs once, then both authorizations reuse it');
   }finally{await service.dispose();}
 });

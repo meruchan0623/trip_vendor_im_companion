@@ -34,6 +34,11 @@ export interface BrowserProfileSessionOptions {
  * The reused check must belong to the current auth generation; failed, revoked or in-flight checks are never
  * reused. Server 401/423, the post-response token re-read and the authGeneration comparisons still run on
  * every request.
+ *
+ * CompanionService.replaceDraft() uses the same window for its check before writing the reviewed translation
+ * and for each write/send authorization. Writes make no TSim request, so there is no post-response token
+ * re-read: a browser account switch inside the window is caught by the identity comparisons only once a
+ * check (background poll or an expired window) has observed it.
  */
 export const OUTBOUND_SYNC_REUSE_MS=3000;
 export interface SessionSyncOptions {

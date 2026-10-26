@@ -552,11 +552,13 @@ export class CompanionService {
     if(!this.reviewed||!this.foreground||shortcutSnapshot&&(this.reviewed!==shortcutReview||!allowed()||this.state.translationPaused||this.state.phase!=='ready')){this.setBusy(false);return;}
     const reviewed=this.reviewed,epoch=this.epoch;this.stopTimer();this.state.error=null;this.state.phase='replacing';this.publish();
     try{
-      await this.psim.sync();
+      // Like translation, writing and sending reuse a successful check of the same auth generation started
+      // within OUTBOUND_SYNC_REUSE_MS (Windows); the identity comparisons below still run before every write.
+      await this.psim.sync({reuseRecent:true});
       const auth=this.psim.identity();if(!auth||auth.authGeneration!==reviewed.identity.authGeneration||auth.accountScope!==reviewed.identity.accountScope)throw new Error('AUTH_CHANGED');
       const current=await this.capture();if(!this.foreground||epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(!same(current,reviewed.capture)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
       const authorize=async()=>{
-        await this.psim.sync();
+        await this.psim.sync({reuseRecent:true});
         const assertCurrent=()=>{const latest=this.psim.identity();
           if(this.closed||!this.foreground||shortcutSnapshot&&(!allowed()||this.state.translationPaused)||epoch!==this.epoch||this.external?.targetInstanceId!==this.state.targetInstanceId||!latest||latest.authGeneration!==reviewed.identity.authGeneration||latest.accountScope!==reviewed.identity.accountScope)throw new Error('AUTH_CHANGED');
         };
