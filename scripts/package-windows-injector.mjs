@@ -7,7 +7,7 @@ import {sha256} from './lib/mac-pkg-asar.mjs';
 import {copyWindowsHelperPayload,WINDOWS_PAYLOAD_ZIP_OPTIONS} from './lib/windows-payload-profile.mjs';
 import {compressWindowsPayload} from './lib/windows-payload-archive.mjs';
 const require=createRequire(import.meta.url);
-const installerVersion='0.5.35';
+const installerVersion='0.5.38';
 if(process.platform!=='win32'||process.arch!=='x64')throw new Error('WINDOWS_X64_BUILD_HOST_REQUIRED');
 const work=resolve('work/windows-inject');
 await mkdir(work,{recursive:true});
@@ -21,8 +21,9 @@ const sdk=await access(localSdk).then(()=>localSdk,()=>process.env.TMC_DOTNET||'
 const buildEnv={...process.env,TMC_RUNTIME_PLATFORM:'win32',TMC_WINDOWS_DYNAMIC:'1',TMC_INJECTOR_VERSION:installerVersion};delete buildEnv.TMC_WINDOWS_MANIFEST;
 run('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File','native/windows/build.ps1','-Dotnet',sdk],buildEnv);
 run(process.execPath,['node_modules/typescript/bin/tsc','--noEmit'],buildEnv);
-for(const suite of ['outbound-wait-controller','windows-owner-recovery','windows-lifecycle','windows-panel-recovery','windows-order','windows-outbound-translation','native-adapter-ready','transport-recovery','native-recovery','runtime-diagnostics','windows-bootstrap-diagnostics','translation-http-telemetry','translation-service-telemetry','telemetry-log-viewer'])run(process.execPath,[`tests/run-${suite}.mjs`],buildEnv);
+for(const suite of ['outbound-wait-controller','windows-owner-recovery','windows-lifecycle','windows-panel-recovery','windows-order','windows-outbound-translation','native-adapter-ready','transport-recovery','native-recovery','runtime-diagnostics','windows-bootstrap-diagnostics','translation-http-telemetry','translation-service-telemetry','telemetry-log-viewer','vendor-window-defaults','order-summary'])run(process.execPath,[`tests/run-${suite}.mjs`],buildEnv);
 run(sdk,['build','tests/native-target-binding/NativeTargetBindingTests.csproj','-c','Release'],buildEnv);
+run(sdk,['run','--project','tests/installer-process-exit/InstallerProcessExitTests.csproj','-c','Release'],buildEnv);
 run(resolve('tests/native-target-binding/bin/Release/net10.0-windows/NativeTargetBindingTests.exe'),[String(process.pid)],{...buildEnv,DOTNET_ROOT:dirname(sdk)});
 // The in-page order window logic (session handoff, warm-frame reuse) is shared with macOS; gate the payload on it.
 run(process.execPath,['tests/run-operator-overlay.mjs'],buildEnv);
