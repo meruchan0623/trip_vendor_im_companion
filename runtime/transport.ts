@@ -1,4 +1,4 @@
-import {get} from 'node:http';
+import {get,type ClientRequest,type IncomingMessage} from 'node:http';
 import {VERIFIED_RUNTIME_BUILD} from './build-manifest';
 import type {CDPTransport} from './cdp-policy';
 export interface CDPEvent {method:string;params:Record<string,unknown>;sessionId?:string}
@@ -41,8 +41,35 @@ export class LoopbackCDPTransport implements EventCDPTransport {
   async disconnect(){this.fail();}
 }
 function versionJSON(port:number):Promise<unknown>{return new Promise((resolve,reject)=>{
-  const request=get({hostname:'127.0.0.1',port,path:'/json/version',timeout:4000},response=>{if(response.statusCode!==200){response.resume();reject(new Error('DEBUG_ENDPOINT_UNAVAILABLE'));return;}let body='';response.setEncoding('utf8');response.on('data',part=>{body+=part;if(body.length>16000){request.destroy();reject(new Error('DEBUG_ENDPOINT_INVALID'));}});response.on('end',()=>{try{resolve(JSON.parse(body));}catch{reject(new Error('DEBUG_ENDPOINT_INVALID'));}});});
-  request.on('timeout',()=>request.destroy(new Error('DEBUG_ENDPOINT_TIMEOUT')));request.on('error',()=>reject(new Error('DEBUG_ENDPOINT_UNAVAILABLE')));
+  let request:ClientRequest|undefined,response:IncomingMessage|undefined,settled=false,size=0;
+  const chunks:Buffer[]=[];
+  // Socket inactivity timeouts reset on each chunk; discovery needs a total deadline.
+  const timer=setTimeout(()=>finish(new Error('DEBUG_ENDPOINT_TIMEOUT')),4000);
+  const unavailable=()=>finish(new Error('DEBUG_ENDPOINT_UNAVAILABLE'));
+  const closed=()=>unavailable();
+  const data=(part:Buffer)=>{size+=part.length;if(size>16000)finish(new Error('DEBUG_ENDPOINT_INVALID'));else chunks.push(part);};
+  const end=()=>{try{const value:unknown=JSON.parse(Buffer.concat(chunks).toString('utf8'));finish(undefined,value);}catch{finish(new Error('DEBUG_ENDPOINT_INVALID'));}};
+  function finish(error?:Error,value?:unknown){
+    if(settled)return;settled=true;clearTimeout(timer);
+    request?.removeListener('error',unavailable);
+    response?.removeListener('data',data);response?.removeListener('end',end);
+    response?.removeListener('aborted',unavailable);response?.removeListener('error',unavailable);response?.removeListener('close',closed);
+    if(error){
+      // Destruction can deliver an already queued I/O error after cleanup.
+      request?.once('error',()=>{});response?.once('error',()=>{});
+      response?.destroy();request?.destroy();reject(error);
+    }else resolve(value);
+  }
+  try{
+    request=get({hostname:'127.0.0.1',port,path:'/json/version',agent:false},incoming=>{
+      response=incoming;
+      if(settled){incoming.on('error',()=>{});incoming.destroy();return;}
+      response.on('error',unavailable);response.on('aborted',unavailable);response.on('close',closed);
+      if(response.statusCode!==200){unavailable();return;}
+      response.on('data',data);response.on('end',end);
+    });
+    request.on('error',unavailable);
+  }catch{unavailable();}
 });}
 export function approvedSocketURL(value:unknown,port:number):value is string{if(typeof value!=='string')return false;try{const url=new URL(value);return url.protocol==='ws:'&&url.hostname==='127.0.0.1'&&Number(url.port)===port&&!url.username&&!url.password&&!url.search&&!url.hash&&/^\/devtools\/browser\/[a-z0-9-]+$/i.test(url.pathname);}catch{return false;}}
 /** The owning process/listener is checked before discovery, before socket open and after open. */
