@@ -452,9 +452,37 @@ function installBootstrap({app, spawn, createServer = require('node:net').create
   app.whenReady().then(launchHelper).catch(() => {});
   return {port, progressPipe: progress ? progressPipe : undefined, stage: () => stage};
 }
-module.exports = {installBootstrap, companionLoadingIndicator, loadingView, sanitizeTelemetry, sanitizeDiagnostic, MAX_PROGRESS_LINE, MAX_DIAGNOSTICS, LOADING_WORLD_ID};
+// Startup preference, kept identical in macos-vendor-bootstrap.cjs: each vendor main window opens
+// maximized once. Only its construction title identifies it; a later restore or resize is the user's.
+// No show/hide/close, BrowserView or throttling behaviour of the official window is changed.
+const VENDOR_MAIN_WINDOW_TITLE = 'Main window';
+function maximizeMainWindowOnOpen(app, {defer = setImmediate} = {}) {
+  const created = (_event, win) => {
+    let title;
+    try { title = win.getTitle(); } catch { return; }
+    if (title !== VENDOR_MAIN_WINDOW_TITLE) return;
+    const maximize = () => {
+      try {
+        if (win.isDestroyed() || win.isMaximized() || win.isFullScreen() || win.isMinimized() || !win.isMaximizable() || !win.isResizable()) return;
+        win.maximize();
+      } catch { /* A window preference never blocks the vendor. */ }
+    };
+    // Run after the vendor's constructor block so its resize listener sizes the attached BrowserView.
+    defer(() => {
+      try {
+        if (win.isDestroyed()) return;
+        // maximize() also shows a hidden window; a background start waits for the vendor's own first show.
+        if (win.isVisible()) maximize(); else win.once('show', maximize);
+      } catch { /* Same as above. */ }
+    });
+  };
+  app.on('browser-window-created', created);
+  return () => app.removeListener('browser-window-created', created);
+}
+module.exports = {installBootstrap, maximizeMainWindowOnOpen, companionLoadingIndicator, loadingView, sanitizeTelemetry, sanitizeDiagnostic, MAX_PROGRESS_LINE, MAX_DIAGNOSTICS, LOADING_WORLD_ID};
 if (process.versions.electron && process.type === 'browser') {
   const {app} = require('electron');
+  maximizeMainWindowOnOpen(app);
   installBootstrap({app, spawn:require('node:child_process').spawn});
   const config = require('./companion-vendor-original-main.json');
   if (!config || typeof config.main !== 'string' || !config.main || path.isAbsolute(config.main) || config.main.split(/[\\/]/).includes('..')) throw new Error('INVALID_VENDOR_ORIGINAL_MAIN');
