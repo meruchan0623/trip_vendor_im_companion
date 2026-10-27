@@ -14,6 +14,8 @@ import type {TranslationOptionsStore} from './translation-options-store';
 import type {BrowserProfile} from './browser-profile-session';
 import type {OperatorSelection} from './system-browser';
 import {reportVendorProgress} from './vendor-progress';
+import type {RuntimeLogEntry} from './runtime-diagnostics';
+import {createTelemetry,runWithTelemetry,currentTelemetry,setTelemetry,timeTelemetry,finishTelemetry,type TelemetryTrace} from './translation-telemetry';
 
 type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;currentOrderHint?:StandaloneState['currentOrderHint'];orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
@@ -87,8 +89,13 @@ export class CompanionService {
   private stopInvalidation?:()=>void;
   private embeddedPublishing=false;
   private embeddedDirty=false;
+  private embeddedPublication:Promise<void>=Promise.resolve();
+  private previewAcknowledgements=new WeakMap<object,number>();
+  private previewTelemetry=new WeakMap<TelemetryTrace,{review:object;publishedAt:number}>();
+  private telemetrySignals=new WeakMap<TelemetryTrace,AbortSignal>();
   private nextConnectAt=0;
   private connectionEpoch=0;
+  private connectionAttempts=0;
   private connectionAbort?:AbortController;
   /** The connection whose verified socket is waiting for the vendor IM page; that wait is not busy. */
   private waitingConnection?:AbortController;
@@ -109,7 +116,7 @@ export class CompanionService {
     if(!collecting){this.customerResolutionTimer=undefined;return;}
     this.customerResolutionTimer=setTimeout(()=>{this.customerResolutionTimer=undefined;if(this.closed||generation!==this.customerResolutionGeneration||this.state.customerLanguageResolution?.status!=='collecting')return;this.state.customerLanguageResolution=unavailableCustomerLanguage();if(this.state.followCustomerLanguage!==false){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();},CUSTOMER_LANGUAGE_RESOLUTION_TIMEOUT_MS);
   }
-  private contextChanged(){this.invalidate();this.state.currentOrderHint=null;this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
+  private contextChanged(){this.contextRevision++;this.inputObservedAt=undefined;this.inputDueAt=undefined;this.inputDeferredAt=undefined;this.inputDeferredMs=0;this.invalidate();this.state.currentOrderHint=null;this.lastWritten=undefined;this.clearPendingSend();this.resetCustomerLanguage();this.clearOrder();this.onContextChanged();}
   // Both platforms show the TSim operator inside the merchant page; the host only grants its session.
   private embeddedState(){return {...embeddedPanelState(this.getState(),this.captured?.source==='verified-editor'?this.context():null),...(this.loginPopover?{loginPopover:{...this.loginPopover}}:{})};}
   private retireComposer(composer:ExternalComposer){
@@ -133,7 +140,7 @@ export class CompanionService {
   }
   private publishEmbedded(){
     this.embeddedDirty=true;if(this.embeddedPublishing)return;this.embeddedPublishing=true;
-    void(async()=>{try{while(this.embeddedDirty&&!this.closed){this.embeddedDirty=false;const external=this.external;if(external?.updateWorkbench)try{await external.updateWorkbench(this.embeddedState());}catch{this.retireComposer(external);}}}finally{this.embeddedPublishing=false;}})();
+    this.embeddedPublication=(async()=>{try{while(this.embeddedDirty&&!this.closed){this.embeddedDirty=false;const external=this.external,review=this.reviewed,next=this.embeddedState();if(external?.updateWorkbench)try{const previewUpdated=await external.updateWorkbench(next);if(previewUpdated===true&&review&&next.preview===review.text&&!this.previewAcknowledgements.has(review))this.previewAcknowledgements.set(review,performance.now());}catch{this.retireComposer(external);}}}finally{this.embeddedPublishing=false;}})();
   }
   private interactionRefresh=false;
   private interactionTask?:Promise<void>;
@@ -148,6 +155,7 @@ export class CompanionService {
     if(event.type==='replace-shortcut'){if(this.state.shortcutEnabled!==false&&this.state.phase==='ready'&&!this.state.translationPaused&&this.state.auth==='ready'&&this.foreground&&this.reviewed?.capture.source==='verified-editor'&&sameVerifiedDraft(this.reviewed.capture.snapshot,event.snapshot))void this.replaceDraft(event.snapshot);return;}
     if(event.type==='send-shortcut'){if(event.sendGeneration===this.nativeSendGeneration)void this.sendShortcut(event.snapshot);return;}
     if(event.type!=='draft-changed')return;
+    this.markInput('native-event');this.inputEventPending=true;
     // Revoke immediately, before CDP reads or the 500 ms safety observation can finish.
     // The notice carries no content, so it is handled as a revision of the same draft: a request already
     // handed to the session may finish. The settle read below classifies the edit; adopt() aborts that
@@ -167,7 +175,7 @@ export class CompanionService {
   private verifiedContext?:string;
   private verifiedCustomerContext?:string;
   private sessionIdentity?:string;
-  private reviewed?:{capture:Captured;identity:PsimIdentity;text:string};
+  private reviewed?:{capture:Captured;identity:PsimIdentity;text:string;telemetryId?:string};
   /** The draft the user pressed Enter on in send mode, waiting for its translation. */
   private pendingSend?:{snapshot:VerifiedComposerSnapshot;generation:number};
   /** A revoked Enter stays revoked even if focus or send mode returns during an await. */
@@ -238,11 +246,12 @@ export class CompanionService {
     if(immediate&&this.pendingSend&&(this.translationPreparing||this.waitController.snapshot().inFlightId!==null))this.manualPending={signature:this.signature(),target:this.state.language,intent:this.translationIntent,sendGeneration:this.pendingSend.generation};
     if(immediate&&!this.waitController.snapshot().inFlightId&&!this.translationPreparing&&!(this.captured?.source==='verified-editor'&&this.captured.snapshot.composing)){this.waitController.cancel();this.translateDue();return;}
     if(!this.waitController.snapshot().pending)this.waitController.onEdit('typing');
+    this.inputDueAt=this.waitController.snapshot().dueAt??undefined;
   }
   private translateDue(){
     if(!this.canSchedule()||this.signature()===this.attempted||this.signature()===this.suppressed)return;
     if(this.captured?.source==='verified-editor'&&this.captured.snapshot.composing)return;
-    if(this.busy||this.externalConnecting||this.translationPreparing){this.waitController.onEdit('typing');return;}
+    if(this.busy||this.externalConnecting||this.translationPreparing){this.waitController.onEdit('typing');this.inputDueAt=this.waitController.snapshot().dueAt??undefined;return;}
     const key=this.signature();this.attempted=key;void this.translate(this.state.language,key);
   }
   async setTranslationOptions(options:{fallbackTarget?:PanelTarget;language?:PanelTarget;autoTranslate?:boolean;shortcutEnabled?:boolean;outboundMode?:OutboundMode}){
@@ -272,7 +281,24 @@ export class CompanionService {
   private sessionError:string|null=null;
   private sourceFailure=false;
   private surfaceMeasurementRevision=0;
-  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort,private outboundWaitStore?:OutboundWaitStore){
+  private inputRevision=0;
+  private contextRevision=0;
+  private inputObservedAt:number|undefined;
+  private inputTimingSource:'native-event'|'capture'|'manual'='capture';
+  private inputEventPending=false;
+  private inputDueAt:number|undefined;
+  private inputDeferredAt:number|undefined;
+  private inputDeferredMs=0;
+  private markInput(source:'native-event'|'capture'){
+    this.inputRevision++;this.inputObservedAt=performance.now();this.inputTimingSource=source;
+    this.inputDeferredAt=this.waitController.snapshot().inFlightId!==null?this.inputObservedAt:undefined;this.inputDeferredMs=0;
+  }
+  private telemetryFailure(error:unknown){
+    const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';
+    const reason=/AUTH_CHANGED/.test(code)?'auth-changed':/LOGIN|HTTP_401|HTTP_423/.test(code)?'login-required':/PERMISSION|HTTP_403/.test(code)?'permission-required':/TIMEOUT/.test(code)?'timeout':/429|RATE_LIMITED/.test(code)?'rate-limited':/ABORT|SUPERSEDED/.test(code)?'aborted':/DRAFT_CHANGED/.test(code)?'draft-changed':/READBACK|ECHO|INVALID.*RESPONSE/.test(code)?'invalid-response':'request-failed';
+    setTelemetry({code,reason,outcome:reason==='rate-limited'?'rate-limited':reason==='aborted'?'cancelled':'failed'});
+  }
+  constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort,private outboundWaitStore?:OutboundWaitStore,private runtimeLogs:()=>RuntimeLogEntry[]=()=>[]){
     this.switchWaitScope(null);
     this.state.sessionMode=process.platform==='darwin'?'owned':'browser';
     this.translationOptionsStarting=(translationOptionsStore?.load()??Promise.resolve({fallbackTarget:'en' as const})).then(options=>{if(this.closed)return;const previous=this.automaticTarget();this.state.fallbackTarget=options.fallbackTarget;if(this.state.followCustomerLanguage!==false&&previous!==this.automaticTarget()){this.invalidateLanguage();this.applyAutomaticTarget();this.schedule();}this.publish();}).catch(error=>{if(!this.closed)this.fail(error);});
@@ -309,6 +335,8 @@ export class CompanionService {
   }
   getState(){const state=structuredClone(this.state);if(state.auth==='failed'&&this.sessionError)state.error=this.sessionError;return state;}
   getOrderStatus(){return this.order.status;}
+  getRuntimeLogs(){return this.runtimeLogs().slice(-1000);}
+  getRuntimeHealth(){return{connectionEpoch:this.connectionEpoch,reconnectCount:Math.max(0,this.connectionAttempts-1)};}
   getSurfaceMeasurementRevision(){return this.surfaceMeasurementRevision;}
   getBrowserProfile(){return this.psim.getBrowserProfile();}
   async refreshSession(){await this.psim.sync();}
@@ -337,7 +365,7 @@ export class CompanionService {
   private reviseDraft(){
     const outbound=this.outbound;
     if(outbound&&this.request===outbound.request){this.abortSuperseded();this.superseded=outbound.request;this.request=undefined;outbound.revision.abort();}
-    this.revokeTranslation(false);this.waitController.onEdit('typing');
+    this.revokeTranslation(false);this.waitController.onEdit('typing');this.inputDueAt=this.waitController.snapshot().dueAt??undefined;
   }
   private abortSuperseded(){const superseded=this.superseded;this.superseded=undefined;superseded?.abort();}
   private revokeTranslation(cancelWait=true){this.verifiedAt=undefined;if(cancelWait)this.stopTimer();this.epoch++;this.request?.abort();this.request=undefined;this.reviewed=undefined;this.state.preview=null;if(this.state.phase==='ready'||this.state.phase==='translating'||this.state.phase==='waiting')this.state.phase='stale';}
@@ -358,7 +386,7 @@ export class CompanionService {
     else if(!keepFailure){this.state.phase='idle';this.state.error=null;}
     this.publish();
   }
-  private fail(error:unknown,sourceFailure=false){const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
+  private fail(error:unknown,sourceFailure=false){this.telemetryFailure(error);const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){
@@ -394,6 +422,7 @@ export class CompanionService {
       this.verifiedCustomerContext=customerContext;this.verifiedContext=context;
     }
     const changed=!this.captured||JSON.stringify(this.captured.snapshot)!==JSON.stringify(capture.snapshot)||this.captured.source!==capture.source;
+    if(changed&&this.captured?.snapshot.text!==capture.snapshot.text){if(!this.inputEventPending||this.inputObservedAt===undefined)this.markInput('capture');this.inputEventPending=false;}
     if(invalidateChanged&&this.captured&&changed){if(this.revisesDraft(this.captured,capture))this.reviseDraft();else this.invalidate();this.attempted=undefined;}
     if(this.pausedContext!==undefined&&this.pausedContext!==this.customerContext(capture)){this.pausedContext=undefined;this.state.translationPaused=false;}
     if(changed&&this.suppressed!==this.signature(capture))this.suppressed=undefined;
@@ -441,6 +470,7 @@ export class CompanionService {
     const current=()=>!this.closed&&this.connectingAttempt===attempt&&id===this.state.targetInstanceId;
     const operation=(async()=>{
       if(!await this.waitForObservation()||!current()||this.busy)return;
+      this.connectionAttempts++;
       const warm=this.reconnecting;const connectionAbort=warm&&!warm.controller.signal.aborted?warm.controller:new AbortController();if(!warm)this.connectionAbort?.abort();this.connectionAbort=connectionAbort;
       this.invalidate();const epoch=this.connectionEpoch;this.state.error=null;this.state.phase='reading';this.publish();
       const previous=this.external;this.retireInteractions();this.external=undefined;await previous?.close().catch(()=>{});
@@ -489,6 +519,43 @@ export class CompanionService {
     }
   }
   private async runTranslation(target:PanelTarget,automaticSignature?:string){
+    const begun=performance.now(),observedAt=automaticSignature?this.inputObservedAt:begun;
+    const revision=this.inputRevision,contextRevision=this.contextRevision,targetId=this.state.targetInstanceId;
+    const startIdentity=this.psim.identity(),startSignature=this.signature();
+    const trace=createTelemetry('translate',{trigger:this.pendingSend?'enter':automaticSignature?'automatic':'manual',
+      sourceLanguage:'zh',targetLanguage:target,targetSource:this.state.followCustomerLanguage===false?'manual':this.state.customerLanguageResolution?.status==='fallback'?'fallback':this.automaticTarget()?'recognized':'unavailable',
+      sourceChars:this.captured?.snapshot.text.length,configuredWaitMs:this.waitController.snapshot().effectiveWaitMs,
+      actualWaitMs:observedAt===undefined?undefined:Math.max(0,begun-observedAt),
+      schedulerDelayMs:automaticSignature&&this.inputDueAt!==undefined?Math.max(0,begun-this.inputDueAt):undefined,
+      inFlightWaitMs:this.inputDeferredMs,inputTimingSource:automaticSignature?this.inputTimingSource:'manual',
+      inputRevision:revision,contextRevision,sessionMode:this.state.sessionMode,authStateBefore:this.state.auth,
+      foreground:this.foreground,composing:this.captured?.source==='verified-editor'&&this.captured.snapshot.composing,
+      plainText:this.captured?.source==='verified-editor'&&this.captured.snapshot.isPlainText,attempt:1,outcome:'skipped'});
+    return runWithTelemetry(trace,async()=>{
+      try{await this.performTranslation(target,automaticSignature);}
+      catch(error){this.telemetryFailure(error);throw error;}
+      finally{
+        const reason=()=>this.closed?'closed':targetId!==this.state.targetInstanceId||contextRevision!==this.contextRevision?'context-changed':startIdentity&&this.psim.identity()?.authGeneration!==startIdentity.authGeneration?'auth-changed':revision!==this.inputRevision||startSignature!==this.signature()?'draft-changed':!this.foreground?'not-foreground':this.state.translationPaused?'paused':this.state.auth!=='ready'?'login-required':!this.captured?.snapshot.text.trim()?'empty-draft':this.captured?.source==='verified-editor'&&this.captured.snapshot.composing?'composing':'not-ready';
+        const fields={authStateAfter:this.state.auth};
+        const stopped=()=>['paused','not-foreground','closed','context-changed','auth-changed','empty-draft'].includes(reason())||!!this.telemetrySignals.get(trace)?.aborted&&reason()!=='draft-changed';
+        const outcome=trace.fields.outcome==='skipped'&&trace.fields.translationSent?(stopped()?'cancelled':'superseded'):String(trace.fields.outcome??'skipped');
+        if(outcome==='shown'){
+          const preview=this.previewTelemetry.get(trace),review=preview?.review,publication=this.embeddedPublication,publishedAt=preview?.publishedAt??performance.now();
+          // Observe the owned DOM acknowledgement without delaying business operations or Enter.
+          let timer:ReturnType<typeof setTimeout>|undefined;
+          void Promise.race([publication.then(()=>true,()=>false),new Promise<boolean>(resolve=>{timer=setTimeout(()=>resolve(false),5000);timer.unref?.();})]).then(ack=>{
+            clearTimeout(timer);const ackAt=review?this.previewAcknowledgements.get(review):undefined,displayed=ackAt!==undefined;
+            const stale=!review||this.reviewed!==review;
+            finishTelemetry(trace,displayed?'shown':stale?(stopped()?'cancelled':'superseded'):'success',{...fields,previewShown:displayed,
+              reason:displayed?undefined:stale?reason():'unavailable',previewPublishMs:displayed?Math.max(0,ackAt-publishedAt):undefined,
+              userWaitMs:displayed&&observedAt!==undefined?Math.max(0,ackAt-observedAt):undefined,
+              responseToPreviewMs:displayed&&typeof trace.fields.responseToPreviewMs==='number'?trace.fields.responseToPreviewMs+Math.max(0,ackAt-publishedAt):undefined},ackAt);
+          });
+        }else finishTelemetry(trace,outcome,{...fields,reason:trace.fields.reason??reason(),previewShown:false});
+      }
+    });
+  }
+  private async performTranslation(target:PanelTarget,automaticSignature?:string){
     if(!isPanelTarget(target)){this.fail(new Error('INVALID_LANGUAGE'));return;}
     let intent=this.translationIntent;
     await this.sessionStarting;
@@ -507,11 +574,12 @@ export class CompanionService {
     if(!await this.waitForObservation()||this.busy||expectedEpoch!==this.epoch||intent!==this.translationIntent||this.state.translationPaused||!this.foreground||target!==this.state.language)return;
     this.invalidate();this.state.error=null;this.state.phase='translating';this.setBusy(true);this.publish();
     const epoch=this.epoch,request=new AbortController();this.request=request;
+    const telemetry=currentTelemetry();if(telemetry)this.telemetrySignals.set(telemetry,request.signal);
     const expectedContext=this.context();
     let capture:Captured,identity:PsimIdentity;
     try{
       const currentIdentity=this.psim.identity();if(!currentIdentity)throw new Error('PSIM_LOGIN_REQUIRED');identity=currentIdentity;
-      try{capture=await this.capture();}catch(error){if(epoch===this.epoch)this.fail(error,true);return;}
+      try{capture=await timeTelemetry('captureBeforeMs',()=>this.capture());}catch(error){if(epoch===this.epoch)this.fail(error,true);return;}
       if(epoch!==this.epoch||!this.foreground)return;
       if(expectedContext&&expectedContext!==this.context(capture)||expectedCustomerContext!==undefined&&expectedCustomerContext!==this.customerContext(capture)){this.adopt(capture);this.publish();return;}
       if(capture.source==='verified-editor'&&!capture.snapshot.isPlainText){this.adopt(capture,false);throw new Error('WRITE_UNAVAILABLE');}
@@ -521,6 +589,7 @@ export class CompanionService {
       if(epoch!==this.epoch||intent!==this.translationIntent||target!==this.state.language){this.publish();return;}
       if(automaticSignature&&automaticSignature!==this.signature()){this.schedule();this.publish();return;}
       this.attempted=this.signature();
+      setTelemetry({sourceChars:capture.snapshot.text.length,plainText:capture.source==='verified-editor'&&capture.snapshot.isPlainText,composing:capture.source==='verified-editor'&&capture.snapshot.composing,authGeneration:identity.authGeneration});
     }catch(error){if(epoch===this.epoch)this.fail(error);return;}
     finally{this.setBusy(false);}
     const controller=this.waitController,id=++this.outboundSeq;let outcome:'shown'|'superseded'|'failed'|'cancelled'|'rate_limited'='superseded';
@@ -529,19 +598,20 @@ export class CompanionService {
       const revision=new AbortController();this.outbound={request,revision};
       controller.onRequestSent(id);
       const result=await this.psim.translate({text:capture.snapshot.text,target_lang:target,source_lang:'zh',purpose:'outbound',draft_request_id:randomUUID(),composer_content_version:version},identity,request.signal,revision.signal);
+      const responseAt=currentTelemetry()?.httpCompletedAt??performance.now();setTelemetry({targetChars:result.data.translated_text.length});
       if(this.outbound?.request===request)this.outbound=undefined;
       if(this.closed||epoch!==this.epoch||!await this.waitForObservation()||epoch!==this.epoch)return;
-      await this.acquireEditor();
+      await timeTelemetry('editorLockMs',()=>this.acquireEditor());
       try{
         if(this.closed||epoch!==this.epoch)return;
-        const after=await this.capture();
+        const after=await timeTelemetry('captureAfterMs',()=>this.capture());
         if(this.closed||epoch!==this.epoch)return;
         if(!same(capture,after)){this.adopt(after);this.publish();return;}
         if(!result.data.translated_text.trim())throw new Error('EMPTY_TRANSLATION');
-        this.reviewed={capture,identity,text:result.data.translated_text};this.state.preview=result.data.translated_text;this.state.phase='ready';outcome='shown';controller.onResponse(id,outcome);this.publish();
+        this.reviewed={capture,identity,text:result.data.translated_text,telemetryId:currentTelemetry()?.fields.traceId as string|undefined};this.state.preview=result.data.translated_text;this.state.phase='ready';outcome='shown';controller.onResponse(id,outcome);setTelemetry({outcome:'shown',readbackMatched:true,responseToPreviewMs:performance.now()-responseAt});const trace=currentTelemetry();if(trace)this.previewTelemetry.set(trace,{review:this.reviewed,publishedAt:performance.now()});this.publish();
       }finally{this.setBusy(false);}
       void this.flushPendingSend();
-    }catch(error){const code=error instanceof Error?error.message:'';outcome=request.signal.aborted?'cancelled':code==='RATE_LIMITED'||code==='PSIM_HTTP_429'?'rate_limited':code==='REQUEST_ABORTED'?'cancelled':code==='REQUEST_SUPERSEDED'?'superseded':'failed';if(epoch===this.epoch)this.fail(error);}finally{if(this.request===request)this.request=undefined;if(this.outbound?.request===request)this.outbound=undefined;if(this.superseded===request)this.superseded=undefined;if(outcome!=='shown')controller.onResponse(id,request.signal.aborted?'cancelled':outcome);}
+    }catch(error){const code=error instanceof Error?error.message:'';outcome=request.signal.aborted?'cancelled':code==='RATE_LIMITED'||code==='PSIM_HTTP_429'?'rate_limited':code==='REQUEST_ABORTED'?'cancelled':code==='REQUEST_SUPERSEDED'?'superseded':'failed';this.telemetryFailure(error);setTelemetry({outcome:outcome==='rate_limited'?'rate-limited':outcome});if(epoch===this.epoch)this.fail(error);}finally{if(this.request===request)this.request=undefined;if(this.outbound?.request===request)this.outbound=undefined;if(this.superseded===request)this.superseded=undefined;if(outcome!=='shown')controller.onResponse(id,request.signal.aborted?'cancelled':outcome);if(this.inputDeferredAt!==undefined){this.inputDeferredMs=performance.now()-this.inputDeferredAt;this.inputDeferredAt=undefined;}}
   }
   /** Send mode: a plain Enter sends the reviewed translation, waiting for it if the request is still pending. */
   private async sendShortcut(snapshot:VerifiedComposerSnapshot){
@@ -583,6 +653,16 @@ export class CompanionService {
     await this.replaceDraft(pending.snapshot,'send',pending.generation);
   }
   private async sendAsIs(snapshot:VerifiedComposerSnapshot,generation:number){
+    return this.traceAction('send',()=>this.performSendAsIs(snapshot,generation));
+  }
+  private async traceAction(operation:'replace'|'send',action:()=>Promise<void>){
+    const trace=createTelemetry(operation,{parentTraceId:this.reviewed?.telemetryId??currentTelemetry()?.fields.traceId,
+      trigger:operation==='send'?'enter':'manual',sourceLanguage:'zh',targetLanguage:this.state.language,sessionMode:this.state.sessionMode,
+      authStateBefore:this.state.auth,foreground:this.foreground,contextRevision:this.contextRevision,outcome:'skipped',sendConfirmed:false});
+    return runWithTelemetry(trace,async()=>{try{await action();}catch(error){this.telemetryFailure(error);throw error;}
+      finally{finishTelemetry(trace,String(trace.fields.outcome??'skipped'),{authStateAfter:this.state.auth,reason:trace.fields.reason??(trace.fields.outcome==='skipped'?(!this.foreground?'not-foreground':'not-ready'):undefined)});}});
+  }
+  private async performSendAsIs(snapshot:VerifiedComposerSnapshot,generation:number){
     if(!await this.waitForObservation()||!this.foreground)return;
     await this.acquireEditor();const epoch=this.epoch;
     try{
@@ -590,11 +670,15 @@ export class CompanionService {
       const current=await this.capture();if(epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(current.source!=='verified-editor'||!sameVerifiedDraft(current.snapshot,snapshot)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
       if(!current.snapshot.isPlainText)throw new Error('WRITE_UNAVAILABLE');
       const authorize=()=>{if(this.closed||!this.foreground||epoch!==this.epoch||this.external!==external||this.state.outboundMode!=='send'||generation!==this.sendIntentGeneration)throw new Error('DRAFT_CHANGED');};
-      await external.send(current.snapshot,()=>{authorize();return authorize;});
+      await timeTelemetry('sendMs',()=>external.send!(current.snapshot,()=>{authorize();return authorize;}));
+      setTelemetry({outcome:'send-unconfirmed',sendTriggered:true,sendConfirmed:false});
       this.lastWritten=undefined;
     }catch(error){this.fail(error);}finally{this.setBusy(false);}
   }
   async replaceDraft(shortcutSnapshot?:VerifiedComposerSnapshot,intent:'replace'|'send'='replace',sendGeneration=this.sendIntentGeneration){
+    return this.traceAction(intent==='send'?'send':'replace',()=>this.performReplaceDraft(shortcutSnapshot,intent,sendGeneration));
+  }
+  private async performReplaceDraft(shortcutSnapshot?:VerifiedComposerSnapshot,intent:'replace'|'send'='replace',sendGeneration=this.sendIntentGeneration){
     const allowed=()=>intent==='send'?this.state.outboundMode==='send'&&sendGeneration===this.sendIntentGeneration:this.state.shortcutEnabled!==false;
     const shortcutReview=shortcutSnapshot?this.reviewed:undefined;
     if(shortcutSnapshot&&(!shortcutReview||shortcutReview.capture.source!=='verified-editor'||!sameVerifiedDraft(shortcutReview.capture.snapshot,shortcutSnapshot)||!allowed()||this.state.translationPaused||this.state.phase!=='ready'))return;
@@ -608,7 +692,7 @@ export class CompanionService {
       // within OUTBOUND_SYNC_REUSE_MS (Windows); the identity comparisons below still run before every write.
       await this.psim.sync({reuseRecent:true});
       const auth=this.psim.identity();if(!auth||auth.authGeneration!==reviewed.identity.authGeneration||auth.accountScope!==reviewed.identity.accountScope)throw new Error('AUTH_CHANGED');
-      const current=await this.capture();if(!this.foreground||epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(!same(current,reviewed.capture)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
+      const current=await timeTelemetry('captureBeforeMs',()=>this.capture());if(!this.foreground||epoch!==this.epoch)throw new Error('DRAFT_CHANGED');if(!same(current,reviewed.capture)){this.adopt(current);this.publish();throw new Error('DRAFT_CHANGED');}
       const authorize=async()=>{
         await this.psim.sync({reuseRecent:true});
         const assertCurrent=()=>{const latest=this.psim.identity();
@@ -616,15 +700,16 @@ export class CompanionService {
         };
         assertCurrent();return assertCurrent;
       };
-      if(current.source==='verified-editor'){if(!current.snapshot.isPlainText)throw new Error('WRITE_UNAVAILABLE');if(intent==='send'&&!this.external!.send)throw new Error('SEND_UNAVAILABLE');await this.external!.replace(current.snapshot,reviewed.text,authorize);}else{if(intent==='send')throw new Error('SEND_UNAVAILABLE');if(!current.snapshot.canReplace)throw new Error('WRITE_UNAVAILABLE');await this.native.replaceDraft(current.snapshot,reviewed.text);}
-      const after=await this.capture();if(epoch!==this.epoch||after.snapshot.text!==reviewed.text)throw new Error('DRAFT_READBACK_MISMATCH');
+      if(current.source==='verified-editor'){if(!current.snapshot.isPlainText)throw new Error('WRITE_UNAVAILABLE');if(intent==='send'&&!this.external!.send)throw new Error('SEND_UNAVAILABLE');await timeTelemetry('replaceMs',()=>this.external!.replace(current.snapshot,reviewed.text,authorize));}else{if(intent==='send')throw new Error('SEND_UNAVAILABLE');if(!current.snapshot.canReplace)throw new Error('WRITE_UNAVAILABLE');await timeTelemetry('replaceMs',()=>this.native.replaceDraft(current.snapshot,reviewed.text));}
+      const after=await timeTelemetry('captureAfterMs',()=>this.capture());setTelemetry({readbackMatched:epoch===this.epoch&&after.snapshot.text===reviewed.text});if(epoch!==this.epoch||after.snapshot.text!==reviewed.text)throw new Error('DRAFT_READBACK_MISMATCH');
       this.adopt(after,false);
       if(epoch!==this.epoch)throw new Error('DRAFT_CHANGED');
       if(current.source==='verified-editor'&&(after.source!=='verified-editor'||after.snapshot.conversationId!==current.snapshot.conversationId||after.snapshot.scopeGeneration!==current.snapshot.scopeGeneration||after.snapshot.platformAccountScope!==current.snapshot.platformAccountScope||after.snapshot.documentGeneration!==current.snapshot.documentGeneration||after.snapshot.editorIdentity!==current.snapshot.editorIdentity||after.snapshot.composerId!==current.snapshot.composerId))throw new Error('DRAFT_CHANGED');
       this.waitController.onDraftSent();
       this.lastWritten=after.source==='verified-editor'?after.snapshot:undefined;
       this.suppressed=this.signature(after);this.attempted=this.suppressed;this.reviewed=undefined;this.state.preview=null;this.state.phase='replaced';
-      if(intent==='send'&&after.source==='verified-editor'){this.publish();await this.external!.send!(after.snapshot,authorize);this.lastWritten=undefined;this.state.phase='idle';}
+      setTelemetry({outcome:'replaced',reason:undefined});
+      if(intent==='send'&&after.source==='verified-editor'){this.publish();await timeTelemetry('sendMs',()=>this.external!.send!(after.snapshot,authorize));setTelemetry({outcome:'send-unconfirmed',sendTriggered:true,sendConfirmed:false});this.lastWritten=undefined;this.state.phase='idle';}
       this.publish();
     }catch(error){this.invalidate();this.fail(error);}finally{this.setBusy(false);}
   }

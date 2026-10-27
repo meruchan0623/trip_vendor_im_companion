@@ -1,6 +1,7 @@
 import {ownedLoginURL,isLoginPopoverId,type LoginPopover} from '../../src/shared/owned-login';
 import type {OperatorIdentifierType} from './identifiers';
 import {PANEL_TARGETS,type PanelState} from '../../src/shared/workbench';
+import {createRuntimeLogDialog} from './runtime-logs';
 /** Inline outbound translation panel above the vendor composer. Text and button intents only; Node owns translate/replace. */
 export const PANEL_HOST_ID='tsim-outbound-panel';
 export const CHAT_AREA_SELECTOR='.im_detail.inform-con > .chat_area';
@@ -152,7 +153,9 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   queryInput.type='text';queryInput.placeholder='输入订单 ID 或其他标识';queryInput.setAttribute('aria-label','明确输入或选择要查询的标识');queryInput.maxLength=100;queryInput.autocomplete='off';queryForm.append(queryInput,queryButton);query.append(make('h5','','查询其他订单'),queryForm,queryNote);
   const menu=make('div','pop menu'),pause=button('option'),pauseIcon=make('span'),pauseText=make('span'),disable=button('option');menu.setAttribute('role','menu');pauseIcon.style.display='contents';pause.append(pauseIcon,pauseText);disable.append(icon('power'),'关闭出站翻译');const modeLabel=make('div','label','Enter 键行为'),modes=([['send','Enter 直接发送','未出译文时等待译文后发送'],['replace','替换模式','Enter 保持原样，译文需手动替换']] as const).map(([mode,label,detail])=>{const option=button('option mode');option.setAttribute('role','menuitemradio');option.dataset.mode=mode;const text=make('span');text.append(make('span','',label),make('small','',detail));option.append(text);return option;});
   const accountLogin=button('option account-login','打开浏览器 TSim_CS'),accountLogout=button('option account-logout','断开助手会话');accountLogin.setAttribute('role','menuitem');accountLogout.setAttribute('role','menuitem');
-  menu.append(pause,disable,make('div','separator'),modeLabel,...modes,make('div','separator'),accountLogin,accountLogout,...(INJECTOR_VERSION?[make('div','separator'),make('div','label version',`注入版本 ${INJECTOR_VERSION}`)]:[]));
+  const logs=button('option runtime-logs','查看运行日志');logs.setAttribute('role','menuitem');
+  const logDialog=createRuntimeLogDialog(document,()=>bridge.invoke('getRuntimeLogs',[]));
+  menu.append(pause,disable,make('div','separator'),modeLabel,...modes,make('div','separator'),accountLogin,accountLogout,make('div','separator'),logs,...(INJECTOR_VERSION?[make('div','separator'),make('div','label version',`注入版本 ${INJECTOR_VERSION}`)]:[]));
   const popovers:Record<Popover,[HTMLElement,HTMLButtonElement]>={languages:[languages,lang],query:[query,find],menu:[menu,more]};
   for(const [pop] of Object.values(popovers))pop.hidden=true;
   panel.append(bar,body);shadow.append(style,panel,languages,query,menu);
@@ -206,6 +209,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   toggle.addEventListener('click',()=>{setOpen(null);act('setEnabled',[!state.enabled]);});
   lang.addEventListener('click',()=>toggleOpen('languages'));
   more.addEventListener('click',()=>toggleOpen('menu'));
+  logs.addEventListener('click',()=>{setOpen(null);if(document.dispatchEvent(new view.Event('tsim-companion-open-logs',{cancelable:true})))logDialog.open();});
   find.addEventListener('mousedown',()=>{const selection=document.getSelection()?.toString().trim();if(selection&&ORDER_RE.test(selection))queryInput.value=selection;});
   find.addEventListener('click',()=>toggleOpen('query'));
   follow.addEventListener('click',()=>{setOpen(null);act('followCustomer');});
@@ -309,5 +313,5 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   const observer=new view.MutationObserver(mutations=>{if(mutations.every(mutation=>{const target=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;const changed=[...mutation.addedNodes,...mutation.removedNodes];return !!target?.closest('[data-tsim-owned="1"]')||changed.length>0&&changed.every(node=>node===host);}))return;schedule();});
   const onVisibility=()=>{view.clearTimeout(timer);if(document.visibilityState==='hidden'){setOpen(null);removeLogin(true);}else attach();};document.addEventListener('visibilitychange',onVisibility);
   render(state);attach();if(document.body)observer.observe(document.body,{childList:true,subtree:true});
-  return{render,setOrder,attach,host,get anchor(){return anchor;},get editor(){return editor;},dispose(){if(disposed)return;view.clearTimeout(collapseTimer);setOpen(null);removeLogin();view.removeEventListener('message',onLoginMessage);disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);document.removeEventListener('pointerdown',onOutside,true);view.removeEventListener('resize',onResize);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
+  return{render,setOrder,attach,host,get anchor(){return anchor;},get editor(){return editor;},dispose(){if(disposed)return;logDialog.dispose();view.clearTimeout(collapseTimer);setOpen(null);removeLogin();view.removeEventListener('message',onLoginMessage);disposed=true;view.clearTimeout(timer);view.clearTimeout(noticeTimer);observer.disconnect();document.removeEventListener('visibilitychange',onVisibility);document.removeEventListener('pointerdown',onOutside,true);view.removeEventListener('resize',onResize);bindEditor(undefined);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();}};
 }

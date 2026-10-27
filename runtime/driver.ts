@@ -122,7 +122,7 @@ export class LiveRuntimeDriver implements RuntimeDriver {
     // The service serializes publications. UI heartbeat/update already perform boundary() atomically.
     let detached=false,lastPublished=JSON.stringify(state);
     return{
-      publish:async(next:PanelState)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);const signature=JSON.stringify(next);if(signature===lastPublished)return;if(!await this.verifyActiveTarget(true))return;this.current(epoch);await this.policy.publishWorkbench(next);this.current(epoch);lastPublished=signature;},
+      publish:async(next:PanelState)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);const signature=JSON.stringify(next);if(signature===lastPublished)return false;if(!await this.verifyActiveTarget(true))return false;this.current(epoch);const previewUpdated=await this.policy.publishWorkbench(next);this.current(epoch);lastPublished=signature;return previewUpdated;},
       heartbeat:async(sequence:number)=>{if(detached)throw new Error('LEASE_ENDED');this.current(epoch);await this.verifyActiveTarget(true);this.current(epoch);await this.policy.heartbeat(sequence);this.current(epoch);},
       detach:async()=>{if(detached)return;detached=true;await this.cleanupUi();},
     };

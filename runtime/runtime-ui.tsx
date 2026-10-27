@@ -2,7 +2,7 @@ import {mountPageFeatures,type PageFeatures,type PageGeometry} from './page/inde
 import type {PanelState} from '../src/shared/workbench';
 import {VERIFIED_RUNTIME_BUILD,RUNTIME_PLATFORM,WINDOWS_DYNAMIC_RUNTIME,validateWindowsRuntimeBuild,validateMacRuntimeBuild,type RuntimeBuild} from './build-manifest';
 export interface RuntimeUiMetadata {leaseId:string;aresVersion:typeof VERIFIED_RUNTIME_BUILD.aresVersion;htmlSha256:string;rendererSha256:string;keyboardBoundary:'isolated-world-shadow';windowsBuild?:RuntimeBuild;macBuild?:RuntimeBuild}
-export interface RuntimeUiHandle {heartbeat(sequence:number):void;detach():Promise<void>;geometry():RuntimeGeometry;boundary():true;updateWorkbench(state:PanelState):void;respondWorkbench(id:string,ok:boolean,value?:unknown):void}
+export interface RuntimeUiHandle {heartbeat(sequence:number):void;detach():Promise<void>;geometry():RuntimeGeometry;boundary():true;updateWorkbench(state:PanelState):boolean;respondWorkbench(id:string,ok:boolean,value?:unknown):void}
 export type RuntimeGeometry=PageGeometry;
 /** Factory only. Loading this runtime artifact never mounts anything by itself; the page features live in ./page. */
 export function mountRuntimeUi(metadata:RuntimeUiMetadata,document:Document=window.document,bridge?:{bindingName:string;state:PanelState}|null,options:{origin?:string;prewarmDelayMs?:number}={}):RuntimeUiHandle {
@@ -36,7 +36,7 @@ export function mountRuntimeUi(metadata:RuntimeUiMetadata,document:Document=wind
     features=mountPageFeatures(document,{...(bridge?{bridge:{invoke},state:bridge.state}:{}),...options});boundary();
   }catch(error){void detach().catch(()=>{});throw error;}
   return{detach,boundary,
-    updateWorkbench(next){boundary();features!.update(next);},
+    updateWorkbench(next){boundary();features!.update(next);const host=features!.panel?.host,preview=host?.shadowRoot?.querySelector<HTMLElement>('.preview'),body=host?.shadowRoot?.querySelector<HTMLElement>('.body');return !!next.preview&&next.enabled&&next.auth==='ready'&&next.status==='ready'&&!next.translationPaused&&document.visibilityState!=='hidden'&&!!host?.isConnected&&!!preview&&!preview.hidden&&!body?.hidden&&preview.textContent===next.preview&&host.getClientRects().length>0;},
     respondWorkbench(id,ok,value){const request=pending.get(id);if(!request)return;pending.delete(id);view.clearTimeout(request.timer);if(ok)request.resolve(value);else request.reject();},
     geometry(){if(disposed)throw new Error('LEASE_ENDED');boundary();return features!.geometry();},
     heartbeat(sequence){if(disposed)throw new Error('LEASE_ENDED');boundary();if(!Number.isSafeInteger(sequence)||sequence<=lastSequence)throw new Error('STALE_HEARTBEAT');lastSequence=sequence;lastHeartbeat=Date.now();},

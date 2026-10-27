@@ -11,7 +11,7 @@ export function validWorkbenchAction(action:unknown,args:unknown[]):boolean{
     case 'setTarget':return args.length===1&&plain('lang,source')&&arg!.source==='manual'&&isPanelTarget(arg!.lang);
     case 'setFallbackTarget':return args.length===1&&isPanelTarget(args[0]);
     case 'customerLanguage':return args.length===1&&isCustomerLanguageReport(arg);
-    case 'followCustomer':case 'retry':case 'openLogin':case 'logout':case 'cancel':case 'resume':case 'closeOrder':return args.length===0;
+    case 'getRuntimeLogs':case 'followCustomer':case 'retry':case 'openLogin':case 'logout':case 'cancel':case 'resume':case 'closeOrder':return args.length===0;
     // Browser and owned order modes share one intent shape, bound to the visible conversation.
     case 'openOrder':case 'queryOrder':case 'operatorSession':return args.length===1&&isOrderWindowIntent(args[0]);
     case 'closeLogin':return args.length===1&&isLoginPopoverId(args[0]);

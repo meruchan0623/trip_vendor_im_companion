@@ -20,8 +20,11 @@ import {windowsPowerShell} from '../runtime/windows-powershell';
 import {VERIFIED_RUNTIME_BUILD,WINDOWS_DYNAMIC_RUNTIME} from '../runtime/build-manifest';
 import {windowsInstallationFromHelper} from '../runtime/windows-compatibility.mjs';
 import {createRuntimeDiagnostics} from './runtime-diagnostics';
+import {connectVendorProgress,disconnectVendorProgress,reportVendorProgress,reportVendorDiagnostic} from './vendor-progress';
 import {NativeRecovery} from './native-recovery';
-import {connectVendorProgress,disconnectVendorProgress,reportVendorProgress} from './vendor-progress';
+import {TELEMETRY_RUN_ID} from './translation-telemetry';
+import {release as osRelease} from 'node:os';
+declare const __TMC_INJECTOR_VERSION__:string|undefined;
 
 // Local settings open on demand; daily business UI belongs to the verified merchant BrowserView.
 if(process.platform==='win32')app.disableHardwareAcceleration();
@@ -32,11 +35,12 @@ const smokeMode=process.argv.includes('--smoke-test');
 const acceptance=process.argv.includes('--acceptance');
 if(smokeMode)app.setPath('userData',join(process.cwd(),'work/smoke-profile'));
 const ownsInstance=smokeMode||app.requestSingleInstanceLock();
-const diagnostics=ownsInstance?createRuntimeDiagnostics(join(app.getPath('userData'),'logs','runtime.log')):undefined;
+const diagnostics=ownsInstance?createRuntimeDiagnostics(join(app.getPath('userData'),'logs','runtime.log'),undefined,reportVendorDiagnostic):undefined;
 const hostLog=console.log.bind(console),hostError=console.error.bind(console);
 console.log=(...args:unknown[])=>{diagnostics?.consoleLog(args);hostLog(...args);};
 console.error=(...args:unknown[])=>{diagnostics?.consoleError(args);hostError(...args);};
 diagnostics?.lifecycle('start',process.pid);
+diagnostics?.telemetry({event:'runtime-environment',runId:TELEMETRY_RUN_ID,appVersion:app.getVersion(),injectorVersion:typeof __TMC_INJECTOR_VERSION__==='string'?__TMC_INJECTOR_VERSION__:undefined,platform:process.platform,arch:process.arch,electronVersion:process.versions.electron,nodeVersion:process.versions.node,osRelease:osRelease(),pid:process.pid});
 const localFile=join(__dirname,'../dist/index.html');
 let panel:BrowserWindow|undefined,tray:Tray|undefined,native:NativeAdapter,service:CompanionService,resident:ResidentConnection|undefined;
 let ownedLogin:OwnedLoginWindow|undefined;
@@ -48,6 +52,7 @@ let stopOwnerWatch:(()=>void)|undefined;
 let ownerEpoch=0;
 let ownerExitCode=0;
 let nativeRecovery:NativeRecovery|undefined;
+let healthTimer:ReturnType<typeof setInterval>|undefined;
 async function adoptVendorOwner(pid:number,args:readonly string[]=process.argv):Promise<void>{
   const epoch=++ownerEpoch,platform=createLaunchPlatform();
   // Owner handoff precedes resource verification/manifest activation at startup.
@@ -56,7 +61,7 @@ async function adoptVendorOwner(pid:number,args:readonly string[]=process.argv):
   if(quitting||epoch!==ownerEpoch){stop();return;}
   if(process.platform==='win32')configureExplicitVendorDebugPort(args);stopOwnerWatch?.();stopOwnerWatch=stop;
   // The installed vendor shows startup progress above its composer until the panel mounts.
-  if(silentVendorRuntime){connectVendorProgress(args,pid);reportVendorProgress('host-ready');}
+  if(silentVendorRuntime){connectVendorProgress(args,pid);for(const entry of diagnostics?.snapshot()??[])reportVendorDiagnostic(entry);reportVendorProgress('host-ready');}
 }
 function listenForAcceptanceQuit():void {
   if(!acceptance)return;
@@ -148,7 +153,7 @@ function helperPath():string {
 }
 async function cleanup():Promise<void> {
   stopOwnerWatch?.();stopOwnerWatch=undefined;disconnectVendorProgress();
-  if(cleaned)return;cleaned=true;nativeRecovery?.dispose();acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();ownedLogin?.close();
+  if(cleaned)return;cleaned=true;clearInterval(healthTimer);healthTimer=undefined;nativeRecovery?.dispose();acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();ownedLogin?.close();
   try{await service?.dispose();}finally{native?.stop();}
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
@@ -174,8 +179,9 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   service=new CompanionService(native,async url=>{
     if(ownedAccount){await ownedLogin!.open(url);return;}
     if(url!=='https://csagent.tsim.tech/login')throw new Error('BROWSER_LOGIN_URL_INVALID');await shell.openExternal(url);
-  },()=>{},sessionOptions,true,ownedStore?(changed,options)=>new PersistentSessionService(changed,{...options,embeddedLogin:false,closeLogin:()=>ownedLogin?.close()},ownedStore):undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')),undefined,new FileOutboundWaitStore(join(app.getPath('userData'),'outbound-wait.json')));service.onState(publish);
+  },()=>{},sessionOptions,true,ownedStore?(changed,options)=>new PersistentSessionService(changed,{...options,embeddedLogin:false,closeLogin:()=>ownedLogin?.close()},ownedStore):undefined,new FileTranslationOptionsStore(join(app.getPath('userData'),'translation-options.json')),undefined,new FileOutboundWaitStore(join(app.getPath('userData'),'outbound-wait.json')),()=>diagnostics?.snapshot()??[]);service.onState(publish);
   if(nativeStatus)service.setNativeStatus(nativeStatus);
+  let healthAt=performance.now();healthTimer=setInterval(()=>{if(quitting||cleaned)return;const now=performance.now(),memory=process.memoryUsage();diagnostics?.health({runId:TELEMETRY_RUN_ID,uptimeMs:process.uptime()*1000,rssBytes:memory.rss,heapUsedBytes:memory.heapUsed,heapTotalBytes:memory.heapTotal,eventLoopDelayMs:Math.max(0,now-healthAt-30000),...service.getRuntimeHealth()});healthAt=now;},30000);healthTimer.unref();
   resident=new ResidentConnection(native,async()=>{});setupIPC();
   listenForAcceptanceQuit();
   // Installed Windows runs silently inside the vendor; standalone Windows retains tray settings.

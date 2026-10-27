@@ -1,3 +1,4 @@
+import {addTelemetry,setTelemetry,timeTelemetry,startHttpTelemetry} from './translation-telemetry';
 import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
 import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import { access, readdir } from 'node:fs/promises';
@@ -134,7 +135,8 @@ export class BrowserProfileSessionService {
   private publish(){try{this.changed(this.identity());}catch{/* subscriber cannot affect revocation */}}
   private revoke(){this.waitBounds=null;this.generation++;this.verified=undefined;const hadIdentity=!!this.current;this.current=null;this.token=null;this.profile=null;for(const controller of this.active)controller.abort();this.active.clear();if(hadIdentity)this.publish();}
   private async tokenAt(profile:BrowserProfile):Promise<string|null>{
-    const value=await (this.options.readToken??((directory:string)=>readTsimToken(directory,{throwOnFailure:true})))(storage(profile));
+    addTelemetry('authTokenReads',1);
+    const value=await timeTelemetry('authTokenReadMs',()=>(this.options.readToken??((directory:string)=>readTsimToken(directory,{throwOnFailure:true})))(storage(profile)));
     if(value===null)return null;
     if(typeof value!=='string'||!value.trim()||value.length>16000)throw new Error('BROWSER_SESSION_STORAGE_INVALID');
     return value;
@@ -155,8 +157,12 @@ export class BrowserProfileSessionService {
     const token=this.token,generation=this.generation;if(!token)throw new Error('PSIM_LOGIN_REQUIRED');
     const controller=new AbortController();this.active.add(controller);
     const combined=AbortSignal.any([controller.signal,AbortSignal.timeout(this.options.requestTimeoutMs??20000),...(signal?[signal]:[])]);
+    let telemetry:ReturnType<typeof startHttpTelemetry>;
     try{
-      const response=await (this.options.fetcher??fetch)(`${API}${path}`,{method:body?'POST':'GET',headers:{Accept:'application/json',Authorization:`Bearer ${token}`,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),redirect:'error',signal:combined});
+      const payload=body?JSON.stringify(body):undefined;
+      telemetry=startHttpTelemetry(url.pathname,this.options.requestTimeoutMs??20000,payload);
+      const response=await (this.options.fetcher??fetch)(`${API}${path}`,{method:body?'POST':'GET',headers:{Accept:'application/json',Authorization:`Bearer ${token}`,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:payload}:{}),redirect:'error',signal:combined});
+      telemetry?.headers(response);
       if(this.closed||this.suspended||generation!==this.generation||token!==this.token)throw new Error('AUTH_CHANGED');
       // Any auth or permission refusal makes the next outbound translation run a full check first.
       if([401,403,422,423].includes(response.status))this.verified=undefined;
@@ -165,27 +171,36 @@ export class BrowserProfileSessionService {
       if(response.status===429)throw new Error('RATE_LIMITED');
       if(!response.ok)throw new Error('SERVICE_UNAVAILABLE');
       if(Number(response.headers.get('content-length'))>200000)throw new Error('INVALID_SERVICE_RESPONSE');
+      telemetry?.body();
       const reader=response.body?.getReader();if(!reader)throw new Error('INVALID_SERVICE_RESPONSE');
       let length=0;const chunks:Uint8Array[]=[];
-      for(;;){const next=await reader.read();if(next.done)break;length+=next.value.byteLength;if(length>200000){await reader.cancel();throw new Error('INVALID_SERVICE_RESPONSE');}chunks.push(next.value);}
+      for(;;){const next=await reader.read();if(next.done)break;length+=next.value.byteLength;telemetry?.progress(length);if(length>200000){await reader.cancel();throw new Error('INVALID_SERVICE_RESPONSE');}chunks.push(next.value);}
       const bytes=new Uint8Array(length);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
-      try{return JSON.parse(new TextDecoder().decode(bytes));}catch{throw new Error('INVALID_SERVICE_RESPONSE');}
+      telemetry?.bodyDone(length);
+      const parseStarted=performance.now();telemetry?.parsing();
+      try{const result=JSON.parse(new TextDecoder().decode(bytes));telemetry?.parsed(result,parseStarted);return result;}catch{throw new Error('INVALID_SERVICE_RESPONSE');}
     }catch(error){
+      telemetry?.failed();
       if(signal?.aborted)throw new Error('REQUEST_ABORTED');
       if(this.closed||this.suspended||generation!==this.generation)throw new Error('AUTH_CHANGED');
       if(combined.aborted)throw new Error('BROWSER_SESSION_TIMEOUT');
       if(error instanceof Error&&/^[A-Z][A-Z0-9_]{1,80}$/.test(error.message))throw error;
       throw new Error('SERVICE_UNAVAILABLE');
-    }finally{this.active.delete(controller);}
+    }finally{telemetry?.done();this.active.delete(controller);}
   }
   async sync(options:SessionSyncOptions={}):Promise<void>{
     if(this.options.enabled===false||this.closed||this.suspended)return;
-    // An in-flight check is always joined, never skipped: it may be the one observing an account change.
-    if(this.syncing)return this.syncing;
-    if(options.reuseRecent&&this.recentlyVerified())return;
-    if(!this.current)this.setStatus('connecting');
-    const startedAt=this.now();
-    this.syncing=this.synchronize(startedAt).finally(()=>{this.syncing=null;});return this.syncing;
+    const telemetryStarted=performance.now();
+    addTelemetry('authChecks',1);setTelemetry({sessionMode:'browser',authStateBefore:this.status});
+    try{
+      // An in-flight check is always joined, never skipped: it may observe an account change.
+      if(this.syncing){setTelemetry({authCheckMode:'joined'});return await this.syncing;}
+      if(options.reuseRecent&&this.recentlyVerified()){setTelemetry({authCheckMode:'reused'});return;}
+      setTelemetry({authCheckMode:'fresh'});
+      if(!this.current)this.setStatus('connecting');
+      const startedAt=this.now();
+      this.syncing=this.synchronize(startedAt).finally(()=>{this.syncing=null;});return await this.syncing;
+    }finally{addTelemetry('authMs',performance.now()-telemetryStarted);setTelemetry({authStateAfter:this.status,authGeneration:this.generation});}
   }
   private now(){return this.options.now?this.options.now():performance.now();}
   /** Only a completed, successful check of the still-current session counts; failures and revocations never do. */
@@ -258,12 +273,14 @@ export class BrowserProfileSessionService {
     dropSuperseded();
     const generation=this.generation,token=this.token,profile={...this.profile};
     const result=await this.request('/agent/translate',{...body},signal);
-    const freshToken=await this.checkedTokenAt(profile);
-    if(signal.aborted)throw new Error('REQUEST_ABORTED');
-    if(freshToken!==token){this.diskChanged(freshToken);throw new Error('AUTH_CHANGED');}
-    if(generation!==this.generation||!same(expectedIdentity,this.current))throw new Error('AUTH_CHANGED');
+    try{
+      const freshToken=await timeTelemetry('postReadTokenMs',()=>this.checkedTokenAt(profile));
+      if(signal.aborted)throw new Error('REQUEST_ABORTED');
+      if(freshToken!==token){this.diskChanged(freshToken);throw new Error('AUTH_CHANGED');}
+      if(generation!==this.generation||!same(expectedIdentity,this.current))throw new Error('AUTH_CHANGED');
+    }catch(error){setTelemetry({httpFailurePhase:'auth'});throw error;}
     const data=result?.data;
-    if(result?.success!==true||typeof data?.translated_text!=='string'||!data.translated_text.trim()||data.translated_text.length>50000||data.draft_request_id!==body.draft_request_id||data.composer_content_version!==body.composer_content_version)throw new Error('OUTBOUND_ECHO_MISMATCH');
+    if(result?.success!==true||typeof data?.translated_text!=='string'||!data.translated_text.trim()||data.translated_text.length>50000||data.draft_request_id!==body.draft_request_id||data.composer_content_version!==body.composer_content_version){setTelemetry({httpFailurePhase:'validation'});throw new Error('OUTBOUND_ECHO_MISMATCH');}
     return {success:true,data:{translated_text:data.translated_text,draft_request_id:data.draft_request_id,composer_content_version:data.composer_content_version}};
   }
   async openLogin():Promise<void>{

@@ -4,6 +4,7 @@ import { isOrderWindowIntent, type OrderWindowIntent, isOutboundMode, isPanelTar
 import {isCustomerLanguageReport,type CustomerLanguageResolution} from '../src/shared/customer-language';
 import type { StandaloneState } from '../src/shared/companion-api';
 import type { OperatorSessionGrant } from '../src/shared/workbench';
+import type {RuntimeLogEntry} from './runtime-diagnostics';
 
 /** The only state sent to the vendor renderer. Authentication credentials stay in the host. */
 export function embeddedPanelState(state:StandaloneState,conversationKey:string|null=null):PanelState {
@@ -15,6 +16,7 @@ export function embeddedPanelState(state:StandaloneState,conversationKey:string|
 
 export interface EmbeddedActions {
   getState():StandaloneState;
+  getRuntimeLogs?():RuntimeLogEntry[];
   openOrder?(intent:OrderWindowIntent):Promise<void>;
   queryOrder?(identifier:string,conversationKey?:string):Promise<void>;
   operatorSession?(intent:OrderWindowIntent):Promise<OperatorSessionGrant>;
@@ -31,12 +33,13 @@ export interface EmbeddedActions {
   logout():Promise<void>;
 }
 
-/** Fixed intents only: the renderer cannot supply text, snapshots, URLs or a send action. Only `operatorSession` returns data. */
-export async function invokeEmbeddedAction(service:EmbeddedActions,action:string,args:unknown[]):Promise<OperatorSessionGrant|void> {
+/** Fixed intents only: the renderer cannot supply text, snapshots, URLs or a send action. `operatorSession` returns its scoped grant; `getRuntimeLogs` returns sanitized diagnostics. */
+export async function invokeEmbeddedAction(service:EmbeddedActions,action:string,args:unknown[]):Promise<OperatorSessionGrant|RuntimeLogEntry[]|void> {
   if(!Array.isArray(args))throw new Error('INVALID_ACTION');
   const value=args[0],record=value as Record<string,unknown>;
   const object=(keys:string)=>!!value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===keys;
   switch(action){
+    case 'getRuntimeLogs':if(args.length||!service.getRuntimeLogs)break;return service.getRuntimeLogs();
     case 'setEnabled':if(args.length!==1||typeof value!=='boolean')break;await service.setTranslationOptions({autoTranslate:value});return;
     case 'setTarget':if(args.length!==1||!object('lang,source')||record.source!=='manual'||!isPanelTarget(record.lang))break;await service.setTranslationOptions({language:record.lang});return;
     case 'setFallbackTarget':if(args.length!==1||!isPanelTarget(value))break;await service.setTranslationOptions({fallbackTarget:value});return;

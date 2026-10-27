@@ -1,3 +1,4 @@
+import {startHttpTelemetry,setTelemetry} from '../electron/translation-telemetry';
 import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
 import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import {WORKBENCH_TARGETS,type OperatorSessionGrant,type OutboundBody,type OutboundResponse,type PsimIdentity} from '../src/shared/workbench';
@@ -51,11 +52,14 @@ export class OwnedPsimService {
     if(method==='POST'&&url.search)throw fail('FORBIDDEN_SERVICE_REQUEST');
     if(method==='GET'){const allowed=url.pathname.endsWith('/dataplan-list')?'query_id':url.pathname.endsWith('/detail')||url.pathname.endsWith('/live-detail')?'card_dataplan_id':null;for(const key of url.searchParams.keys())if(key!==allowed)throw fail('FORBIDDEN_SERVICE_REQUEST');}
     const requestEpoch=this.epoch;const controller=new AbortController();this.active.add(controller);const combined=signal?AbortSignal.any([signal,controller.signal,AbortSignal.timeout(30000)]):AbortSignal.any([controller.signal,AbortSignal.timeout(30000)]);
+    let telemetry:ReturnType<typeof startHttpTelemetry>;
     try{const headers:Record<string,string>={'Accept':'application/json'};if(token)headers.Authorization=`Bearer ${token}`;let payload:BodyInit|undefined;if(body instanceof FormData)payload=body;else if(body!==undefined){headers['Content-Type']='application/json';payload=JSON.stringify(body);}
+      telemetry=startHttpTelemetry(url.pathname,30000,payload);
       const response=await this.fetcher(url.href,{method,headers,body:payload,signal:combined,redirect:'error'});
+      telemetry?.headers(response);
       if(!response.ok){if((response.status===401||response.status===423)&&token&&token===this.token&&requestEpoch===this.epoch)await this.rejectSession();throw fail(`PSIM_HTTP_${response.status}`);}
-      const text=await response.text();if(text.length>2_000_000)throw fail('SERVICE_RESPONSE_TOO_LARGE');try{return JSON.parse(text);}catch{throw fail('INVALID_SERVICE_RESPONSE');}
-    }finally{this.active.delete(controller);}
+      telemetry?.body();const text=await response.text();telemetry?.bodyDone(Buffer.byteLength(text,'utf8'));if(text.length>2_000_000)throw fail('SERVICE_RESPONSE_TOO_LARGE');const parseStarted=performance.now();telemetry?.parsing();try{const result=JSON.parse(text);telemetry?.parsed(result,parseStarted);return result;}catch{throw fail('INVALID_SERVICE_RESPONSE');}
+    }catch(error){telemetry?.failed();throw error;}finally{telemetry?.done();this.active.delete(controller);}
   }
   login(username:string,password:string):Promise<PsimIdentity>{
     // Invalidate in-flight restoration immediately, even when this login waits in the queue.
@@ -121,8 +125,8 @@ export class OwnedPsimService {
   async translate(body:OutboundBody,identity:PsimIdentity,signal:AbortSignal):Promise<OutboundResponse>{
     const current=this.identity();if(!current||current.accountScope!==identity.accountScope||current.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');
     if(body.purpose!=='outbound'||body.source_lang!=='zh'||typeof body.text!=='string'||!body.text.trim()||body.text.length>20000||!/^[-a-z0-9]{1,100}$/.test(body.draft_request_id)||typeof body.composer_content_version!=='string'||body.composer_content_version.length>25000||!WORKBENCH_TARGETS.includes(body.target_lang))throw fail('INVALID_OUTBOUND_REQUEST');
-    const result=await this.request('POST','/agent/translate',body,signal);if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');const data=result?.data;
-    if(result?.success!==true||typeof data?.translated_text!=='string'||!data.translated_text.trim()||data.translated_text.length>50000||data.draft_request_id!==body.draft_request_id||data.composer_content_version!==body.composer_content_version)throw fail('OUTBOUND_ECHO_MISMATCH');
+    const result=await this.request('POST','/agent/translate',body,signal);if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration){setTelemetry({httpFailurePhase:'auth'});throw fail('AUTH_CHANGED');}const data=result?.data;
+    if(result?.success!==true||typeof data?.translated_text!=='string'||!data.translated_text.trim()||data.translated_text.length>50000||data.draft_request_id!==body.draft_request_id||data.composer_content_version!==body.composer_content_version){setTelemetry({httpFailurePhase:'validation'});throw fail('OUTBOUND_ECHO_MISMATCH');}
     return{success:true,data:{translated_text:data.translated_text,draft_request_id:data.draft_request_id,composer_content_version:data.composer_content_version}};
   }
   async queryOriginalIdentifier(identifier:string,identity:PsimIdentity,signal:AbortSignal):Promise<OrderProjection>{

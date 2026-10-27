@@ -16,7 +16,7 @@ export interface ExternalComposer {
   onInvalidated?(listener:()=>void):()=>void;
   setInteractionOptions?(options:NativeInteractionOptions):Promise<void>;
   mountWorkbench?(state:PanelState,onAction:(action:string,args:unknown[])=>Promise<unknown>):Promise<void>;
-  updateWorkbench?(state:PanelState):Promise<void>;
+  updateWorkbench?(state:PanelState):Promise<boolean|void>;
   read(authGeneration:number):Promise<NativePoll>;
   renew():Promise<void>;
   replace(expected:VerifiedComposerSnapshot,text:string,authorize:()=>void|(()=>void)|Promise<void|(()=>void)>):Promise<void>;
@@ -78,12 +78,12 @@ async function attachComposer(targetInstanceId:string,owner:VerifiedSocket,mark:
     const heartbeat=async()=>{current();await ui?.heartbeat(++sequence);};
     return {targetInstanceId,onInteraction:listener=>{current();return portAdapter.onInteraction(listener);},onInvalidated:listener=>{current();return owned.watchInvalidation(owned.target,listener);},setInteractionOptions:async options=>{current();await portAdapter.setInteractionOptions(options);},
       async mountWorkbench(state,onAction){current();if(ui)throw new Error('WORKBENCH_ALREADY_MOUNTED');ui=await owned.mountCompanion(state,onAction,waiting);current();mark('panel-mounted');},
-      async updateWorkbench(state){current();await ui?.publish(state);},
+      async updateWorkbench(state){current();return ui?await ui.publish(state):false;},
       async read(authGeneration){await heartbeat();return portAdapter.read(authGeneration);},
       async renew(){await heartbeat();await portAdapter.renew();},replace:async(...args)=>{current();return portAdapter.replace(...args);},send:async(...args)=>{current();return portAdapter.send(...args);},
       async reconnect(nextSignal,nextWaiting){
         current();lifecycle='reconnecting';const nextCurrent=()=>{if(lifecycle!=='reconnecting'||nextSignal?.aborted||owner.broken)throw new Error('CONNECTION_SUPERSEDED');};
-        const started=Date.now(),markNext=(stage:VendorProgressStage|'complete')=>console.log(JSON.stringify({event:'composer-reconnect',stage,elapsedMs:Date.now()-started,at:new Date().toISOString()}));markNext('start');
+        const started=Date.now(),markNext=(stage:VendorProgressStage|'complete')=>{console.log(JSON.stringify({event:'composer-reconnect',stage,elapsedMs:Date.now()-started,at:new Date().toISOString()}));if(stage!=='complete')reportVendorProgress(stage);};markNext('start');
         const cancel=()=>{void transport.disconnect();};nextSignal?.addEventListener('abort',cancel,{once:true});
         try{
           await owned.releaseForReconnect();nextCurrent();await owner.verifyOwner();nextCurrent();

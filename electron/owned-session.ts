@@ -1,3 +1,4 @@
+import {addTelemetry,setTelemetry} from './translation-telemetry';
 import { OwnedPsimService, type OwnedSessionStore } from '../host/owned-service';
 import { startOwnedLoginServer, type OwnedLoginService } from '../host/auth-server';
 import type { BrowserProfileSessionOptions, BrowserSessionStatus } from './browser-profile-session';
@@ -41,12 +42,15 @@ export class PersistentSessionService {
   }
   async sync():Promise<void>{
     if(this.closed||this.suspended||this.options.enabled===false)return;
-    if(this.syncing)return this.syncing;
-    if(!this.identity())this.publish('connecting');
-    this.syncing=(async()=>{
-      try{const identity=await this.service.ensureSession();if(!this.suspended)this.publish(identity?'ready':'needs_login');}
-      catch(error){if(!this.suspended)this.failure(error);throw error;}
-    })().finally(()=>{this.syncing=undefined;});return this.syncing;
+    const started=performance.now();addTelemetry('authChecks',1);setTelemetry({sessionMode:'owned',authStateBefore:this.status,authCheckMode:this.syncing?'joined':'owned'});
+    try{
+      if(this.syncing)return await this.syncing;
+      if(!this.identity())this.publish('connecting');
+      this.syncing=(async()=>{
+        try{const identity=await this.service.ensureSession();if(!this.suspended)this.publish(identity?'ready':'needs_login');}
+        catch(error){if(!this.suspended)this.failure(error);throw error;}
+      })().finally(()=>{this.syncing=undefined;});return await this.syncing;
+    }finally{addTelemetry('authMs',performance.now()-started);setTelemetry({authStateAfter:this.status,authGeneration:this.identity()?.authGeneration});}
   }
   async translate(body:OutboundBody,identity:PsimIdentity,signal:AbortSignal){
     try{return await this.service.translate(body,identity,signal);}catch(error){if(!this.suspended&&!this.identity())this.failure(error);throw error;}
