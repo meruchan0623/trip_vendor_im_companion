@@ -20,6 +20,7 @@ import {windowsPowerShell} from '../runtime/windows-powershell';
 import {VERIFIED_RUNTIME_BUILD,WINDOWS_DYNAMIC_RUNTIME} from '../runtime/build-manifest';
 import {windowsInstallationFromHelper} from '../runtime/windows-compatibility.mjs';
 import {createRuntimeDiagnostics} from './runtime-diagnostics';
+import {NativeRecovery} from './native-recovery';
 import {connectVendorProgress,disconnectVendorProgress,reportVendorProgress} from './vendor-progress';
 
 // Local settings open on demand; daily business UI belongs to the verified merchant BrowserView.
@@ -46,6 +47,7 @@ let acceptanceInput:ReadlineInterface|undefined;
 let stopOwnerWatch:(()=>void)|undefined;
 let ownerEpoch=0;
 let ownerExitCode=0;
+let nativeRecovery:NativeRecovery|undefined;
 async function adoptVendorOwner(pid:number,args:readonly string[]=process.argv):Promise<void>{
   const epoch=++ownerEpoch,platform=createLaunchPlatform();
   // Owner handoff precedes resource verification/manifest activation at startup.
@@ -146,7 +148,7 @@ function helperPath():string {
 }
 async function cleanup():Promise<void> {
   stopOwnerWatch?.();stopOwnerWatch=undefined;disconnectVendorProgress();
-  if(cleaned)return;cleaned=true;acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();ownedLogin?.close();
+  if(cleaned)return;cleaned=true;nativeRecovery?.dispose();acceptanceInput?.close();acceptanceInput=undefined;resident?.dispose();tray?.destroy();tray=undefined;hideSettings();ownedLogin?.close();
   try{await service?.dispose();}finally{native?.stop();}
 }
 if(ownsInstance)void app.whenReady().then(async()=>{
@@ -154,7 +156,8 @@ if(ownsInstance)void app.whenReady().then(async()=>{
   const ownerPID=vendorOwnerPID(process.argv);
   if(silentVendorRuntime&&ownerPID===undefined){console.error('INSTALLED_VENDOR_OWNER_REQUIRED');app.quit();return;}
   let nativeStatus:string|undefined;
-  native=new NativeAdapter(helperPath(),stateChanged,status=>{nativeStatus=status;service?.setNativeStatus(status);},()=>{},()=>{},undefined,()=>resident?.notifyTargetAvailable());
+  nativeRecovery=process.platform==='win32'?new NativeRecovery(()=>native.start(),()=>{console.error('NATIVE_NOT_READY','NATIVE_NOT_READY');reportVendorProgress('failed');}):undefined;
+  native=new NativeAdapter(helperPath(),stateChanged,status=>{nativeStatus=status;service?.setNativeStatus(status);nativeRecovery?.status(status);if(['helper_stopped','helper_unavailable','helper_not_built'].includes(status)&&!quitting){console.error('NATIVE_NOT_READY','NATIVE_NOT_READY');reportVendorProgress('failed');}},()=>{},()=>{},undefined,()=>{nativeRecovery?.ready();resident?.notifyTargetAvailable();});
   // The helper validates its own owner binding before it reads any command; overlap that
   // process query with owner adoption instead of running the two checks back to back.
   const adopting=ownerPID!==undefined?adoptVendorOwner(ownerPID):undefined,helperStarted=residentPlatform&&!!adopting;
