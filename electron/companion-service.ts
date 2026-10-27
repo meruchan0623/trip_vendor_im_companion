@@ -14,6 +14,7 @@ import type {TranslationOptionsStore} from './translation-options-store';
 import type {BrowserProfile} from './browser-profile-session';
 import type {OperatorSelection} from './system-browser';
 import {reportVendorProgress} from './vendor-progress';
+import {isOrderSummaryIntent,parseOrderSummaryResult,type OrderSummaryFailure,type OrderSummaryIntent,type OrderSummaryResult} from '../src/shared/order-summary';
 import type {RuntimeLogEntry} from './runtime-diagnostics';
 import {createTelemetry,runWithTelemetry,currentTelemetry,setTelemetry,timeTelemetry,finishTelemetry,type TelemetryTrace} from './translation-telemetry';
 
@@ -65,7 +66,15 @@ const LEASE_RENEW_MS=1500;
 const DRAFT_SETTLE_MS=120;
 /** A verified capture this recent, under the same epoch, lets the operator grant skip a second read. */
 export const OPERATOR_CAPTURE_FRESH_MS=1000;
-export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'|'outboundWaitBounds'>;
+export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'setBackgroundPolling'|'getBrowserProfile'|'operatorGrant'|'translate'|'queryOriginalIdentifier'|'openLogin'|'logout'|'dispose'|'outboundWaitBounds'>&Partial<Pick<BrowserProfileSessionService,'queryOrderSummary'>>;
+/**
+ * Order card cache: a settled snapshot answers repeat views of the same order for a minute; an explicit
+ * refresh younger than ORDER_SUMMARY_REFRESH_MS reuses it too, so repeated clicks cannot flood perform (60/min).
+ * In-flight reads are always joined; failures are never cached.
+ */
+const ORDER_SUMMARY_TTL_MS=60_000,ORDER_SUMMARY_REFRESH_MS=3000,ORDER_SUMMARY_ENTRIES=20;
+const ORDER_SUMMARY_FAILURES:Record<string,OrderSummaryFailure>={PSIM_LOGIN_REQUIRED:'login',PSIM_HTTP_401:'login',PSIM_HTTP_423:'login',PROFILE_UNVERIFIED:'login',ORDER_PERMISSION_REQUIRED:'permission',PSIM_HTTP_403:'permission',PSIM_HTTP_422:'permission',RATE_LIMITED:'rate_limited',PSIM_HTTP_429:'rate_limited'};
+type OrderSummaryEntry={at:number;scope:string;controller:AbortController;promise:Promise<OrderSummaryResult>;settled?:OrderSummaryResult};
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
 export class CompanionService {
@@ -793,6 +802,49 @@ export class CompanionService {
     }catch(error){if(current()){const code=error instanceof Error?error.message:'';this.order={identifier,status:'failed',fields:[],error:ORDER_FAILURES[code]??(/^PSIM_HTTP_(?:401|423)$/.test(code)?ORDER_FAILURES.AUTH_CHANGED:'订单查询未完成，请检查网络连接后重试。')};this.publish();}}
     finally{if(this.orderRequest===request)this.orderRequest=undefined;}
   }
+  private orderSummaries=new Map<string,OrderSummaryEntry>();
+  private clearOrderSummaries(){for(const entry of this.orderSummaries.values())entry.controller.abort();this.orderSummaries.clear();}
+  /**
+   * Read-only plan snapshot for the order shown under 用户信息. Expected outcomes (login, permission, context)
+   * resolve as results because the page bridge drops rejection reasons.
+   */
+  async orderSummary(intent:OrderSummaryIntent):Promise<OrderSummaryResult>{
+    if(!isOrderSummaryIntent(intent))throw new Error('INVALID_ACTION');
+    const {identifier}=intent,failed=(reason:OrderSummaryFailure):OrderSummaryResult=>({status:'failed',identifier,reason});
+    await this.sessionStarting;
+    if(this.closed||!this.external||this.captured?.source!=='verified-editor'||!this.state.messageSurface?.active||intent.conversationKey!==this.context())return failed('context');
+    const identity=this.psim.identity();
+    if(!identity||this.state.auth!=='ready')return failed('login');
+    if(!identity.permissions.includes('complaint_records'))return failed('permission');
+    if(!this.psim.queryOrderSummary)return failed('unavailable');
+    const scope=JSON.stringify([identity.accountScope,identity.authGeneration]),key=JSON.stringify([identity.accountScope,identity.authGeneration,identifier]);
+    for(const [other,entry] of this.orderSummaries)if(entry.scope!==scope){entry.controller.abort();this.orderSummaries.delete(other);}
+    const now=Date.now(),cached=this.orderSummaries.get(key);
+    if(cached&&!cached.settled)return cached.promise;
+    const age=cached?now-cached.at:Infinity;
+    if(cached?.settled&&age>=0&&age<ORDER_SUMMARY_TTL_MS&&!(intent.refresh&&age>=ORDER_SUMMARY_REFRESH_MS))return cached.settled;
+    this.orderSummaries.delete(key);
+    const controller=new AbortController(),entry:OrderSummaryEntry={at:now,scope,controller,promise:Promise.resolve(failed('unavailable'))};
+    const sameIdentity=()=>{const current=this.psim.identity();return !!current&&current.accountScope===identity.accountScope&&current.authGeneration===identity.authGeneration;};
+    entry.promise=(async():Promise<OrderSummaryResult>=>{
+      try{
+        const summary=await this.psim.queryOrderSummary!(identifier,controller.signal);
+        if(this.closed||controller.signal.aborted||!sameIdentity())throw new Error('AUTH_CHANGED');
+        // The page validates again; a projection that fails the shared shape is reported, never forwarded.
+        const result=parseOrderSummaryResult(summary.plans.length?{status:'ready',summary,fetchedAt:Date.now()}:{status:'empty',identifier});
+        if(!result)throw new Error('ORDER_RESPONSE_INVALID');
+        if(this.orderSummaries.get(key)===entry)entry.settled=result;
+        return result;
+      }catch(error){
+        if(this.orderSummaries.get(key)===entry)this.orderSummaries.delete(key);
+        const code=error instanceof Error?error.message:'';
+        return failed(ORDER_SUMMARY_FAILURES[code]??(this.psim.identity()?'unavailable':'login'));
+      }
+    })();
+    this.orderSummaries.set(key,entry);
+    for(const [other,value] of this.orderSummaries){if(this.orderSummaries.size<=ORDER_SUMMARY_ENTRIES)break;if(value.settled)this.orderSummaries.delete(other);}
+    return entry.promise;
+  }
   async presentLogin(url:string){
     ownedLoginURL(url);if(this.closed||this.loginOpening&&(this.loginOpening.epoch!==this.connectionEpoch||this.loginOpening.generation!==this.loginGeneration))return;
     this.loginPopover={id:randomUUID(),url};this.publish();
@@ -804,9 +856,9 @@ export class CompanionService {
   async openLogin(){const opening={epoch:this.connectionEpoch,generation:this.loginGeneration};this.loginOpening=opening;try{await this.psim.openLogin();}catch(error){if(!this.closed&&this.loginOpening===opening&&opening.epoch===this.connectionEpoch&&opening.generation===this.loginGeneration)this.fail(error);}finally{if(this.loginOpening===opening)this.loginOpening=undefined;}}
   async logout(){
     const scope=this.waitScope??this.sessionIdentity??null;this.sessionIdentity=undefined;this.switchWaitScope(null);const cleared=scope?this.outboundWaitStore?.clear(scope):undefined;
-    this.loginGeneration++;this.loginPopover=undefined;this.clearPendingSend();this.clearOrder();this.translationIntent++;this.invalidate();this.lastWritten=undefined;this.attempted=undefined;this.suppressed=undefined;this.state.auth='connecting';this.state.error=null;this.publish();
+    this.loginGeneration++;this.loginPopover=undefined;this.clearPendingSend();this.clearOrder();this.clearOrderSummaries();this.translationIntent++;this.invalidate();this.lastWritten=undefined;this.attempted=undefined;this.suppressed=undefined;this.state.auth='connecting';this.state.error=null;this.publish();
     try{await Promise.all([this.psim.logout(),cleared]);this.state.auth='needs_login';this.state.accountScope='unknown';this.state.phase='idle';this.state.error=null;this.publish();}
     catch(error){this.state.auth='failed';this.fail(error);}
   }
-  async dispose(){this.loginPopover=undefined;this.closed=true;clearTimeout(this.customerResolutionTimer);this.customerResolutionGeneration++;this.connectionAbort?.abort();this.dropReconnect();this.clearPendingSend();this.clearOrder();this.updatePolling();this.invalidate();this.waitController.dispose();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
+  async dispose(){this.loginPopover=undefined;this.closed=true;clearTimeout(this.customerResolutionTimer);this.customerResolutionGeneration++;this.connectionAbort?.abort();this.dropReconnect();this.clearPendingSend();this.clearOrder();this.clearOrderSummaries();this.updatePolling();this.invalidate();this.waitController.dispose();this.listeners.clear();this.retireInteractions();const external=this.external;this.external=undefined;await external?.close().catch(()=>{});await this.orderClosing;await this.psim.dispose();}
 }

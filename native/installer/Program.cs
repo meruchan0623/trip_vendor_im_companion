@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace TripVendorInstaller;
 static class Program {
     static string logPath=Path.Combine(Path.GetTempPath(),"TripVendorCompanion-Setup-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".log");
-    static void Log(string value){var line=DateTimeOffset.Now.ToString("O")+" "+value;Console.WriteLine(line);File.AppendAllText(logPath,line+Environment.NewLine,new UTF8Encoding(false));}
+    static void Log(string value){var line=DateTimeOffset.Now.ToString("O")+" "+value;Console.WriteLine(line);InstallerLog.Append(logPath,line);}
     static bool Elevated()=>new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
     static string CurrentUser()=>WindowsIdentity.GetCurrent().User?.Value??throw new InvalidOperationException("WINDOWS_USER_IDENTITY_UNAVAILABLE");
     static int Run(string operation,string target,bool forceExit,string initiatingUser){
@@ -123,7 +123,7 @@ static class Program {
             browse.Click+=async(_,_)=>{using var picker=new FolderBrowserDialog{Description="请选择包含旅游商家桌面版.exe 的客户端安装目录",UseDescriptionForTitle=true,ShowNewFolderButton=false};if(picker.ShowDialog(form)!=DialogResult.OK)return;manualRoot=picker.SelectedPath;selectedRoot=manualRoot;explicitSelection=true;await RefreshInspection();};
             refresh.Click+=async(_,_)=>await RefreshInspection();form.Shown+=async(_,_)=>await RefreshInspection();
             var names=new[]{("注入助手","install"),("卸载并恢复原资源","uninstall"),("恢复中断安装","recover")};
-            using var poll=new System.Windows.Forms.Timer{Interval=500};poll.Tick+=(_,_)=>{try{if(File.Exists(logPath))ShowOutput(File.ReadAllText(logPath));}catch{}};
+            using var poll=new System.Windows.Forms.Timer{Interval=500};poll.Tick+=(_,_)=>{try{if(File.Exists(logPath))ShowOutput(InstallerLog.Read(logPath));}catch{}};
             for(var i=0;i<names.Length;i++){
                 var operation=names[i];var button=new Button{Left=22+i*255,Top=188,Width=245,Height=34,Text=operation.Item1};operationButtons.Add(button);
                 button.Click+=async(_,_)=>{if(operationBusy||inspecting||selectedRoot==null)return;string root;
@@ -131,7 +131,8 @@ static class Program {
                     var choice=ClientExitChoice.Show(form);if(choice is not (DialogResult.Yes or DialogResult.No))return;var force=choice==DialogResult.No;operationBusy=true;UpdateButtons();try{
                         ShowOutput("正在处理客户端目录："+root+Environment.NewLine+"正在校验和处理资源，请稍候……",true);poll.Start();
                         var code=await Task.Run(()=>{if(Elevate(operation.Item2,root,force,initiatingUser))return Environment.ExitCode;return Run(operation.Item2,root,force,initiatingUser);});
-                        if(File.Exists(logPath))ShowOutput(File.ReadAllText(logPath),true);
+                        try{if(File.Exists(logPath))ShowOutput(InstallerLog.Read(logPath),true);}
+                        catch(Exception readError)when(readError is IOException or UnauthorizedAccessException){ShowOutput("操作日志暂时无法读取："+readError.Message+Environment.NewLine+"日志路径："+logPath,true);}
                         if(code==0&&operation.Item2=="install")InstallCompleteDialog.Show(form,root,Elevated(),Log);
                         else MessageBox.Show(form,code==0?"操作完成。日常请打开所选目录中的原旅游商家桌面版。":"操作未完成，请查看下方日志；没有通过校验的资源不会被覆盖。","旅游商家助手",MessageBoxButtons.OK,code==0?MessageBoxIcon.Information:MessageBoxIcon.Warning);
                     }catch(Exception error){ShowOutput(error.Message,true);}finally{poll.Stop();await RefreshInspection();operationBusy=false;UpdateButtons();}};

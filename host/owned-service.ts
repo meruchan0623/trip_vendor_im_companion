@@ -2,8 +2,10 @@ import {startHttpTelemetry,setTelemetry} from '../electron/translation-telemetry
 import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
 import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import {WORKBENCH_TARGETS,type OperatorSessionGrant,type OutboundBody,type OutboundResponse,type PsimIdentity} from '../src/shared/workbench';
+import type {OrderSummary} from '../src/shared/order-summary';
+import {collectOrderSummary} from '../electron/order-summary-query';
 export const PSIM_API_ORIGIN='https://csapi.tsim.tech';
-const READ_PATHS=new Set(['/agent/profile','/agent/package-query/dataplan-list','/agent/package-query/detail','/agent/package-query/live-detail']);
+const READ_PATHS=new Set(['/agent/profile','/agent/package-query/dataplan-list','/agent/package-query/detail','/agent/package-query/live-detail','/agent/package-query/cdr-more']);
 const POST_PATHS=new Set(['/agent/login','/agent/auth/refresh','/agent/logout','/agent/translate','/agent/package-query/perform']);
 const fail=(code:string)=>new Error(code);
 type Fetcher=(input:string,init:RequestInit)=>Promise<Response>;
@@ -50,7 +52,7 @@ export class OwnedPsimService {
   private async request(method:'GET'|'POST',path:string,body:unknown,signal?:AbortSignal,token=this.token):Promise<any>{
     const url=new URL(path,PSIM_API_ORIGIN);if(url.origin!==PSIM_API_ORIGIN||url.hash||url.username||url.password||(method==='GET'?!READ_PATHS.has(url.pathname):!POST_PATHS.has(url.pathname)))throw fail('FORBIDDEN_SERVICE_REQUEST');
     if(method==='POST'&&url.search)throw fail('FORBIDDEN_SERVICE_REQUEST');
-    if(method==='GET'){const allowed=url.pathname.endsWith('/dataplan-list')?'query_id':url.pathname.endsWith('/detail')||url.pathname.endsWith('/live-detail')?'card_dataplan_id':null;for(const key of url.searchParams.keys())if(key!==allowed)throw fail('FORBIDDEN_SERVICE_REQUEST');}
+    if(method==='GET'){const allowed=url.pathname.endsWith('/dataplan-list')?'query_id':url.pathname.endsWith('/detail')||url.pathname.endsWith('/live-detail')||url.pathname.endsWith('/cdr-more')?'card_dataplan_id':null;for(const key of url.searchParams.keys())if(key!==allowed)throw fail('FORBIDDEN_SERVICE_REQUEST');}
     const requestEpoch=this.epoch;const controller=new AbortController();this.active.add(controller);const combined=signal?AbortSignal.any([signal,controller.signal,AbortSignal.timeout(30000)]):AbortSignal.any([controller.signal,AbortSignal.timeout(30000)]);
     let telemetry:ReturnType<typeof startHttpTelemetry>;
     try{const headers:Record<string,string>={'Accept':'application/json'};if(token)headers.Authorization=`Bearer ${token}`;let payload:BodyInit|undefined;if(body instanceof FormData)payload=body;else if(body!==undefined){headers['Content-Type']='application/json';payload=JSON.stringify(body);}
@@ -137,6 +139,21 @@ export class OwnedPsimService {
     const fields:{label:string;value:string}[]=[];const details=['status','package_status','iccid','eiccid','topup_id','channel_name','supplier_name','channel_dataplan_name','type','out_order_identifier','custom_order_id'];
     for(const row of rows.slice(0,20)){const card=id(row?.card_dataplan_id);const detail=await this.request('GET',`/agent/package-query/detail?${new URLSearchParams({card_dataplan_id:card})}`,undefined,signal);const value=detail?.result??detail?.data;if(!value||typeof value!=='object')throw fail('ORDER_DETAIL_RESPONSE_INVALID');for(const key of details){const text=scalar(value[key]);if(text!==undefined)fields.push({label:key,value:text});}}
     if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');return{identifier:identifier.trim(),found:rows.length>0,fields,source:'旅游商家原编号（未转换）',ownership:'tsim_cs 服务端权限核验'};
+  }
+  /**
+   * Automatic read for the order card under 用户信息. It never re-validates the profile (a failed validate()
+   * revokes the session); the identity must stay the verified one from before the first request to the last.
+   */
+  async queryOrderSummary(identifier:string,identity:PsimIdentity,signal:AbortSignal):Promise<OrderSummary>{
+    if(typeof identifier!=='string'||!/^[-A-Za-z0-9_]{1,128}$/.test(identifier))throw fail('INVALID_ORDER_IDENTIFIER');
+    const current=()=>{
+      if(signal.aborted)throw fail('REQUEST_ABORTED');
+      const now=this.identity();if(!now||now.accountScope!==identity.accountScope||now.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');
+      return now;
+    };
+    if(!current().permissions.includes('complaint_records'))throw fail('ORDER_PERMISSION_REQUIRED');
+    const summary=await collectOrderSummary(identifier,{get:path=>this.request('GET',path,undefined,signal),post:(path,body)=>this.request('POST',path,body,signal)});
+    current();return summary;
   }
   /** Explicit handoff to the TSim operator iframe for the same verified identity. */
   operatorGrant(identity:PsimIdentity):OperatorSessionGrant|null{const current=this.identity();return current&&this.token&&current.accountScope===identity.accountScope&&current.authGeneration===identity.authGeneration?{accessToken:this.token,sessionRef:this.sessionRef}:null;}

@@ -6,8 +6,11 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { readTsimToken } from './chromium-tsim-storage';
 import { WORKBENCH_TARGETS, type OperatorSessionGrant, type OutboundBody, type OutboundResponse, type PsimIdentity } from '../src/shared/workbench';
+import type { OrderSummary } from '../src/shared/order-summary';
+import { collectOrderSummary } from './order-summary-query';
 
 const API='https://csapi.tsim.tech';
+const CARD_READ_PATHS=['/agent/package-query/detail','/agent/package-query/live-detail','/agent/package-query/cdr-more'];
 const LOGIN_URL='https://csagent.tsim.tech/login';
 export interface EmbeddedOrderResult {identifier:string;found:boolean;fields:{label:string;value:string}[]}
 export interface BrowserProfile {browserPath:string;userDataDir:string;profileDirectory:string}
@@ -151,7 +154,7 @@ export class BrowserProfileSessionService {
   private diskChanged(token:string|null){this.revoke();this.setStatus(token?'connecting':'needs_login');}
   private async request(path:string,body?:OutboundBody|{order_nums:string},signal?:AbortSignal):Promise<any>{
     const url=new URL(path,API);
-    const readPath=url.pathname==='/agent/profile'&&!url.search||url.pathname==='/agent/package-query/dataplan-list'&&[...url.searchParams.keys()].join(',')==='query_id'||url.pathname==='/agent/package-query/detail'&&[...url.searchParams.keys()].join(',')==='card_dataplan_id';
+    const readPath=url.pathname==='/agent/profile'&&!url.search||url.pathname==='/agent/package-query/dataplan-list'&&[...url.searchParams.keys()].join(',')==='query_id'||CARD_READ_PATHS.includes(url.pathname)&&[...url.searchParams.keys()].join(',')==='card_dataplan_id';
     const postPath=['/agent/translate','/agent/package-query/perform'].includes(url.pathname)&&!url.search;
     if(url.origin!==API||url.hash||url.username||url.password||!(body?postPath:readPath))throw new Error('FORBIDDEN_SERVICE_REQUEST');
     const token=this.token,generation=this.generation;if(!token)throw new Error('PSIM_LOGIN_REQUIRED');
@@ -349,15 +352,7 @@ export class BrowserProfileSessionService {
     await this.sync();
     if(!same(identity,this.current)||!this.profile||!this.token)throw new Error('AUTH_CHANGED');
     if(!identity.permissions.includes('complaint_records'))throw new Error('ORDER_PERMISSION_REQUIRED');
-    const token=this.token,profile={...this.profile};
-    const check=async()=>{
-      if(signal.aborted)throw new Error('REQUEST_ABORTED');
-      if(!same(identity,this.current))throw new Error('AUTH_CHANGED');
-      const fresh=await this.checkedTokenAt(profile);
-      if(fresh!==token){this.diskChanged(fresh);throw new Error('AUTH_CHANGED');}
-      if(signal.aborted)throw new Error('REQUEST_ABORTED');
-      if(!same(identity,this.current))throw new Error('AUTH_CHANGED');
-    };
+    const check=this.sessionGuard(identity,this.token,this.profile,signal);
     const query=async(path:string,body?:{order_nums:string})=>{await check();const result=await this.request(path,body,signal);await check();return result;};
     const safeId=(value:unknown)=>{const s=typeof value==='string'?value:typeof value==='number'&&Number.isSafeInteger(value)?String(value):'';if(!/^[-A-Za-z0-9_]{1,128}$/.test(s))throw new Error('ORDER_RESPONSE_INVALID');return s;};
     const started=await query('/agent/package-query/perform',{order_nums:identifier});
@@ -378,6 +373,34 @@ export class BrowserProfileSessionService {
     }
     if(listed.result.length>20)fields.push({label:'展示范围',value:`共 ${listed.result.length} 个套餐，当前展示前 20 个`});
     await check();return{identifier,found:listed.result.length>0,fields};
+  }
+  /**
+   * Automatic read for the order card under 用户信息. Unlike the explicit lookup it starts no session check of
+   * its own: background polling keeps the session current, and the bound token is re-read before and after.
+   */
+  async queryOrderSummary(identifier:string,signal:AbortSignal):Promise<OrderSummary>{
+    if(this.options.enabled===false)throw new Error('BROWSER_SESSION_DISABLED');
+    if(typeof identifier!=='string'||!/^[-A-Za-z0-9_]{1,128}$/.test(identifier))throw new Error('INVALID_ORDER_IDENTIFIER');
+    if(signal.aborted)throw new Error('REQUEST_ABORTED');
+    const identity=this.identity();
+    if(!identity||this.status!=='ready'||!this.profile||!this.token||this.closed||this.suspended)throw new Error('PSIM_LOGIN_REQUIRED');
+    if(!identity.permissions.includes('complaint_records'))throw new Error('ORDER_PERMISSION_REQUIRED');
+    const check=this.sessionGuard(identity,this.token,this.profile,signal);
+    await check();
+    const summary=await collectOrderSummary(identifier,{get:path=>this.request(path,undefined,signal),post:(path,body)=>this.request(path,body,signal)});
+    await check();return summary;
+  }
+  /** A disk-side logout or account switch since `identity` was verified voids the result. */
+  private sessionGuard(identity:PsimIdentity,token:string,bound:BrowserProfile,signal:AbortSignal){
+    const profile={...bound};
+    return async()=>{
+      if(signal.aborted)throw new Error('REQUEST_ABORTED');
+      if(!same(identity,this.current))throw new Error('AUTH_CHANGED');
+      const fresh=await this.checkedTokenAt(profile);
+      if(fresh!==token){this.diskChanged(fresh);throw new Error('AUTH_CHANGED');}
+      if(signal.aborted)throw new Error('REQUEST_ABORTED');
+      if(!same(identity,this.current))throw new Error('AUTH_CHANGED');
+    };
   }
   async logout():Promise<void>{this.loginIntent++;this.suspended=true;this.updatePolling();this.revoke();this.binding=null;this.setStatus('needs_login');}
   dispose(){if(this.closed)return;this.loginIntent++;this.closed=true;this.updatePolling();this.revoke();this.binding=null;}

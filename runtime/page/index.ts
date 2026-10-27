@@ -6,6 +6,7 @@ import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustom
 import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
 import {createOperatorOverlay,OPERATOR_FRAME_ID,PREWARM_DELAY_MS,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
 import {createOutboundPanel,PANEL_HOST_ID,type OutboundPanel,type PanelBridge} from './outbound-panel';
+import {createOrderSummaryCard,ORDER_SUMMARY_HOST_ID,type OrderSummaryCard} from './order-summary-card';
 export {TSIM_OPERATOR_ORIGIN};
 export const CUSTOMER_SCAN_DEBOUNCE_MS=300;
 export const CUSTOMER_REPORT_RETRY_MS=1000;
@@ -14,7 +15,7 @@ export const CUSTOMER_REPORT_MAX_ATTEMPTS=4;
 export const CUSTOMER_REPORT_RECOVERY_MS=30000;
 export const CUSTOMER_ORIGINALS_LOAD_WINDOW_MS=1500;
 export interface PageGeometry {x:number;y:number;width:number;height:number;viewportWidth:number;viewportHeight:number;devicePixelRatio:number}
-export interface PageFeatures {update(state:PanelState):void;boundary():true;geometry():PageGeometry;dispose():void;readonly overlay:OperatorOverlay;readonly panel:OutboundPanel|undefined}
+export interface PageFeatures {update(state:PanelState):void;boundary():true;geometry():PageGeometry;dispose():void;readonly overlay:OperatorOverlay;readonly panel:OutboundPanel|undefined;readonly summary:OrderSummaryCard|undefined}
 /** Production workbench: explicit order queries open the original TSim page inside the merchant client. */
 export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge;state?:PanelState;origin?:string;prewarmDelayMs?:number}={}):PageFeatures{
   const view=document.defaultView!;let disposed=false,state=options.state,conversation:string|null|undefined,originalsDeadline=0;
@@ -32,6 +33,10 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     if(state!.auth!=='ready'){void options.bridge!.invoke('openLogin',[]).catch(()=>{});return;}
     overlay.open({identifier,identifierType});
   }}):undefined;
+  // The plan card under 用户信息 follows the order chip of the bound conversation.
+  const summary=options.bridge&&state?createOrderSummaryCard(document,{load:intent=>options.bridge!.invoke('orderSummary',[intent]),openLogin:()=>{void options.bridge!.invoke('openLogin',[]).catch(()=>{});}}):undefined;
+  let shownOrder:string|undefined;
+  const syncSummary=()=>{if(!summary||disposed)return;const currentBound=bound();summary.update({identifier:currentBound?shownOrder:undefined,conversationKey:currentBound?state?.conversationKey:null,auth:state?.auth});summary.reposition();};
   let renderedBound:boolean|undefined;
   // One prewarm attempt per ready authorization; an auth reset or a newly shown order chip allows the next attempt
   // (the overlay ignores it while a frame exists and caps failed standby boots).
@@ -39,8 +44,8 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   const canPrewarm=()=>!disposed&&!!options.bridge&&state?.auth==='ready'&&document.visibilityState!=='hidden'&&bound();
   const schedulePrewarm=()=>{if(prewarmed||prewarmTimer!==undefined||!canPrewarm())return;prewarmTimer=view.setTimeout(()=>{prewarmTimer=undefined;if(prewarmed||!canPrewarm())return;prewarmed=true;overlay.prewarm();},options.prewarmDelayMs??PREWARM_DELAY_MS);};
   /** A newly shown order chip opens the TLS connection the order page will need. */
-  const showOrder=(order:string|undefined)=>{panel?.setOrder(order);if(!order){warmedOrder=undefined;return;}if(order!==warmedOrder&&bound()){warmedOrder=order;overlay.warmConnection();prewarmed=false;schedulePrewarm();}};
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready'){overlay.reset();prewarmed=false;}else if(!currentBound)overlay.close();schedulePrewarm();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});if(state.detectedOrder)showOrder(currentBound?state.detectedOrder.identifier??undefined:undefined);};
+  const showOrder=(order:string|undefined)=>{panel?.setOrder(order);shownOrder=order;syncSummary();if(!order){warmedOrder=undefined;return;}if(order!==warmedOrder&&bound()){warmedOrder=order;overlay.warmConnection();prewarmed=false;schedulePrewarm();}};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready'){overlay.reset();prewarmed=false;}else if(!currentBound)overlay.close();schedulePrewarm();syncSummary();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});if(state.detectedOrder)showOrder(currentBound?state.detectedOrder.identifier??undefined:undefined);};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
@@ -106,7 +111,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   }
   const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;clearRetry();if(document.visibilityState!=='hidden'){renderCurrent(true);syncOrder();scheduleCustomer();}};document.addEventListener('visibilitychange',onVisibility);
   if(state)update(state);
-  return{update,overlay,panel,
+  return{update,overlay,panel,summary,
     boundary(){
       renderCurrent(true);
       if(panel){
@@ -120,11 +125,13 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
         panel.attach();
         if(panel.host.isConnected&&document.getElementById(PANEL_HOST_ID)!==panel.host)throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
       }
+      const card=document.getElementById(ORDER_SUMMARY_HOST_ID);
+      if(summary&&(card&&card!==summary.host||document.querySelectorAll(`[id="${ORDER_SUMMARY_HOST_ID}"]`).length>1))throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
       const own=document.getElementById(PANEL_HOST_ID),frame=document.getElementById(OPERATOR_FRAME_ID);
       if(disposed||panel&&own!==null&&own!==panel.host||frame&&frame!==overlay.frame||overlay.frame&&(!overlay.frame.isConnected||frame!==overlay.frame||document.querySelectorAll(`[id="${OPERATOR_FRAME_ID}"]`).length!==1||!overlay.frameURL||overlay.frame.src!==overlay.frameURL))throw new Error('OWNED_FRAME_BOUNDARY_FAILED');
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;disposed=true;view.clearTimeout(prewarmTimer);clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;disposed=true;view.clearTimeout(prewarmTimer);clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();summary?.dispose();overlay.dispose();},
   };
 }

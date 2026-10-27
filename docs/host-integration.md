@@ -35,9 +35,19 @@ Windows bootstrap 在原主入口前启用本机调试监听、启动自有助�
 
 macOS 安装器仅支持固定的官方应用程序路径，且只保留启动助手所需的入口集成；不再修改消息页节流或重挂载官方 BrowserView。页面兼容性在启动时按当前用户检查，不把构建机器的用户目录写入发行包。
 
+两端 bootstrap（`scripts/lib/windows-vendor-bootstrap.cjs`、`scripts/lib/macos-vendor-bootstrap.cjs`）在加载原入口前调用同一份 `maximizeMainWindowOnOpen(app)`。它监听 `browser-window-created`，只处理标题为 `Main window` 的官方主窗口：已显示则立即最大化，否则等首次 `show` 后执行；窗口已销毁、已最大化、全屏、最小化或不可调整时跳过。每个窗口只执行一次，不拦截显示、隐藏、关闭事件，不涉及 BrowserView 或渲染节流，属于用户要求的入口启动偏好，而非 macOS 窗口生命周期修补。
+
 后台消息页等待可见后挂载；页面重建时释放旧句柄，在同一仍有效的连接上重新验证。旧客户上下文、登录动作和发送意图不能跨重连继续。
 
 运行日志仅保留状态投影、固定错误码、阶段和耗时。完整原客户端冷启动、真实登录及业务操作结果必须独立确认，不能从文件状态或构建结果推断。
+
+### 套餐速览卡片
+
+`runtime/page/order-summary-card.ts` 在已核验的当前会话识别到售后订单号后，经 `orderSummary` 动作请求宿主，以页面自有的 shadow DOM 浮层显示在订单详情框「用户信息」之后的剩余空间。可读取订单框（macOS）时，若基本信息区下方至少剩余 150px，浮层紧贴其下；否则（含 Windows 跨进程订单框）停靠在订单框底部，最高占 60%。客户详情收起、订单框隐藏或匹配不唯一时不显示。样式按构建平台分层：macOS 保持原排版；Windows 追加 `WINDOWS_TYPE`，改用 Microsoft YaHei UI / Cascadia Mono、字号阶梯 12–15px、加深三级文字颜色并收紧间距。订单号单行完整显示，其余文本换行显示，不用 `text-overflow:ellipsis`，投影的超长截断也不追加省略号。滚动区只用 `::-webkit-scrollbar` 绘制 3px 细条——设置 `scrollbar-width` 或 `scrollbar-color` 会让 Chromium 忽略这些伪元素。
+
+`electron/order-summary-query.ts` 只调用只读接口：`/agent/package-query/perform` → `dataplan-list` → 每个套餐依次读取 `detail`（必需）并并行读取 `live-detail`、`cdr-more`（可选，后者为空时回退到 `detail.cdr_list`），最多 5 个套餐、每个 3 条 CDR。不调用 `esim-info`；投影只保留卡片字段：业务流水号取 `detail.eiccid`（EICCID），ICCID 取 `detail.iccid` 且须为 18–22 位十六进制，二者按客服要求显示；IMSI、MSISDN、PIN 与安装凭据不进入页面，CDR 行也不保留 ICCID。macOS 走助手自有会话，Windows 走已绑定浏览器配置中的令牌。
+
+`CompanionService.orderSummary` 要求消息页在前台、会话与请求一致、账号已就绪且具备 `complaint_records` 权限。结果按 accountScope、认证代次与订单号缓存 60 秒，3 秒内的刷新复用缓存，在途请求合并，失败不缓存；退出、换账号或释放时清空。页面桥不传递拒绝原因，因此登录、权限、限流、会话变化和不可用均以 `failed` 结果返回，由卡片显示对应提示；页面对同订单同会话的成功或空结果同样复用 60 秒。
 
 ### 出站等待反馈与保存
 
