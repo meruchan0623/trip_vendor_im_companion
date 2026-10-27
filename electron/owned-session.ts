@@ -59,6 +59,10 @@ export class PersistentSessionService {
     const identity=this.identity();if(!identity)throw new Error('PSIM_LOGIN_REQUIRED');
     try{return await this.service.queryOriginalIdentifier(identifier,identity,signal);}catch(error){if(!this.suspended&&!this.identity())this.failure(error);throw error;}
   }
+  async queryOrderSummary(identifier:string,signal:AbortSignal){
+    const identity=this.identity();if(!identity||this.closed||this.suspended)throw new Error('PSIM_LOGIN_REQUIRED');
+    try{return await this.service.queryOrderSummary(identifier,identity,signal);}catch(error){if(!this.suspended&&!this.identity())this.failure(error);throw error;}
+  }
   async openLogin(){
     if(this.closed)throw new Error('OWNED_SERVICE_CLOSED');
     if(!this.options.openExternal)throw new Error('BROWSER_LOGIN_OPENER_REQUIRED');

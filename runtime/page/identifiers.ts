@@ -12,7 +12,7 @@ export const IDENTIFIER_CLASS='tsim-query-identifier';
 const STYLE_ID='tsim-query-identifier-style';
 export const HEADER_ORDER=/订单号\s*[：:]\s*([A-Za-z0-9_-]{6,50})\s*$/;
 /** Anything carrying this marker (or our hosts) is plugin-owned and never rescanned. */
-export const OWNED_SELECTOR='[data-tsim-owned="1"], #tsim-outbound-panel, #tsim-operator-viewport, #tsim-operator-frame, #tsim-operator-loading';
+export const OWNED_SELECTOR='[data-tsim-owned="1"], #tsim-outbound-panel, #tsim-operator-viewport, #tsim-operator-frame, #tsim-operator-loading, #tsim-order-summary';
 const TEXT_RUN_BREAK_SELECTOR=[OWNED_SELECTOR,'a','button','[role="button"]','[role="link"]','label','summary','[contenteditable]','textarea','input','select','iframe','script','style','template','time'].join(', ');
 /** Inline tags do not break text continuity; an identifier may span them. */
 const INLINE_TAGS=new Set(['ABBR','B','BDI','BDO','CITE','CODE','DEL','EM','FONT','I','INS','KBD','MARK','Q','S','SAMP','SMALL','SPAN','STRONG','SUB','SUP','U','VAR']);
