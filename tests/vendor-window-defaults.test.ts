@@ -10,7 +10,7 @@ const bootstraps={win32:load('windows-vendor-bootstrap.cjs'),darwin:load('macos-
 
 class FakeWindow extends EventEmitter{
   maximized=0;visible=true;destroyed=false;max=false;full=false;min=false;maximizable=true;resizable=true;
-  constructor(readonly title:string){super();}
+  constructor(public title:string){super();}
   getTitle(){return this.title;}
   isDestroyed(){return this.destroyed;}
   isVisible(){return this.visible;}
@@ -39,6 +39,15 @@ for(const [platform,bootstrap] of Object.entries(bootstraps)){
     // A later restore by the user stays restored: nothing listens for later resizes or shows.
     main.max=false;main.emit('show');main.emit('restore');flush();
     assert.equal(main.maximized,1);
+  });
+
+  test(`${platform}: the title is applied after browser-window-created, before construction returns`,()=>{
+    const {open,flush}=harness(bootstrap);
+    const main=open(new FakeWindow('')),other=open(new FakeWindow(''));
+    main.title='Main window';other.title='Login window';
+    assert.equal(main.maximized,0);
+    flush();
+    assert.equal(main.maximized,1);assert.equal(other.maximized,0);
   });
 
   test(`${platform}: a hidden start waits for the vendor's own first show`,()=>{

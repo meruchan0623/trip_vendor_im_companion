@@ -14,14 +14,11 @@ function patchRelaunch(app, {execPath = process.execPath, argv = process.argv.sl
   return () => { app.relaunch = original; };
 }
 // Startup preference, kept identical in windows-vendor-bootstrap.cjs: each vendor main window opens
-// maximized once. Only its construction title identifies it; a later restore or resize is the user's.
+// maximized once. Identify it after construction; a later restore or resize is the user's.
 // No show/hide/close, BrowserView or throttling behaviour of the official window is changed.
 const VENDOR_MAIN_WINDOW_TITLE = 'Main window';
 function maximizeMainWindowOnOpen(app, {defer = setImmediate} = {}) {
   const created = (_event, win) => {
-    let title;
-    try { title = win.getTitle(); } catch { return; }
-    if (title !== VENDOR_MAIN_WINDOW_TITLE) return;
     const maximize = () => {
       try {
         if (win.isDestroyed() || win.isMaximized() || win.isFullScreen() || win.isMinimized() || !win.isMaximizable() || !win.isResizable()) return;
@@ -31,7 +28,8 @@ function maximizeMainWindowOnOpen(app, {defer = setImmediate} = {}) {
     // Run after the vendor's constructor block so its resize listener sizes the attached BrowserView.
     defer(() => {
       try {
-        if (win.isDestroyed()) return;
+        // On macOS browser-window-created fires before the constructor applies its title.
+        if (win.isDestroyed() || win.getTitle() !== VENDOR_MAIN_WINDOW_TITLE) return;
         // maximize() also shows a hidden window; a background start waits for the vendor's own first show.
         if (win.isVisible()) maximize(); else win.once('show', maximize);
       } catch { /* Same as above. */ }

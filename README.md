@@ -100,7 +100,7 @@ macOS 登录使用助手自己的受保护会话。Windows 的浏览器登录方
 
 后台恢复与订单提速的共有能力已同步到 macOS：提前读取已核验的当前会话订单、并行执行独立检查、查询前重新核对会话，以及原生助手迟到就绪后的恢复。Mac 独立启动器补齐助手异常退出后的有限重试；保持助手自有登录，不修改官方窗口、BrowserView 或渲染节流。「套餐速览」与启动最大化两端共用：macOS 由助手自有会话查询；最大化是用户要求的入口启动偏好，只在官方主窗口首次显示时执行一次，不改变窗口的显示、隐藏、关闭或 BrowserView 挂载。两端源码与验证范围见 [跨平台同步记录](docs/windows-macos-parity.md)。
 
-Mac 载荷和安装器构建入口会先运行页面选择、独立登录、订单识别、原生助手、查询浮层、套餐速览、启动最大化与隔离启动器恢复检查。Shell 构建脚本通过 `.gitattributes` 固定 LF 行尾，避免 Windows 检出后在 Mac 上无法执行。
+Mac 载荷和安装器构建入口会先运行真实 Electron 窗口最大化回归（隔离窗口，不加载官方业务代码）、页面选择、独立登录、订单识别、原生助手、查询浮层、套餐速览、启动最大化与隔离启动器恢复检查。Shell 构建脚本通过 `.gitattributes` 固定 LF 行尾，避免 Windows 检出后在 Mac 上无法执行。
 
 隔离登录与订单检查：`node tests/run-macos-owned-session.mjs`；页面内订单窗口检查：`node tests/run-operator-overlay.mjs`。原生安装事务检查见 [macOS 安装器说明](native/macos-installer/README.md)。构建成功不代表物理键盘、输入法、原客户端冷启动或真实服务验收。
 

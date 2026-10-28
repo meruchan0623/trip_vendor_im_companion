@@ -44,7 +44,7 @@ function read(command, commandArgs) {
 }
 const plist = (app, key) => read('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(app, 'Contents/Info.plist')]);
 // Validate the darwin runtime and assistant-only supervisor before building a payload.
-for (const suite of ['macos-page-selection', 'macos-owned-session', 'macos-runtime-order', 'macos-native-parity', 'operator-overlay', 'macos-launcher-recovery', 'vendor-window-defaults', 'order-summary']) {
+for (const suite of ['macos-page-selection', 'macos-owned-session', 'macos-runtime-order', 'macos-native-parity', 'operator-overlay', 'macos-launcher-recovery', 'vendor-window-defaults', 'macos-window-defaults', 'order-summary']) {
   run(process.execPath, [`tests/run-${suite}.mjs`]);
 }
 async function verifyOfficial(app) {
