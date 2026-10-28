@@ -1,3 +1,4 @@
+import {serviceErrorMessage} from '../src/shared/translation-http-error';
 import {ownedLoginURL,isLoginPopoverId,type LoginPopover} from '../src/shared/owned-login';
 import { randomUUID, createHash } from 'node:crypto';
 import { BrowserProfileSessionService, type BrowserProfileSessionOptions } from './browser-profile-session';
@@ -39,7 +40,11 @@ const messages:Record<string,string>={
   PSIM_SESSION_CLEAR_FAILED:'登录态清除失败，请检查本机存储后重试。',
   BROWSER_BRIDGE_UNAVAILABLE:'未读取到浏览器 TSim 会话，请确认已在 Edge 或 Chrome 登录。',
   BROWSER_SESSION_ACCESS_DENIED:'系统阻止读取浏览器登录态。请检查浏览器数据的访问权限，再重试。',
-  SERVICE_UNAVAILABLE:'暂时无法核验 TSim 登录态，请检查网络后重试。',
+  SERVICE_UNAVAILABLE:'暂时无法连接 TSIM 服务，请检查网络后重试。',
+  SERVICE_TIMEOUT:'TSIM 服务请求超时，请稍后重试。',
+  TRANSLATION_PERMISSION_REQUIRED:'当前 TSIM 账号没有翻译权限。',
+  ORDER_PERMISSION_REQUIRED:'当前 TSIM 账号没有订单查询权限。',
+  RATE_LIMITED:'TSIM 请求过于频繁，请稍后重试。',
   BROWSER_SESSION_STORAGE_INVALID:'浏览器会话数据暂不可读，请稍后重试。',
   BROWSER_SESSION_TIMEOUT:'TSim 会话核验超时，请稍后重试。',
   BROWSER_LOGIN_OPEN_FAILED:'TSim 登录页未能打开，请检查 Edge 或 Chrome 后重试。',
@@ -73,7 +78,7 @@ export type SessionPort=Pick<BrowserProfileSessionService,'identity'|'sync'|'set
  * In-flight reads are always joined; failures are never cached.
  */
 const ORDER_SUMMARY_TTL_MS=60_000,ORDER_SUMMARY_REFRESH_MS=3000,ORDER_SUMMARY_ENTRIES=20;
-const ORDER_SUMMARY_FAILURES:Record<string,OrderSummaryFailure>={PSIM_LOGIN_REQUIRED:'login',PSIM_HTTP_401:'login',PSIM_HTTP_423:'login',PROFILE_UNVERIFIED:'login',ORDER_PERMISSION_REQUIRED:'permission',PSIM_HTTP_403:'permission',PSIM_HTTP_422:'permission',RATE_LIMITED:'rate_limited',PSIM_HTTP_429:'rate_limited'};
+const ORDER_SUMMARY_FAILURES:Record<string,OrderSummaryFailure>={PSIM_LOGIN_REQUIRED:'login',PSIM_HTTP_401:'login',PSIM_HTTP_423:'login',PROFILE_UNVERIFIED:'login',ORDER_PERMISSION_REQUIRED:'permission',PSIM_HTTP_403:'permission',RATE_LIMITED:'rate_limited',PSIM_HTTP_429:'rate_limited'};
 type OrderSummaryEntry={at:number;scope:string;controller:AbortController;promise:Promise<OrderSummaryResult>;settled?:OrderSummaryResult};
 export type SessionFactory=(changed:(identity:PsimIdentity|null)=>void,options:BrowserProfileSessionOptions)=>SessionPort;
 export interface OrderWindowPort {open(selection:OperatorSelection,profile:BrowserProfile,authorize:()=>Promise<boolean>):Promise<void>;close():Promise<void>}
@@ -304,7 +309,7 @@ export class CompanionService {
   }
   private telemetryFailure(error:unknown){
     const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';
-    const reason=/AUTH_CHANGED/.test(code)?'auth-changed':/LOGIN|HTTP_401|HTTP_423/.test(code)?'login-required':/PERMISSION|HTTP_403/.test(code)?'permission-required':/TIMEOUT/.test(code)?'timeout':/429|RATE_LIMITED/.test(code)?'rate-limited':/ABORT|SUPERSEDED/.test(code)?'aborted':/DRAFT_CHANGED/.test(code)?'draft-changed':/READBACK|ECHO|INVALID.*RESPONSE/.test(code)?'invalid-response':'request-failed';
+    const reason=/AUTH_CHANGED/.test(code)?'auth-changed':/LOGIN|HTTP_401|HTTP_423/.test(code)?'login-required':/PERMISSION|HTTP_403/.test(code)?'permission-required':/TIMEOUT/.test(code)?'timeout':code==='SERVICE_UNAVAILABLE'?'network':/429|RATE_LIMITED/.test(code)?'rate-limited':/ABORT|SUPERSEDED/.test(code)?'aborted':/DRAFT_CHANGED/.test(code)?'draft-changed':/READBACK|ECHO|INVALID.*RESPONSE/.test(code)?'invalid-response':'request-failed';
     setTelemetry({code,reason,outcome:reason==='rate-limited'?'rate-limited':reason==='aborted'?'cancelled':'failed'});
   }
   constructor(private native:NativeAdapter,openLoginURL:(url:string)=>Promise<void>,private onContextChanged:()=>void=()=>{},sessionOptions:BrowserProfileSessionOptions={},private embeddedMode=false,sessionFactory:SessionFactory=(changed,options)=>new BrowserProfileSessionService(changed,options),private translationOptionsStore?:TranslationOptionsStore,private orderWindow?:OrderWindowPort,private outboundWaitStore?:OutboundWaitStore,private runtimeLogs:()=>RuntimeLogEntry[]=()=>[]){
@@ -323,7 +328,7 @@ export class CompanionService {
     },{...sessionOptions,openExternal:openLoginURL,backgroundPolling:false,onStatus:(status,code)=>{
       if(this.closed)return;
       this.state.auth=status;
-      if(status==='failed'){this.sessionError=messages[code??'SERVICE_UNAVAILABLE']??messages.BROWSER_SESSION_STORAGE_INVALID;this.state.error=this.sessionError;this.state.phase='failed';}
+      if(status==='failed'){this.sessionError=serviceErrorMessage(code)??messages[code??'SERVICE_UNAVAILABLE']??messages.BROWSER_SESSION_STORAGE_INVALID;this.state.error=this.sessionError;this.state.phase='failed';}
       else if(status==='ready'||status==='needs_login'){if(this.sessionError&&this.state.error===this.sessionError){this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';}this.sessionError=null;}
       sessionOptions.onStatus?.(status,code);this.schedule();this.publish();
     }});
@@ -395,7 +400,7 @@ export class CompanionService {
     else if(!keepFailure){this.state.phase='idle';this.state.error=null;}
     this.publish();
   }
-  private fail(error:unknown,sourceFailure=false){this.telemetryFailure(error);const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请核对连接后重试。`;this.state.phase='failed';this.publish();}
+  private fail(error:unknown,sourceFailure=false){this.telemetryFailure(error);const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:serviceErrorMessage(error)??messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请联系支持。`;this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){
@@ -799,7 +804,7 @@ export class CompanionService {
       await this.acquireEditor();
       try{const capture=await this.capture();if(!current())return;this.adopt(capture);this.publish();if(!current())return;}finally{this.setBusy(false);}
       this.order={identifier:result.identifier,status:result.found?'ready':'empty',fields:result.fields,error:null};this.publish();
-    }catch(error){if(current()){const code=error instanceof Error?error.message:'';this.order={identifier,status:'failed',fields:[],error:ORDER_FAILURES[code]??(/^PSIM_HTTP_(?:401|423)$/.test(code)?ORDER_FAILURES.AUTH_CHANGED:'订单查询未完成，请检查网络连接后重试。')};this.publish();}}
+    }catch(error){if(current()){const code=error instanceof Error?error.message:'';this.order={identifier,status:'failed',fields:[],error:serviceErrorMessage(error)??ORDER_FAILURES[code]??'订单查询未完成，请稍后重试。'};this.publish();}}
     finally{if(this.orderRequest===request)this.orderRequest=undefined;}
   }
   private orderSummaries=new Map<string,OrderSummaryEntry>();

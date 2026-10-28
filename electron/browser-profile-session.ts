@@ -1,5 +1,6 @@
 import {addTelemetry,setTelemetry,timeTelemetry,startHttpTelemetry} from './translation-telemetry';
 import {outboundTranslationBody} from '../src/shared/translation-request';
+import {translationHttpError,TranslationHttpError} from '../src/shared/translation-http-error';
 import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
 import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import { access, readdir } from 'node:fs/promises';
@@ -160,7 +161,9 @@ export class BrowserProfileSessionService {
     if(url.origin!==API||url.hash||url.username||url.password||!(body?postPath:readPath))throw new Error('FORBIDDEN_SERVICE_REQUEST');
     const token=this.token,generation=this.generation;if(!token)throw new Error('PSIM_LOGIN_REQUIRED');
     const controller=new AbortController();this.active.add(controller);
-    const combined=AbortSignal.any([controller.signal,AbortSignal.timeout(this.options.requestTimeoutMs??20000),...(signal?[signal]:[])]);
+    const deadline=AbortSignal.timeout(this.options.requestTimeoutMs??20000);
+    const combined=AbortSignal.any([controller.signal,deadline,...(signal?[signal]:[])]);
+    let authRefusalGeneration:number|undefined;
     let telemetry:ReturnType<typeof startHttpTelemetry>;
     try{
       const payload=body?JSON.stringify(body):undefined;
@@ -169,11 +172,14 @@ export class BrowserProfileSessionService {
       telemetry?.headers(response);
       if(this.closed||this.suspended||generation!==this.generation||token!==this.token)throw new Error('AUTH_CHANGED');
       // Any auth or permission refusal makes the next outbound translation run a full check first.
-      if([401,403,422,423].includes(response.status))this.verified=undefined;
-      if(response.status===401||response.status===423){if(path==='/agent/translate'){this.revoke();this.setStatus('needs_login');}throw new Error('PSIM_LOGIN_REQUIRED');}
-      if(response.status===403||response.status===422)throw new Error(path.startsWith('/agent/package-query/')?'ORDER_PERMISSION_REQUIRED':'TRANSLATION_PERMISSION_REQUIRED');
-      if(response.status===429)throw new Error('RATE_LIMITED');
-      if(!response.ok)throw new Error('SERVICE_UNAVAILABLE');
+      if([401,403,423].includes(response.status))this.verified=undefined;
+      if(!response.ok){
+        const failure=await translationHttpError(response,combined);
+        if(this.closed||this.suspended||generation!==this.generation||token!==this.token)throw new Error('AUTH_CHANGED');
+        if(response.status===401||response.status===423){if(path==='/agent/translate'){authRefusalGeneration=generation+1;this.revoke();this.setStatus('needs_login');}throw failure;}
+        if(response.status===403)throw new Error(path.startsWith('/agent/package-query/')?'ORDER_PERMISSION_REQUIRED':'TRANSLATION_PERMISSION_REQUIRED');
+        throw failure;
+      }
       if(Number(response.headers.get('content-length'))>200000)throw new Error('INVALID_SERVICE_RESPONSE');
       telemetry?.body();
       const reader=response.body?.getReader();if(!reader)throw new Error('INVALID_SERVICE_RESPONSE');
@@ -186,8 +192,10 @@ export class BrowserProfileSessionService {
     }catch(error){
       telemetry?.failed();
       if(signal?.aborted)throw new Error('REQUEST_ABORTED');
-      if(this.closed||this.suspended||generation!==this.generation)throw new Error('AUTH_CHANGED');
-      if(combined.aborted)throw new Error('BROWSER_SESSION_TIMEOUT');
+      if(this.closed||this.suspended||generation!==this.generation&&this.generation!==authRefusalGeneration)throw new Error('AUTH_CHANGED');
+      if(deadline.aborted)throw new Error('BROWSER_SESSION_TIMEOUT');
+      // Only this request's own 401/423 revocation may preserve its refusal status.
+      if(error instanceof TranslationHttpError)throw error;
       if(error instanceof Error&&/^[A-Z][A-Z0-9_]{1,80}$/.test(error.message))throw error;
       throw new Error('SERVICE_UNAVAILABLE');
     }finally{telemetry?.done();this.active.delete(controller);}
@@ -250,7 +258,7 @@ export class BrowserProfileSessionService {
           if(!this.closed&&!this.suspended&&this.current?.authGeneration===this.generation)this.verified={startedAt,generation:this.generation};
           this.setStatus('ready');return;
         }catch(error){
-          if(!bound&&!this.closed&&!this.suspended&&expectedGeneration===this.generation&&error instanceof Error&&['PSIM_LOGIN_REQUIRED','PROFILE_UNVERIFIED'].includes(error.message)){
+          if(!bound&&!this.closed&&!this.suspended&&expectedGeneration===this.generation&&error instanceof Error&&['PSIM_LOGIN_REQUIRED','PSIM_HTTP_401','PSIM_HTTP_423','PROFILE_UNVERIFIED'].includes(error.message)){
             this.revoke();expectedGeneration=this.generation;continue;
           }
           throw error;
@@ -258,7 +266,7 @@ export class BrowserProfileSessionService {
       }
       if(readErrors.length)throw readErrors.find(error=>error.message==='BROWSER_SESSION_ACCESS_DENIED')??readErrors[0];
       this.revoke();this.setStatus('needs_login');
-    }catch(error){this.verified=undefined;if(expectedGeneration===this.generation&&!this.closed&&!this.suspended){this.revoke();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';this.setStatus(code==='PSIM_LOGIN_REQUIRED'?'needs_login':'failed',code==='PSIM_LOGIN_REQUIRED'?undefined:code);}throw error;}
+    }catch(error){this.verified=undefined;if(expectedGeneration===this.generation&&!this.closed&&!this.suspended){this.revoke();const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';const login=['PSIM_LOGIN_REQUIRED','PSIM_HTTP_401','PSIM_HTTP_423'].includes(code);this.setStatus(login?'needs_login':'failed',login?undefined:code);}throw error;}
   }
   /**
    * `superseded` is aborted when a newer revision of the same draft replaces this request. Before the POST

@@ -5,11 +5,13 @@ import {webcrypto} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {setTimeout as delay} from 'node:timers/promises';
 import {BrowserProfileSessionService} from '../electron/browser-profile-session';
+import {BrowserSessionService} from '../electron/browser-session';
 import {PersistentSessionService} from '../electron/owned-session';
 import {OwnedPsimService} from '../host/owned-service';
 import {createTelemetry,runWithTelemetry,currentTelemetry,setTelemetry,finishTelemetry,TELEMETRY_RUN_ID,startHttpTelemetry} from '../electron/translation-telemetry';
 import {sanitizeTelemetry,formatTelemetry} from '../src/shared/runtime-telemetry';
 import {projectTranslationDiagnostics,translationDiagnosticsFromResponse} from '../src/shared/translation-response-diagnostics';
+import {translationHttpError,TranslationHttpError,serviceErrorMessage} from '../src/shared/translation-http-error';
 import type {OutboundBody} from '../src/shared/workbench';
 const body:OutboundBody={text:'正文不能进入日志',source_lang:'zh',target_lang:'en',purpose:'outbound',draft_request_id:'fixture-translation',composer_content_version:'fixture-version'};
 const result=(translated_text='Private translated text',extra:Record<string,unknown>={})=>({success:true,data:{translated_text,draft_request_id:body.draft_request_id,composer_content_version:body.composer_content_version,...extra}});
@@ -21,7 +23,6 @@ function stream(value:unknown){const encoded=new TextEncoder().encode(JSON.strin
 async function capture(fn:(logs:Record<string,any>[])=>Promise<void>){const original=console.log,logs:Record<string,any>[]=[];console.log=(line:unknown)=>{if(typeof line==='string')try{logs.push(JSON.parse(line));}catch{}};try{await fn(logs);}finally{console.log=original;}}
 async function owned(fetcher:(input:string,init:RequestInit)=>Promise<Response>){const service=new OwnedPsimService(async(input,init)=>new URL(input).pathname==='/agent/profile'?profile():fetcher(input,init),()=>{},{load:async()=>({accessToken:'fixture-token',sessionRef:'fixture-ref'}),save:async()=>{},clear:async()=>{}});await service.ensureSession();return service;}
 async function browser(fetcher:typeof fetch){const service=new BrowserProfileSessionService(()=>{},{backgroundPolling:false,fetcher,requestTimeoutMs:20,discoverProfiles:async()=>[{browserPath:'fixture-browser',userDataDir:'fixture-data',profileDirectory:'Default'}],readToken:async()=> 'fixture-token'});await service.sync();return service;}
-
 function bridge(fetcher:(input:string,init:RequestInit)=>Promise<Response>){
   const source=readFileSync('browser-extension/background.js','utf8'),entry=source.slice(source.indexOf('async function pageRequest('),source.indexOf('async function inject('));
   return runInNewContext(`(${entry})`,{location:{origin:'https://csagent.tsim.tech'},localStorage:{getItem:()=> 'fixture-token'},crypto:webcrypto,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch:fetcher});
@@ -47,6 +48,118 @@ test('all translation exits are accepted initially by old extra-forbid and new o
       try{assert.equal((await session.translate(body,session.identity()!,new AbortController().signal)).data.translated_text,'Private translated text');}finally{session.dispose();}
     }
     assert.equal(requests,1,`${schema}/${mode} must make exactly one business request`);
+  }
+});
+
+test('422 projection keeps only bounded validation fields and trusted UUID diagnostics',async()=>{
+  const requestId='12345678-1234-4234-8234-123456789abc';
+  const error=await translationHttpError(json({detail:[{loc:['body','client_source'],type:'extra_forbidden',msg:'RAW_SECRET',input:{token:'TOKEN_SECRET',body:'CHAT_SECRET'}},{loc:['body','CHAT_SECRET'],type:'missing'},{loc:['body','text'],type:'TOKEN_SECRET'}],request_id:'CHAT_SECRET'},{status:422,headers:{'x-request-id':requestId}}));
+  assert.equal(error.message,'PSIM_HTTP_422_VALIDATION');assert.deepEqual(error.validation,[{field:'client_source',type:'extra_forbidden'}]);assert.equal(error.requestId,requestId);
+  assert.match(serviceErrorMessage(error)!,/兼容校验失败/);assert.match(serviceErrorMessage(error)!,new RegExp(requestId));
+  assert.doesNotMatch(JSON.stringify(error)+serviceErrorMessage(error),/RAW_SECRET|TOKEN_SECRET|CHAT_SECRET|input|body/);
+  assert.equal((await translationHttpError(json({detail:[]},{status:422,headers:{'x-request-id':'TOKEN_SECRET'}}))).requestId,undefined);
+});
+
+test('missing, oversized, malformed and unsupported 422 bodies fall back to accurate status without retry',async()=>{
+  let cancelled=0;
+  const oversized=()=>new Response(new ReadableStream({pull(controller){controller.enqueue(new Uint8Array(20_000));},cancel(){cancelled++;}}),{status:422});
+  for(const response of [new Response(null,{status:422}),new Response('not-json RAW_SECRET',{status:422}),json({detail:'RAW_SECRET'},{status:422}),oversized(),json({detail:[]},{status:422,headers:{'content-length':'20000'}})]){
+    const error=await translationHttpError(response);assert.equal(error.message,'PSIM_HTTP_422');assert.match(serviceErrorMessage(error)!,/未接受此请求/);assert.doesNotMatch(serviceErrorMessage(error)!,/网络|权限|RAW_SECRET/);
+  }
+  assert.equal(cancelled,1);
+});
+
+test('unknown and validation 422 at every HTTP exit stay single-request and cannot become permission errors',async()=>{
+  for(const detail of [[],[{loc:['body','client_source'],type:'extra_forbidden',input:'CHAT_SECRET',msg:'RAW_SECRET'}]])for(const mode of ['owned','browser','extension']){
+    let requests=0;const fetcher=async(input:string)=>{if(new URL(input).pathname==='/agent/profile')return profile();requests++;return json({detail,body:'CHAT_SECRET',token:'TOKEN_SECRET'},{status:422});};
+    const expected=detail.length?'PSIM_HTTP_422_VALIDATION':'PSIM_HTTP_422';
+    if(mode==='extension'){
+      const response=await bridge(fetcher)('translate',{body,expectedAccount:'psim:7',expectedPermissions:['complaint_records']},null,'fixture');assert.equal(response.error,expected);
+    }else{
+      const session=mode==='owned'?await owned(fetcher):await browser(fetcher as typeof fetch),identity=session.identity();
+      try{await assert.rejects(session.translate(body,identity!,new AbortController().signal),(error:Error)=>{assert.equal(error.message,expected);assert.doesNotMatch(JSON.stringify(error),/CHAT_SECRET|TOKEN_SECRET|RAW_SECRET/);return true;});assert.deepEqual(session.identity(),identity);}finally{session.dispose();}
+    }
+    assert.equal(requests,1);
+  }
+});
+
+test('HTTP status display distinguishes authentication, permission, refusal, throttling and service failure',()=>{
+  for(const [status,phrase] of [[401,'登录已失效'],[403,'没有此操作权限'],[423,'账号已锁定'],[429,'过于频繁'],[500,'服务暂时不可用'],[502,'服务暂时不可用']] as const){
+    const message=serviceErrorMessage(new TranslationHttpError(status))!;assert.match(message,new RegExp(phrase));assert.match(message,new RegExp(`HTTP ${status}`));assert.doesNotMatch(message,/网络/);
+  }
+});
+
+test('explicit cancellation stops a stalled error-body read and never causes a second request',async()=>{
+  for(const mode of ['owned','browser','extension']){
+    let sent!:()=>void,cancelled=0,requests=0;const started=new Promise<void>(resolve=>sent=resolve);
+    const fetcher=async(input:string)=>{if(new URL(input).pathname==='/agent/profile')return profile();requests++;sent();return new Response(new ReadableStream({pull(){},cancel(){cancelled++;}}),{status:422});};
+    if(mode==='extension'){
+      const pageRequest=bridge(fetcher),pending=pageRequest('translate',{body,expectedAccount:'psim:7',expectedPermissions:['complaint_records']},null,'cancel-fixture');
+      await started;await pageRequest('cancel',null,null,'cancel-fixture');assert.equal((await pending).error,'REQUEST_ABORTED');
+    }else{
+      const session=mode==='owned'?await owned(fetcher):await browser(fetcher as typeof fetch),controller=new AbortController();
+      try{const pending=session.translate(body,session.identity()!,controller.signal);await started;controller.abort();await assert.rejects(pending,/REQUEST_ABORTED/);}finally{session.dispose();}
+    }
+    assert.equal(requests,1);assert.equal(cancelled,1);
+  }
+});
+
+test('stalled 422 error-body reads preserve deadline and external revocation priority in browser and owned sessions',async()=>{
+  const originalTimeout=AbortSignal.timeout;
+  // Owned requests retain their production 30 s deadline; shorten only this isolated synthetic test.
+  AbortSignal.timeout=()=>originalTimeout(20);
+  const keepAlive=setTimeout(()=>{},2000);
+  try{
+    for(const mode of ['owned','browser'])for(const stop of ['timeout','logout','dispose']){
+      let started!:()=>void,requests=0,cancelled=0;const sent=new Promise<void>(resolve=>started=resolve);
+      const fetcher=async(input:string)=>{if(new URL(input).pathname==='/agent/profile')return profile();if(new URL(input).pathname==='/agent/logout')return json({success:true});requests++;return new Response(new ReadableStream({pull(){started();},cancel(){cancelled++;}},{highWaterMark:0}),{status:422});};
+      const service=mode==='owned'?await owned(fetcher):await browser(fetcher as typeof fetch);
+      try{
+        const pending=service.translate(body,service.identity()!,new AbortController().signal);
+        const rejected=assert.rejects(pending,stop==='timeout'?(mode==='owned'?/^Error: SERVICE_TIMEOUT$/:/^Error: BROWSER_SESSION_TIMEOUT$/):/^Error: AUTH_CHANGED$/);
+        await sent;if(stop==='logout')await service.logout();else if(stop==='dispose')service.dispose();
+        await rejected;assert.equal(requests,1);assert.equal(cancelled,1);
+        assert.equal(service.identity()===null,stop!=='timeout');
+      }finally{service.dispose();}
+    }
+  }finally{AbortSignal.timeout=originalTimeout;clearTimeout(keepAlive);}
+});
+
+test('401 and 423 self-revocation retain refusal status and explicit cancellation still wins',async()=>{
+  for(const mode of ['owned','browser'])for(const status of [401,423])for(const abort of [false,true]){
+    const controller=new AbortController();let requests=0;
+    const fetcher=async(input:string)=>{if(new URL(input).pathname==='/agent/profile')return profile();requests++;if(abort)controller.abort();return json({detail:'PRIVATE_SECRET'},{status});};
+    const session=mode==='owned'?await owned(fetcher):await browser(fetcher as typeof fetch);
+    try{await assert.rejects(session.translate(body,session.identity()!,controller.signal),abort?/REQUEST_ABORTED/:new RegExp(`PSIM_HTTP_${status}`));assert.equal(requests,1);if(!abort)assert.equal(session.identity(),null);}finally{session.dispose();}
+  }
+});
+
+test('serialized extension auth refusals invalidate the native bridge identity and all pending translations',async()=>{
+  for(const status of [401,423,422,403,429,503,'legacy-login'] as const){
+    const key='a'.repeat(64)+':7',identity={accountScope:'psim:7',authGeneration:1,permissions:['complaint_records']};
+    const session=Object.create(BrowserSessionService.prototype) as BrowserSessionService,fixture=session as any;
+    const changed:unknown[]=[],writes:any[]=[];
+    Object.assign(fixture,{current:identity,sessionKey:key,generation:1,pending:new Map(),ready:Promise.resolve(),disposed:false,suspended:false,options:{requestTimeoutMs:1000},waitBounds:{enabled:true,min_ms:100,max_ms:1000},orderWindows:new Set(),changed:(value:unknown)=>changed.push(value),socket:{write(line:string){writes.push(JSON.parse(line));return true;}}});
+    let requests=0;
+    const pageRequest=bridge(async(input:string)=>{if(new URL(input).pathname==='/agent/profile')return profile();requests++;return json({detail:[]},{status:typeof status==='number'?status:401});});
+    const first=session.translate(body,identity,new AbortController().signal),second=session.translate({...body,draft_request_id:'second-fixture'},identity,new AbortController().signal);
+    const revoked=status===401||status===423||status==='legacy-login';
+    const firstRejected=assert.rejects(first,revoked?/AUTH_CHANGED/:new RegExp(`PSIM_HTTP_${status}`));
+    const secondRejected=assert.rejects(second,/AUTH_CHANGED/);
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    const outgoing=writes.filter(value=>value.type==='request');assert.equal(outgoing.length,2);
+    assert.deepEqual(outgoing[0].payload.body,body);
+    const reply=status==='legacy-login'?{ok:false,error:'PSIM_LOGIN_REQUIRED'}:await pageRequest('translate',{body:outgoing[0].payload.body,expectedAccount:identity.accountScope,expectedPermissions:identity.permissions},null,'native-fixture');
+    fixture.receive({type:'response',id:outgoing[0].id,ok:reply.ok,error:reply.error});
+    await firstRejected;
+    if(revoked){
+      assert.equal(session.identity(),null);assert.equal(session.outboundWaitBounds(),null);assert.equal(fixture.pending.size,0);assert.deepEqual(changed,[null]);
+      fixture.receive({type:'response',id:outgoing[1].id,ok:true,value:result()});assert.equal(session.identity(),null);
+    }else{
+      assert.deepEqual(session.identity(),identity);assert.equal(fixture.pending.size,1);assert.equal(changed.length,0);await session.logout();
+    }
+    await secondRejected;assert.equal(requests,status==='legacy-login'?0:1);
+    await assert.rejects(session.translate(body,identity,new AbortController().signal),/AUTH_CHANGED/);
   }
 });
 
@@ -104,7 +217,7 @@ test('concurrent traces remain isolated even with interleaved HTTP and finish',a
   try{const traces=[createTelemetry('translate',{targetLanguage:'ja'}),createTelemetry('translate',{targetLanguage:'en'})];await Promise.all(traces.map(trace=>runWithTelemetry(trace,async()=>{await service.translate({...body,target_lang:trace.fields.targetLanguage as 'ja'|'en'},service.identity()!,new AbortController().signal);finishTelemetry(trace,'shown');})));assert.equal(logs.length,2);assert.equal(new Set(logs.map(log=>log.traceId)).size,2);assert.equal(logs.find(log=>log.targetLanguage==='ja')?.providerReported,'deepl');assert.equal(logs.find(log=>log.targetLanguage==='en')?.providerReported,'google_nmt');assert.equal(requests,2);}finally{service.dispose();}
 }));
 
-test('HTTP errors preserve status, safe retry delay and phase without consuming error bodies',async()=>capture(async logs=>{
+test('HTTP errors preserve status, safe retry delay and phase with bounded error projection',async()=>capture(async logs=>{
   let bodyReads=0;const service=await owned(async()=>{const response=json({token:'private error'},{status:429,headers:{'retry-after':'2','x-request-id':'customer-id'}});Object.defineProperty(response,'text',{value:async()=>{bodyReads++;throw Error('must not read');}});return response;});
   try{const trace=createTelemetry('translate');await runWithTelemetry(trace,async()=>{await assert.rejects(service.translate(body,service.identity()!,new AbortController().signal),/PSIM_HTTP_429/);});finishTelemetry(trace,'rate-limited');assert.equal(logs[0].httpStatus,429);assert.equal(logs[0].httpFailurePhase,'validation');assert.equal(logs[0].headerRetryAfterMs,2000);assert.ok(logs[0].failedElapsedMs>=0);assert.equal(logs[0].responseBytes,undefined);assert.equal(bodyReads,0);}finally{service.dispose();}
 }));

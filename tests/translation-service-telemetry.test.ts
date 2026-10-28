@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {CompanionService} from '../electron/companion-service';
 import {setTelemetry} from '../electron/translation-telemetry';
 import {createRuntimeDiagnostics} from '../electron/runtime-diagnostics';
+import {TranslationHttpError} from '../src/shared/translation-http-error';
 const settle=async()=>{for(let i=0;i<5;i++)await new Promise<void>(resolve=>setImmediate(resolve));};
 function deferred<T=void>(){let resolve!:(value:T)=>void,reject!:(error:Error)=>void;const promise=new Promise<T>((ok,no)=>{resolve=ok;reject=no;});return{promise,resolve,reject};}
 const snapshot=(text='客户正文_SECRET')=>({text,conversationId:'CUSTOMER_SECRET',revision:text.length,composing:false,scopeGeneration:1,authGeneration:1,editorIdentity:'editor',docFingerprint:'private',isPlainText:true,platformAccountScope:'ACCOUNT_SECRET',composerId:'composer',documentGeneration:1});
@@ -57,6 +58,40 @@ test('replacement and Enter are separately linked and never claim confirmed mess
 });
 test('authentication refusal before HTTP remains a failed operation with no fabricated network timings',async()=>{
   const f=await fixture();try{f.f.psim.sync=async()=>{throw Error('PSIM_LOGIN_REQUIRED');};await f.service.translate('en');await settle();const row=f.logs.find(value=>value.event==='translation-summary');assert.equal(row.outcome,'failed');assert.equal(row.reason,'login-required');assert.equal(row.translationSent,undefined);assert.equal(row.httpMs,undefined);assert.equal(f.requests(),0);}finally{await f.close();}
+});
+test('actual failed translations show TSIM status-specific errors and keep 422 out of permission and network classifications',async()=>{
+  const cases:[Error,RegExp,string][]=[
+    [new TranslationHttpError(422),/未接受此请求.*HTTP 422/,'request-failed'],
+    [new TranslationHttpError(422,[{field:'client_source',type:'extra_forbidden'}]),/格式或客户端兼容校验失败.*HTTP 422/,'request-failed'],
+    [new TranslationHttpError(401),/登录已失效.*HTTP 401/,'login-required'],
+    [new TranslationHttpError(403),/没有此操作权限.*HTTP 403/,'permission-required'],
+    [new TranslationHttpError(423),/账号已锁定.*HTTP 423/,'login-required'],
+    [new TranslationHttpError(429),/过于频繁.*HTTP 429/,'rate-limited'],
+    [new TranslationHttpError(503),/服务暂时不可用.*HTTP 503/,'request-failed'],
+    [new Error('SERVICE_UNAVAILABLE'),/无法连接 TSIM 服务.*网络/,'network'],
+    [new Error('SERVICE_TIMEOUT'),/请求超时/,'timeout'],
+  ];
+  for(const [error,expected,reason] of cases){
+    const f=await fixture();let calls=0;
+    try{
+      f.f.psim.translate=async()=>{calls++;throw error;};
+      await f.service.translate('en');await settle();
+      assert.equal(calls,1);assert.match(f.service.getState().error!,expected);assert.doesNotMatch(f.service.getState().error!,/PSIM|TSim/);
+      if(error.message.startsWith('PSIM_HTTP_422'))assert.doesNotMatch(f.service.getState().error!,/权限|网络/);
+      const row=f.logs.find(value=>value.event==='translation-summary');assert.equal(row.reason,reason);
+    }finally{await f.close();}
+  }
+});
+test('order summary 422 stays unavailable while explicit 403 remains permission denied',async()=>{
+  const f=await fixture();
+  try{
+    f.f.psim.identity().permissions.push('complaint_records');
+    for(const [error,reason] of [[new TranslationHttpError(422),'unavailable'],[new TranslationHttpError(422,[{field:'text',type:'missing'}]),'unavailable'],[new TranslationHttpError(403),'permission']] as const){
+      f.f.psim.queryOrderSummary=async()=>{throw error;};
+      const result=await f.service.orderSummary({identifier:'ORDER1',conversationKey:f.f.context(),refresh:true});
+      assert.deepEqual(result,{status:'failed',identifier:'ORDER1',reason});
+    }
+  }finally{await f.close();}
 });
 test('statistics use only observed numeric samples and do not invent server or provider measurements',()=>{
   const dir=mkdtempSync(join(tmpdir(),'tsim-summary-'));try{

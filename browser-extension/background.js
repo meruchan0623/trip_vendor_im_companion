@@ -25,15 +25,28 @@ async function pageRequest(action,request,expectedHash,id){
   const hash=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value))),b=>b.toString(16).padStart(2,'0')).join('');
   const fingerprint=await hash(token);
   if(expectedHash&&fingerprint!==expectedHash)return fail('AUTH_CHANGED');
-  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);registry.set(id,controller);
+  let timedOut=false;
+  const controller=new AbortController(),timer=setTimeout(()=>{timedOut=true;controller.abort();},20000);registry.set(id,controller);
   const fresh=()=>localStorage.getItem('agent_token')?.trim()===token;
   async function fetchJSON(path,body){
     const response=await fetch(`https://csapi.tsim.tech${path}`,{method:body?'POST':'GET',headers:{Accept:'application/json',Authorization:`Bearer ${token}`,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:controller.signal,redirect:'error'});
     if(!fresh())throw Error('AUTH_CHANGED');
-    if(response.status===401||response.status===423)throw Error('PSIM_LOGIN_REQUIRED');
-    if(response.status===403||response.status===422)throw Error('TRANSLATION_PERMISSION_REQUIRED');
-    if(response.status===429)throw Error('RATE_LIMITED');
-    if(!response.ok)throw Error('SERVICE_UNAVAILABLE');
+    if(!response.ok){
+      let validation=false,reader,abort;
+      try{
+        reader=response.body?.getReader();let size=0,chunks=[];
+        const cancelled=new Promise((_,reject)=>{abort=()=>reject(Error('REQUEST_ABORTED'));controller.signal.addEventListener('abort',abort,{once:true});if(controller.signal.aborted)abort();});
+        if(response.status===422&&reader&&Number(response.headers.get('content-length'))<=16384){
+          for(;;){const next=await Promise.race([reader.read(),cancelled]);if(next.done)break;size+=next.value.byteLength;if(size>16384)break;chunks.push(next.value);}
+          if(size<=16384){const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+            const value=JSON.parse(new TextDecoder().decode(bytes));
+            const fields=new Set(['text','texts','target_lang','source_lang','purpose','draft_request_id','composer_content_version','client_source']),types=new Set(['extra_forbidden','missing','string_type','string_too_long','string_too_short','literal_error','enum','value_error','list_type']);
+            validation=response.status===422&&Array.isArray(value?.detail)&&value.detail.slice(0,8).some(item=>Array.isArray(item?.loc)&&item.loc.length===2&&item.loc[0]==='body'&&fields.has(item.loc[1])&&types.has(item.type));
+          }
+        }
+      }catch{}finally{if(abort)controller.signal.removeEventListener('abort',abort);if(reader)void reader.cancel().catch(()=>{});}
+      throw Error(`PSIM_HTTP_${response.status}${validation?'_VALIDATION':''}`);
+    }
     if(Number(response.headers.get('content-length'))>200000)throw Error('INVALID_SERVICE_RESPONSE');
     const reader=response.body?.getReader();if(!reader)throw Error('INVALID_SERVICE_RESPONSE');let size=0,chunks=[];
     for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>200000){await reader.cancel();throw Error('INVALID_SERVICE_RESPONSE');}chunks.push(value);}
@@ -54,7 +67,7 @@ async function pageRequest(action,request,expectedHash,id){
     if(!fresh())return fail('AUTH_CHANGED');
     if(result?.success!==true||typeof d?.translated_text!=='string'||!d.translated_text.trim()||d.translated_text.length>50000||d.draft_request_id!==request.body.draft_request_id||d.composer_content_version!==request.body.composer_content_version)return fail('OUTBOUND_ECHO_MISMATCH');
     return {ok:true,value:{success:true,data:{translated_text:d.translated_text,draft_request_id:d.draft_request_id,composer_content_version:d.composer_content_version}}};
-  }catch(error){return fail(controller.signal.aborted?'BROWSER_BRIDGE_TIMEOUT':/^[A-Z][A-Z0-9_]{1,80}$/.test(error?.message)?error.message:'SERVICE_UNAVAILABLE');}
+  }catch(error){return fail(controller.signal.aborted?(timedOut?'BROWSER_BRIDGE_TIMEOUT':'REQUEST_ABORTED'):/^[A-Z][A-Z0-9_]{1,80}$/.test(error?.message)?error.message:'SERVICE_UNAVAILABLE');}
   finally{clearTimeout(timer);registry.delete(id);}
 }
 async function inject(tabId,action,request,expectedHash,id){const [result]=await chrome.scripting.executeScript({target:{tabId,frameIds:[0]},world:'MAIN',func:pageRequest,args:[action,request,expectedHash,id]});if(!record(result?.result)||typeof result.result.ok!=='boolean')throw Error('INVALID_BROWSER_RESPONSE');return result.result;}
@@ -62,7 +75,7 @@ async function tabs(){return (await chrome.tabs.query({url:`${ORIGIN}/*`})).filt
 async function sync(id){
   for(const tab of await tabs()){
     let result;try{result=await inject(tab.id,'sync',null,null,id);}catch{continue;}
-    if(!result.ok){if(['PSIM_LOGIN_REQUIRED','PROFILE_UNVERIFIED'].includes(result.error))continue;throw Error(result.error);}
+    if(!result.ok){if(['PSIM_LOGIN_REQUIRED','PSIM_HTTP_401','PSIM_HTTP_423','PROFILE_UNVERIFIED'].includes(result.error))continue;throw Error(result.error);}
     const p=result.value;if(!exact(p,['accountScope','permissions','hash','outbound_wait'])||!/^[a-f0-9]{64}$/.test(p.hash))throw Error('INVALID_BROWSER_RESPONSE');
     selected={...p,tabId:tab.id};return {accountScope:p.accountScope,permissions:p.permissions,sessionKey:`${p.hash}:${tab.id}`,...(p.outbound_wait===undefined?{}:{outbound_wait:p.outbound_wait})};
   }

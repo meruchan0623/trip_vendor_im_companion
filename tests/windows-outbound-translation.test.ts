@@ -73,10 +73,10 @@ test('a failed, revoked or switched check is never reused and the old identity i
   for(const mode of ['profile-unavailable','profile-401','translate-401','translate-423','browser-account-switch','logout'])await t.test(mode,async()=>{
     const f=await verifiedSession();
     try{
-      if(mode==='profile-unavailable'){f.world.profileStatus=503;await assert.rejects(f.session.sync(),/SERVICE_UNAVAILABLE/);f.world.profileStatus=200;}
-      if(mode==='profile-401'){f.world.profileStatus=401;await assert.rejects(f.session.sync(),/PSIM_LOGIN_REQUIRED/);f.world.profileStatus=200;}
-      if(mode==='translate-401'||mode==='translate-423'){f.world.translateStatus=mode==='translate-401'?401:423;// The 401/423 revocation bumps the generation first, so the request reports AUTH_CHANGED (unchanged behavior).
-        await assert.rejects(f.session.translate(outbound(),f.identity,live()),/AUTH_CHANGED|PSIM_LOGIN_REQUIRED/);f.world.translateStatus=200;}
+      if(mode==='profile-unavailable'){f.world.profileStatus=503;await assert.rejects(f.session.sync(),/PSIM_HTTP_503/);f.world.profileStatus=200;}
+      if(mode==='profile-401'){f.world.profileStatus=401;await assert.rejects(f.session.sync(),/PSIM_HTTP_401/);f.world.profileStatus=200;}
+      if(mode==='translate-401'||mode==='translate-423'){f.world.translateStatus=mode==='translate-401'?401:423;
+        await assert.rejects(f.session.translate(outbound(),f.identity,live()),new RegExp(`PSIM_HTTP_${f.world.translateStatus}`));assert.equal(f.session.identity(),null);f.world.translateStatus=200;}
       if(mode==='browser-account-switch'){f.world.token='token-b';await f.session.sync();assert.notEqual(f.session.identity()?.authGeneration,f.identity.authGeneration);}
       if(mode==='logout')await f.session.logout();
       if(mode!=='browser-account-switch')assert.equal(f.session.identity(),null);
