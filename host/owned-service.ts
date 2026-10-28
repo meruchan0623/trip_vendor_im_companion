@@ -1,4 +1,5 @@
 import {startHttpTelemetry,setTelemetry} from '../electron/translation-telemetry';
+import {outboundTranslationBody} from '../src/shared/translation-request';
 import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
 import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import {WORKBENCH_TARGETS,type OperatorSessionGrant,type OutboundBody,type OutboundResponse,type PsimIdentity} from '../src/shared/workbench';
@@ -127,7 +128,7 @@ export class OwnedPsimService {
   async translate(body:OutboundBody,identity:PsimIdentity,signal:AbortSignal):Promise<OutboundResponse>{
     const current=this.identity();if(!current||current.accountScope!==identity.accountScope||current.authGeneration!==identity.authGeneration)throw fail('AUTH_CHANGED');
     if(body.purpose!=='outbound'||body.source_lang!=='zh'||typeof body.text!=='string'||!body.text.trim()||body.text.length>20000||!/^[-a-z0-9]{1,100}$/.test(body.draft_request_id)||typeof body.composer_content_version!=='string'||body.composer_content_version.length>25000||!WORKBENCH_TARGETS.includes(body.target_lang))throw fail('INVALID_OUTBOUND_REQUEST');
-    const result=await this.request('POST','/agent/translate',{...body,client_source:'travel_merchant_companion'},signal);if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration){setTelemetry({httpFailurePhase:'auth'});throw fail('AUTH_CHANGED');}const data=result?.data;
+    const result=await this.request('POST','/agent/translate',outboundTranslationBody(body),signal);if(signal.aborted||this.identity()?.authGeneration!==identity.authGeneration){setTelemetry({httpFailurePhase:'auth'});throw fail('AUTH_CHANGED');}const data=result?.data;
     if(result?.success!==true||typeof data?.translated_text!=='string'||!data.translated_text.trim()||data.translated_text.length>50000||data.draft_request_id!==body.draft_request_id||data.composer_content_version!==body.composer_content_version){setTelemetry({httpFailurePhase:'validation'});throw fail('OUTBOUND_ECHO_MISMATCH');}
     return{success:true,data:{translated_text:data.translated_text,draft_request_id:data.draft_request_id,composer_content_version:data.composer_content_version}};
   }

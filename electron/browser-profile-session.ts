@@ -1,4 +1,5 @@
 import {addTelemetry,setTelemetry,timeTelemetry,startHttpTelemetry} from './translation-telemetry';
+import {outboundTranslationBody} from '../src/shared/translation-request';
 import {parseOutboundWaitBounds} from '../runtime/outbound-wait-bounds';
 import type {OutboundWaitBounds} from '../runtime/outbound-wait-controller';
 import { access, readdir } from 'node:fs/promises';
@@ -152,7 +153,7 @@ export class BrowserProfileSessionService {
     }
   }
   private diskChanged(token:string|null){this.revoke();this.setStatus(token?'connecting':'needs_login');}
-  private async request(path:string,body?:(OutboundBody&{client_source:'travel_merchant_companion'})|{order_nums:string},signal?:AbortSignal):Promise<any>{
+  private async request(path:string,body?:OutboundBody|{order_nums:string},signal?:AbortSignal):Promise<any>{
     const url=new URL(path,API);
     const readPath=url.pathname==='/agent/profile'&&!url.search||url.pathname==='/agent/package-query/dataplan-list'&&[...url.searchParams.keys()].join(',')==='query_id'||CARD_READ_PATHS.includes(url.pathname)&&[...url.searchParams.keys()].join(',')==='card_dataplan_id';
     const postPath=['/agent/translate','/agent/package-query/perform'].includes(url.pathname)&&!url.search;
@@ -275,7 +276,7 @@ export class BrowserProfileSessionService {
     if(!this.current||!same(expectedIdentity,this.current)||!this.profile||!this.token)throw new Error('AUTH_CHANGED');
     dropSuperseded();
     const generation=this.generation,token=this.token,profile={...this.profile};
-    const result=await this.request('/agent/translate',{...body,client_source:'travel_merchant_companion'},signal);
+    const result=await this.request('/agent/translate',outboundTranslationBody(body),signal);
     try{
       const freshToken=await timeTelemetry('postReadTokenMs',()=>this.checkedTokenAt(profile));
       if(signal.aborted)throw new Error('REQUEST_ABORTED');

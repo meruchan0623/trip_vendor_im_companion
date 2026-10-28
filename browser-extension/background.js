@@ -49,7 +49,8 @@ async function pageRequest(action,request,expectedHash,id){
     const identity={accountScope:`psim:${p.id}`,permissions:[...new Set(p.permissions)].sort(),hash:fingerprint,...(outboundWait?{outbound_wait:outboundWait}:{})};
     if(action==='sync'){if(!fresh())return fail('AUTH_CHANGED');return {ok:true,value:identity};}
     if(identity.accountScope!==request.expectedAccount||JSON.stringify(identity.permissions)!==JSON.stringify(request.expectedPermissions))return fail('AUTH_CHANGED');
-    const result=await fetchJSON('/agent/translate',{...request.body,client_source:'travel_merchant_companion'}),d=result?.data;
+    const b=request.body;
+    const result=await fetchJSON('/agent/translate',{text:b.text,target_lang:b.target_lang,source_lang:b.source_lang,purpose:b.purpose,draft_request_id:b.draft_request_id,composer_content_version:b.composer_content_version}),d=result?.data;
     if(!fresh())return fail('AUTH_CHANGED');
     if(result?.success!==true||typeof d?.translated_text!=='string'||!d.translated_text.trim()||d.translated_text.length>50000||d.draft_request_id!==request.body.draft_request_id||d.composer_content_version!==request.body.composer_content_version)return fail('OUTBOUND_ECHO_MISMATCH');
     return {ok:true,value:{success:true,data:{translated_text:d.translated_text,draft_request_id:d.draft_request_id,composer_content_version:d.composer_content_version}}};

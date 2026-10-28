@@ -22,7 +22,35 @@ async function capture(fn:(logs:Record<string,any>[])=>Promise<void>){const orig
 async function owned(fetcher:(input:string,init:RequestInit)=>Promise<Response>){const service=new OwnedPsimService(async(input,init)=>new URL(input).pathname==='/agent/profile'?profile():fetcher(input,init),()=>{},{load:async()=>({accessToken:'fixture-token',sessionRef:'fixture-ref'}),save:async()=>{},clear:async()=>{}});await service.ensureSession();return service;}
 async function browser(fetcher:typeof fetch){const service=new BrowserProfileSessionService(()=>{},{backgroundPolling:false,fetcher,requestTimeoutMs:20,discoverProfiles:async()=>[{browserPath:'fixture-browser',userDataDir:'fixture-data',profileDirectory:'Default'}],readToken:async()=> 'fixture-token'});await service.sync();return service;}
 
-test('owned and fallback browser HTTP payloads identify this plugin without retrying 422',async()=>{
+function bridge(fetcher:(input:string,init:RequestInit)=>Promise<Response>){
+  const source=readFileSync('browser-extension/background.js','utf8'),entry=source.slice(source.indexOf('async function pageRequest('),source.indexOf('async function inject('));
+  return runInNewContext(`(${entry})`,{location:{origin:'https://csagent.tsim.tech'},localStorage:{getItem:()=> 'fixture-token'},crypto:webcrypto,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch:fetcher});
+}
+
+test('all translation exits are accepted initially by old extra-forbid and new optional-source models',async()=>{
+  for(const schema of ['old-extra-forbid','new-optional-source'])for(const mode of ['owned','browser','extension']){
+    let requests=0;
+    const fetcher=async(input:string,init:RequestInit)=>{
+      if(new URL(input).pathname==='/agent/profile')return profile();
+      requests++;const sent=JSON.parse(String(init.body));
+      // Contract-equivalent fixture: the old model forbids every extra field; the new model optionally accepts client_source.
+      const fields=[...Object.keys(body),...(schema==='new-optional-source'?['client_source']:[])];
+      const extra=Object.keys(sent).filter(key=>!fields.includes(key));
+      if(extra.length)return json({detail:extra.map(key=>({loc:['body',key],type:'extra_forbidden',input:sent[key]}))},{status:422});
+      assert.deepEqual(sent,body);return json(result());
+    };
+    if(mode==='extension'){
+      const response=await bridge(fetcher)('translate',{body,expectedAccount:'psim:7',expectedPermissions:['complaint_records']},null,'fixture');
+      assert.equal(response.ok,true,`${schema}/${mode}`);assert.equal(response.value.data.translated_text,'Private translated text');
+    }else{
+      const session=mode==='owned'?await owned(fetcher):await browser(fetcher as typeof fetch);
+      try{assert.equal((await session.translate(body,session.identity()!,new AbortController().signal)).data.translated_text,'Private translated text');}finally{session.dispose();}
+    }
+    assert.equal(requests,1,`${schema}/${mode} must make exactly one business request`);
+  }
+});
+
+test('owned and fallback browser send the six compatible fields once for unknown 422',async()=>{
   for(const mode of ['owned','browser'] as const){
     const requests:Record<string,unknown>[]=[];
     const fetcher=async(input:string,init:RequestInit)=>{
@@ -31,12 +59,12 @@ test('owned and fallback browser HTTP payloads identify this plugin without retr
       return json({detail:[]},{status:422});
     };
     const service=mode==='owned'?await owned(fetcher):await browser(fetcher as typeof fetch);
-    try{await assert.rejects(service.translate(body,service.identity()!,new AbortController().signal));assert.deepEqual(requests,[{...body,client_source:'travel_merchant_companion'}]);}
+    try{await assert.rejects(service.translate(body,service.identity()!,new AbortController().signal));assert.deepEqual(requests,[body]);}
     finally{service.dispose();}
   }
 });
 
-test('serialized MAIN-world bridge labels HTTP payload and does not retry an older backend',async()=>{
+test('serialized MAIN-world bridge sends the compatible payload once for success and unknown 422',async()=>{
   const source=readFileSync('browser-extension/background.js','utf8');
   const entry=source.slice(source.indexOf('async function pageRequest('),source.indexOf('async function inject('));
   for(const status of [200,422]){
@@ -48,7 +76,7 @@ test('serialized MAIN-world bridge labels HTTP payload and does not retry an old
     }});
     const response=await pageRequest('translate',{body,expectedAccount:'psim:7',expectedPermissions:['complaint_records']},null,'fixture');
     assert.equal(response.ok,status===200);
-    assert.deepEqual(requests,[{...body,client_source:'travel_merchant_companion'}]);
+    assert.deepEqual(requests,[body]);
   }
 });
 
@@ -63,7 +91,7 @@ test('strict projection drops secrets, arbitrary uppercase codes, getters and in
 
 test('owned successful HTTP attaches timings and metadata to exactly one redacted summary without new requests',async()=>capture(async logs=>{
   let requests=0;const service=await owned(async()=>{requests++;await delay(3);return stream(result(undefined,metadata));});
-  try{const trace=createTelemetry('translate',{sourceChars:body.text.length,token:'secret',text:body.text});await runWithTelemetry(trace,async()=>{assert.equal(currentTelemetry(),trace);const response=await service.translate(body,service.identity()!,new AbortController().signal);assert.equal(response.data.translated_text,'Private translated text');assert.equal((response.data as any).provider,undefined);setTelemetry({outcome:'shown',model:'secret'});});assert.equal(logs.length,0);finishTelemetry(trace,'shown');finishTelemetry(trace,'failed');assert.equal(logs.length,1);const log=logs[0];assert.equal(log.runId,TELEMETRY_RUN_ID);assert.equal(log.translationSent,true);assert.equal(log.providerReported,'google_nmt');assert.equal(log.translationProfile,'agent_draft');assert.equal(log.translationProtocol,'agent-translation-items-v1');assert.equal(log.providerMs,null);assert.equal(log.serverMs,null);assert.equal(log.cacheSource,'unknown');assert.equal(log.httpStatus,200);assert.ok(log.headersMs>=2);assert.ok(log.bodyMs>=5);assert.ok(log.httpMs>=log.headersMs+log.bodyMs);assert.ok(log.parseMs>=0);assert.equal(log.responseBytes,log.contentLength);assert.equal(log.requestBytes,Buffer.byteLength(JSON.stringify({...body,client_source:'travel_merchant_companion'})));assert.equal(requests,1);assert.equal(JSON.stringify(log).includes(body.text),false);assert.equal(JSON.stringify(log).includes('Private translated text'),false);assert.equal('model' in log,false);}finally{service.dispose();}
+  try{const trace=createTelemetry('translate',{sourceChars:body.text.length,token:'secret',text:body.text});await runWithTelemetry(trace,async()=>{assert.equal(currentTelemetry(),trace);const response=await service.translate(body,service.identity()!,new AbortController().signal);assert.equal(response.data.translated_text,'Private translated text');assert.equal((response.data as any).provider,undefined);setTelemetry({outcome:'shown',model:'secret'});});assert.equal(logs.length,0);finishTelemetry(trace,'shown');finishTelemetry(trace,'failed');assert.equal(logs.length,1);const log=logs[0];assert.equal(log.runId,TELEMETRY_RUN_ID);assert.equal(log.translationSent,true);assert.equal(log.providerReported,'google_nmt');assert.equal(log.translationProfile,'agent_draft');assert.equal(log.translationProtocol,'agent-translation-items-v1');assert.equal(log.providerMs,null);assert.equal(log.serverMs,null);assert.equal(log.cacheSource,'unknown');assert.equal(log.httpStatus,200);assert.ok(log.headersMs>=2);assert.ok(log.bodyMs>=5);assert.ok(log.httpMs>=log.headersMs+log.bodyMs);assert.ok(log.parseMs>=0);assert.equal(log.responseBytes,log.contentLength);assert.equal(log.requestBytes,Buffer.byteLength(JSON.stringify(body)));assert.equal(requests,1);assert.equal(JSON.stringify(log).includes(body.text),false);assert.equal(JSON.stringify(log).includes('Private translated text'),false);assert.equal('model' in log,false);}finally{service.dispose();}
 }));
 
 test('malicious service metadata never enters trace and strict echo validation remains enabled',async()=>capture(async logs=>{
