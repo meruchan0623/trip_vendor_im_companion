@@ -25,12 +25,17 @@ export function isNonTranslatableToken(text:string){const trimmed=String(text||'
 export function hasSubstantiveLatinText(text:string){const words=String(text||'').match(LATIN_WORD)||[];return words.filter(word=>!TECHNICAL_LATIN_TOKEN.test(word)&&!/^[A-Z]{2,5}$/.test(word)).length>=2;}
 /** Remove identifiers before scoring: domain paths, mailbox names and activation codes are not prose. */
 function languageProse(text:string){
-  return text.normalize('NFC')
+  let prose=text.normalize('NFC')
     .replace(/\blpa:1\$[^\s]+/giu,' ')
-    .replace(/(?:https?:\/\/|www\.)[^\s<>]+/giu,' ')
-    .replace(/[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+/gu,' ')
-    .replace(/\b(?:[a-z\d-]+\.)+[a-z]{2,24}(?:\/[^\s<>]*)?/giu,' ')
-    .replace(/\b[\p{L}\d_+.-]*\d[\p{L}\d_+.-]*\b/gu,' ')
+    .replace(/(?:https?:\/\/|www\.)[^\s<>]+/giu,' ');
+  // The unanchored mailbox pattern otherwise retries at every character in a
+  // long no-whitespace message. Match each token once with an anchored check.
+  if(prose.includes('@'))prose=prose.replace(/[^\s<>]+/gu,token=>/^[^@]+@[^@]+\.[^@]+$/u.test(token)?' ':token);
+  return prose
+    // Consume a dotted token once; retrying the full domain pattern at every
+    // dot is quadratic for strings such as "a.a.a..." with no valid TLD.
+    .replace(/\b[a-z\d-]+(?:\.[a-z\d-]+)+(?:\/[^\s<>]*)?/giu,token=>/^(?:[a-z\d-]+\.)+[a-z]{2,24}(?:\/[^\s<>]*)?$/iu.test(token)?' ':token)
+    .replace(/\b[\p{L}\d_+.-]+\b/gu,token=>/\d/u.test(token)?' ':token)
     .replace(/\b[A-Z]{2,}(?:[-_][A-Z]{2,})+\b/gu,' ')
     .replace(/[’‘]/gu,"'");
 }
@@ -217,4 +222,31 @@ export function customerLanguage(document:Document,limit=CUSTOMER_LANGUAGE_LOOKB
 export function customerLanguageEvidence(document:Document,limit=CUSTOMER_LANGUAGE_LOOKBACK){
   const boundedLimit=Number.isFinite(limit)?Math.max(0,Math.min(CUSTOMER_LANGUAGE_LOOKBACK,Math.floor(limit))):CUSTOMER_LANGUAGE_LOOKBACK;
   return languageEvidence(collectCustomerTexts(document,boundedLimit));
+}
+/** One current-conversation window only. DOM visibility is re-read on each
+ * relevant change; unchanged originals do not repeat model/rule inference. */
+export function createCustomerLanguageReader(document:Document){
+  let signature:string|undefined,evidence:ReturnType<typeof languageEvidence>|undefined;
+  return{
+    read(){
+      const texts=collectCustomerTexts(document,CUSTOMER_LANGUAGE_LOOKBACK),next=JSON.stringify(texts);
+      if(evidence&&next===signature)return evidence;
+      const result=languageEvidence(texts);
+      // Large messages retain their full detection semantics without becoming
+      // a persistent cache of customer content.
+      if(next.length<=65536){signature=next;evidence=result;}else{signature=undefined;evidence=undefined;}
+      return result;
+    },
+    reset(){signature=undefined;evidence=undefined;},
+  };
+}
+/** Ignore editor input and unrelated UI changes. Removal/class changes of a
+ * message list and ancestor visibility still invalidate the current window. */
+export function affectsCustomerLanguage(mutation:MutationRecord):boolean{
+  const target=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;
+  if(!target)return false;
+  if(target.closest('.chat_list_content'))return true;
+  if(mutation.type==='attributes')return !!target.querySelector('.chat_list_content')||mutation.attributeName==='class'&&(mutation.oldValue??'').split(/\s+/).includes('chat_list_content');
+  if(mutation.type==='childList')return [...mutation.addedNodes,...mutation.removedNodes].some(node=>node.nodeType===1&&((node as Element).matches('.chat_list_content')||!!(node as Element).querySelector('.chat_list_content')));
+  return false;
 }

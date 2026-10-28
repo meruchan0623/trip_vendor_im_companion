@@ -1,6 +1,6 @@
 import {matchesPageConversation} from './conversation';
 import {RUNTIME_PLATFORM} from '../build-manifest';
-import {customerLanguageEvidence} from './language';
+import {createCustomerLanguageReader,affectsCustomerLanguage} from './language';
 import type {OperatorSessionGrant,OrderWindowIntent,PanelState} from '../../src/shared/workbench';
 import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../../src/shared/customer-language';
 import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
@@ -56,6 +56,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
   let customerTimer:number|undefined,retryTimer:number|undefined,customerReport:CustomerReport|undefined;
+  const customerReader=createCustomerLanguageReader(document);
   const clearRetry=()=>{view.clearTimeout(retryTimer);retryTimer=undefined;};
   const reflected=(report:CustomerReport)=>state?.conversationKey===report.key&&state.followCustomer.lang===report.lang&&(!state.followCustomer.resolution||sameCustomerLanguageResolution(state.followCustomer.resolution,report.resolution));
   const active=(report:CustomerReport)=>!disposed&&customerReport===report&&state?.conversationKey===report.key&&bound();
@@ -82,7 +83,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   const scanCustomer=()=>{
     customerTimer=undefined;
     if(disposed||document.visibilityState==='hidden'||!state?.conversationKey||!options.bridge||!bound())return;
-    const evidence=customerLanguageEvidence(document);
+    const evidence=customerReader.read();
     if(!evidence.sampleCount&&state.followCustomer.resolution?.status==='collecting'&&Date.now()<originalsDeadline){customerTimer=view.setTimeout(scanCustomer,originalsDeadline-Date.now());return;}
     const lang=evidence.language,key=state.conversationKey,resolution=resolveCustomerLanguage(lang,{sampleCount:evidence.sampleCount,evidenceCount:evidence.evidenceCount,recognizedCount:evidence.recognizedCount}),signature=JSON.stringify([key,lang,resolution]);
     if(customerReport?.signature!==signature){clearRetry();customerReport={signature,key,lang,resolution,attempts:0,done:false,attempt:0};}
@@ -114,14 +115,14 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     // Windows host hints can bypass the order observer, but iframe identity is
     // still checked synchronously before any order action and on heartbeats.
     else if(!orderObservation)renderCurrent(true);
-    scheduleCustomer();
+    if(external.some(affectsCustomerLanguage))scheduleCustomer();
   });
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeOldValue:true,attributeFilter:['class','style','hidden','aria-hidden','src','role','aria-modal','open']});syncOrder();}
   function update(next:PanelState){
     if(disposed)return;const previousLanguage=JSON.stringify(state?.followCustomer),hadOrderHint=!!state?.detectedOrder;state=next;
     // Host keys include the account/generation: no previously authorized frame
     // survives a changed key, even if its order happens to be identical.
-    if(conversation!==undefined&&conversation!==next.conversationKey){overlay.reset();shownOrder=undefined;observedOrder=undefined;}
+    if(conversation!==undefined&&conversation!==next.conversationKey){overlay.reset();shownOrder=undefined;observedOrder=undefined;customerReader.reset();}
     orderObservation?.setConversationKey(next.conversationKey);
     if(hadOrderHint&&!next.detectedOrder){shownOrder=undefined;orderObservation?.refresh();if(bound()&&document.visibilityState!=='hidden')showOrder(observedOrder);}
     if(conversation!==next.conversationKey){conversation=next.conversationKey;originalsDeadline=Date.now()+CUSTOMER_ORIGINALS_LOAD_WINDOW_MS;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);customerTimer=undefined;scheduleCustomer();}
@@ -155,6 +156,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('compositionstart',onCompositionStart,true);document.removeEventListener('compositionend',onCompositionEnd,true);document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();summary?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;customerReader.reset();view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('compositionstart',onCompositionStart,true);document.removeEventListener('compositionend',onCompositionEnd,true);document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();summary?.dispose();overlay.dispose();},
   };
 }

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {JSDOM} from 'jsdom';
 import {mountPageFeatures} from '../runtime/page';
+import {createCustomerLanguageReader,affectsCustomerLanguage,detectLanguage} from '../runtime/page/language';
 import {embeddedPanelState} from '../electron/embedded-host';
 import {OPERATOR_FRAME_ID,OPERATOR_WARM_ID} from '../runtime/page/operator-overlay';
 
@@ -14,6 +15,55 @@ function fixture(){
   delete state.detectedOrder;
   return{dom,document:dom.window.document,state};
 }
+
+test('unchanged customer originals reuse inference; changed originals, visibility and reset invalidate it',()=>{
+  const f=fixture(),reader=createCustomerLanguageReader(f.document);
+  try{
+    const first=reader.read();assert.equal(first.language,'en');assert.equal(first.sampleCount,1);
+    assert.equal(reader.read(),first);
+    f.document.querySelector('.chat-content')!.insertAdjacentHTML('beforeend','<div class="tran-group"><div class="chat-text">韓国語の翻訳</div></div>');
+    assert.equal(reader.read(),first,'vendor translation is not a new original');
+    f.document.querySelector('.chat-content > .chat-text')!.textContent='こんにちは、インターネットに接続できません。';
+    const changed=reader.read();assert.notEqual(changed,first);assert.equal(changed.language,'ja');
+    const row=f.document.querySelector('li') as HTMLElement;row.hidden=true;
+    assert.equal(reader.read().sampleCount,0);row.hidden=false;
+    assert.equal(reader.read().language,'ja');reader.reset();assert.notEqual(reader.read(),changed);
+  }finally{reader.reset();f.dom.window.close();}
+});
+
+test('language cache retains the 30-original window and does not retain oversized content',()=>{
+  const f=fixture(),reader=createCustomerLanguageReader(f.document);
+  try{
+    f.document.querySelector('ul')!.innerHTML=Array.from({length:40},()=>guest('Hello, I need help with this service.')).join('');
+    assert.equal(reader.read().sampleCount,30);
+    f.document.querySelector('ul')!.innerHTML=guest('您好，请问可以帮我吗？'.repeat(7000));
+    assert.notEqual(reader.read(),reader.read(),'oversized original is not persisted in the cache');
+  }finally{reader.reset();f.dom.window.close();}
+});
+
+test('language invalidation ignores editor input but observes original changes and list removal',()=>{
+  const f=fixture(),observer=new f.dom.window.MutationObserver(()=>{});
+  try{
+    observer.observe(f.document.body,{childList:true,subtree:true,attributes:true,attributeOldValue:true,characterData:true});
+    f.document.querySelector('.chat-editor')!.textContent='draft';
+    assert.equal(observer.takeRecords().some(affectsCustomerLanguage),false);
+    f.document.querySelector('.chat-content > .chat-text')!.textContent='new original';
+    assert.equal(observer.takeRecords().some(affectsCustomerLanguage),true);
+    const list=f.document.querySelector('ul')!;list.className='loading';
+    assert.equal(observer.takeRecords().some(affectsCustomerLanguage),true);
+    list.className='chat_list_content';observer.takeRecords();list.remove();
+    assert.equal(observer.takeRecords().some(affectsCustomerLanguage),true);
+  }finally{observer.disconnect();f.dom.window.close();}
+});
+
+test('long unbroken originals and incomplete mailbox tokens do not cause quadratic cleanup',()=>{
+  const started=performance.now();
+  assert.equal(detectLanguage('a'.repeat(70000)),'unknown');
+  assert.equal(detectLanguage('a'.repeat(70000)+'@invalid'),'unknown');
+  assert.equal(detectLanguage('a.'.repeat(35000)),'unknown');
+  assert.equal(detectLanguage('Please help me connect. person@example.com'),'en');
+  assert.ok(performance.now()-started<2000,'synthetic cleanup must remain bounded, not a UI latency claim');
+});
 
 test('stable boundaries and editor mutations never refresh summary or preload an order page',async()=>{
   const f=fixture(),calls:string[]=[];
