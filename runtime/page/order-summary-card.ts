@@ -20,6 +20,7 @@ export const ORDER_SUMMARY_FAILURE_TEXT:Record<OrderSummaryFailure,string>={
 };
 const ORDER_RE=/^[A-Za-z0-9_-]{1,100}$/;
 const MIN_FREE=150,MARGIN=8,Z_RAISED='2147482000';
+const MODAL_SELECTOR='dialog,[role="dialog"],[role="alertdialog"],[aria-modal="true"],.ant-modal,.el-dialog,.modal';
 const CONTAINED=['keydown','keyup','keypress','click','mousedown','pointerdown','copy','cut','wheel'];
 const ICONS={
   sim:'<path d="M8 3h6.5L19 7.5V20a1 1 0 0 1-1 1H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><rect x="9" y="11" width="7" height="7" rx="1.2"/><path d="M12.5 11v7M9 14.5h7"/>',
@@ -136,7 +137,7 @@ const WINDOWS_TYPE=`
 .foot{padding:4px 9px 5px}.solid,.outline{height:28px}.copy{width:22px;height:22px}`;
 export interface OrderSummaryCardInput {identifier:string|undefined;conversationKey:string|null|undefined;auth:PanelAuth|undefined}
 export interface OrderSummaryCardHooks {load(intent:OrderSummaryIntent):Promise<unknown>;openLogin():void}
-export interface OrderSummaryCard {update(input:OrderSummaryCardInput):void;reposition():void;readonly host:HTMLElement;dispose():void}
+export interface OrderSummaryCard {update(input:OrderSummaryCardInput):void;reposition():void;invalidateStacking(mutations:readonly MutationRecord[]):boolean;readonly host:HTMLElement;dispose():void}
 type Tone='ok'|'warn'|'bad'|'muted';
 /** Profile states read as healthy, needing attention or broken; anything else stays neutral. */
 export function esimTone(code:string):Tone{
@@ -151,6 +152,10 @@ export function createOrderSummaryCard(document:Document,hooks:OrderSummaryCardH
   const view=document.defaultView!;
   type Target={identifier:string;key:string};
   let disposed=false,target:Target|undefined,auth:PanelAuth|undefined,result:OrderSummaryResult|undefined,settled:{target:Target;at:number;result:OrderSummaryResult}|undefined,loading=false,sequence=0,selected=0,collapsed=false,flash='',flashTimer:number|undefined,frame:HTMLIFrameElement|undefined,child:Document|undefined,pending:number|undefined;
+  let discoverFrame=true,discoverContent=true,geometryDirty=false,stackDirty=false,contentNodes:Element[]=[];
+  let frameCandidates:HTMLIFrameElement[]=[],framePanel:Element|undefined;
+  const stackingSources=new Set([...document.querySelectorAll(MODAL_SELECTOR)].filter(element=>!isOwned(element)));
+  type PlacementStyles=Partial<Pick<CSSStyleDeclaration,'display'|'top'|'bottom'|'left'|'width'|'maxHeight'|'zIndex'>>;
   const host=document.createElement('div');host.id=ORDER_SUMMARY_HOST_ID;host.setAttribute('data-tsim-owned','1');host.setAttribute('role','region');host.setAttribute('aria-label','订单套餐信息');
   host.style.cssText='position:fixed;z-index:900;display:none;margin:0;padding:0;border:0';
   const contain=(event:Event)=>event.stopPropagation();CONTAINED.forEach(type=>host.addEventListener(type,contain));
@@ -236,7 +241,7 @@ export function createOrderSummaryCard(document:Document,hooks:OrderSummaryCardH
     else if(result.status==='empty')content=[callout('info','info','未查询到该订单的套餐')];
     else if(result.status==='failed')content=[callout(result.reason==='permission'||result.reason==='rate_limited'?'warn':'bad','alert',ORDER_SUMMARY_FAILURE_TEXT[result.reason],result.reason==='login'?loginButton():result.reason==='permission'?undefined:retryButton())];
     else content=planView(result.summary);
-    body.replaceChildren(...content);renderFoot();
+    body.replaceChildren(...content);renderFoot();schedule();
   }
   function renderFoot(){
     if(disposed)return;const at=result?.status==='ready'&&auth==='ready'?result.fetchedAt:undefined;
@@ -247,11 +252,11 @@ export function createOrderSummaryCard(document:Document,hooks:OrderSummaryCardH
   function finish(seq:number,value:OrderSummaryResult){
     if(disposed||seq!==sequence||!target)return;loading=false;result=value;
     if(value.status==='ready'&&selected>=value.summary.plans.length)selected=0;
-    settled=value.status==='failed'?undefined:{target,at:Date.now(),result:value};render();schedule();
+    settled=value.status==='failed'?undefined:{target,at:Date.now(),result:value};render();
   }
   function load(refresh:boolean){
     if(disposed||!target||auth!=='ready')return;
-    const seq=++sequence,{identifier,key}=target;loading=true;if(!refresh){result=undefined;settled=undefined;}render();schedule();
+    const seq=++sequence,{identifier,key}=target;loading=true;if(!refresh){result=undefined;settled=undefined;}render();
     let pendingRead:Promise<unknown>;try{pendingRead=hooks.load({identifier,conversationKey:key,refresh});}catch{pendingRead=Promise.reject();}
     pendingRead.then(raw=>{const parsed=parseOrderSummaryResult(raw);finish(seq,parsed&&sameOrder(parsed,identifier)?parsed:{status:'failed',identifier,reason:'unavailable'});},()=>finish(seq,{status:'failed',identifier,reason:'unavailable'}));
   }
@@ -264,82 +269,152 @@ export function createOrderSummaryCard(document:Document,hooks:OrderSummaryCardH
     // Nothing read under an earlier authorization is shown or reused again.
     if(auth!=='ready')settled=undefined;
     if(changed){
+      discoverFrame=true;discoverContent=true;
       target=next;sequence++;loading=false;selected=0;
       // A short vendor re-render of the same order frame shows the settled card again instead of a skeleton.
       const reuse=!!next&&!!settled&&settled.target.identifier===next.identifier&&settled.target.key===next.key&&Date.now()-settled.at<ORDER_SUMMARY_REUSE_MS;
       if(reuse)result=settled!.result;else{result=undefined;if(next)settled=undefined;}
-      if(next&&auth==='ready'&&!reuse)load(false);
+      if(next&&auth==='ready'&&!reuse){load(false);return;}
     }else if(auth!=='ready'){sequence++;loading=false;result=undefined;}
-    else if(!wasReady||!result)load(false);
-    render();schedule();
+    else if(!wasReady||!result){load(false);return;}
+    render();
   }
-  // Placement over the order-detail frame.
-  const observer=typeof view.ResizeObserver==='function'?new view.ResizeObserver(()=>schedule()):undefined;
+  // Placement over the order-detail frame. All geometry reads precede style writes.
+  const observer=typeof view.ResizeObserver==='function'?new view.ResizeObserver(entries=>{
+    if(entries.some(entry=>entry.target===child?.body))discoverContent=true;
+    schedule();
+  }):undefined;
   const onChildScroll=()=>schedule();
   function bindChild(next:Document|undefined){
     if(next===child)return;
-    try{child?.defaultView?.removeEventListener('scroll',onChildScroll);}catch{/* revoked */}
+    try{child?.defaultView?.removeEventListener('scroll',onChildScroll,true);}catch{/* revoked */}
     if(child?.body)observer?.unobserve(child.body);
-    child=next;
-    try{child?.defaultView?.addEventListener('scroll',onChildScroll,{passive:true});}catch{child=undefined;return;}
+    child=next;discoverContent=true;contentNodes=[];
+    try{child?.defaultView?.addEventListener('scroll',onChildScroll,{passive:true,capture:true});}catch{child=undefined;return;}
     if(child?.body)observer?.observe(child.body);
   }
   function bindFrame(next:HTMLIFrameElement|undefined){
     if(next===frame)return;
     if(frame){frame.removeEventListener('load',onFrameLoad);observer?.unobserve(frame);}
+    if(framePanel)observer?.unobserve(framePanel);framePanel=undefined;
     bindChild(undefined);frame=next;
-    if(frame){frame.addEventListener('load',onFrameLoad);observer?.observe(frame);}
+    if(frame){frame.addEventListener('load',onFrameLoad);observer?.observe(frame);framePanel=frame.closest('.customer_info')??undefined;if(framePanel)observer?.observe(framePanel);}
   }
-  function onFrameLoad(){bindChild(undefined);schedule();}
-  /** Viewport y where the vendor content of a readable frame ends; undefined for an out-of-process frame. */
+  function onFrameLoad(){bindChild(undefined);discoverContent=true;schedule();}
+  /** Cache the relevant layout nodes, while reading their current rects only after a geometry change. */
   function contentBottom(current:HTMLIFrameElement,top:number){
     let doc:Document|null=null;try{doc=current.contentDocument;}catch{doc=null;}
     bindChild(doc??undefined);if(!doc)return;
-    const lists=[...doc.querySelectorAll('.im_info_basic_list')].filter(list=>!isOwned(list)&&list.getClientRects().length>0),list=lists[lists.length-1];if(!list)return;
-    let bottom=list.getBoundingClientRect().bottom;
-    // Later vendor sections below 用户信息 stay uncovered too.
-    for(let node:Element|null=list;node&&node!==doc.body;node=node.parentElement)for(let sibling=node.nextElementSibling;sibling;sibling=sibling.nextElementSibling){const rect=sibling.getBoundingClientRect();if(rect.height>0)bottom=Math.max(bottom,rect.bottom);}
+    if(discoverContent||contentNodes.some(node=>!node.isConnected)){
+      discoverContent=false;contentNodes=[];
+      const lists=[...doc.querySelectorAll('.im_info_basic_list')].filter(list=>!isOwned(list)&&list.getClientRects().length>0),list=lists[lists.length-1];if(!list)return;
+      contentNodes.push(list);
+      // Later vendor sections below 用户信息 stay uncovered too.
+      for(let node:Element|null=list;node&&node!==doc.body;node=node.parentElement)for(let sibling=node.nextElementSibling;sibling;sibling=sibling.nextElementSibling)contentNodes.push(sibling);
+    }
+    if(!contentNodes.length)return;
+    let bottom=0;
+    for(const node of contentNodes){const rect=node.getBoundingClientRect();if(rect.height>0)bottom=Math.max(bottom,rect.bottom);}
     return Number.isFinite(bottom)?top+Math.max(0,bottom):undefined;
   }
   function locate(){
-    const frames=[...document.querySelectorAll<HTMLIFrameElement>(ORDER_SUMMARY_FRAME_SELECTOR)].filter(node=>!isOwned(node));
-    if(frames.length!==1||frames[0].closest('[hidden],[aria-hidden="true"]'))return;
-    const rect=frames[0].getBoundingClientRect();
-    return rect.width>=ORDER_SUMMARY_MIN_FRAME.width&&rect.height>=ORDER_SUMMARY_MIN_FRAME.height?{frame:frames[0],rect}:undefined;
+    if(discoverFrame||frameCandidates.some(node=>!node.isConnected)){
+      discoverFrame=false;frameCandidates=[...document.querySelectorAll<HTMLIFrameElement>(ORDER_SUMMARY_FRAME_SELECTOR)].filter(node=>!isOwned(node));
+    }
+    if(frameCandidates.length!==1||frameCandidates[0].closest('.customer_info.close, [hidden], [aria-hidden="true"]'))return;
+    const rect=frameCandidates[0].getBoundingClientRect();
+    return rect.width>=ORDER_SUMMARY_MIN_FRAME.width&&rect.height>=ORDER_SUMMARY_MIN_FRAME.height?{frame:frameCandidates[0],rect}:undefined;
+  }
+  function writeStyles(styles:PlacementStyles){
+    let changed=false;
+    for(const key of Object.keys(styles) as (keyof PlacementStyles)[]){const value=styles[key];if(value!==undefined&&host.style[key]!==value){host.style[key]=value;changed=true;}}
+    return changed;
+  }
+  /** Run after placement has settled, never immediately after a style write. */
+  function stacking(){
+    if(typeof document.elementFromPoint!=='function'||host.style.display==='none')return;
+    const rect=host.getBoundingClientRect();if(!rect.width||!rect.height)return;
+    const x=rect.left+Math.min(rect.width/2,48),y=rect.top+Math.min(rect.height/2,20),hit=document.elementFromPoint(x,y);
+    // If a dialog covers the panel, keep the normal layer. Never promote over a dialog.
+    const hits=typeof document.elementsFromPoint==='function'?document.elementsFromPoint(x,y):hit?[hit]:[];
+    if(hits.some(node=>node!==host&&!isOwned(node)&&!!node.closest(MODAL_SELECTOR)))return '900';
+    if(hit&&hit!==host&&(hit===frame||!!hit.closest('.customer_info')))return Z_RAISED;
+    return host.style.zIndex;
   }
   function place(){
     pending=undefined;if(disposed)return;
-    const found=target&&document.visibilityState!=='hidden'?locate():undefined;bindFrame(found?.frame);
-    if(!found){host.style.display='none';return;}
-    if(!host.isConnected)(document.body??document.documentElement).append(host);
-    const {rect}=found,left=Math.max(rect.left,0)+MARGIN,right=Math.min(rect.right,view.innerWidth)-MARGIN,top=Math.max(rect.top,0)+MARGIN,bottom=Math.min(rect.bottom,view.innerHeight)-MARGIN;
-    if(right-left<ORDER_SUMMARY_MIN_FRAME.width-2*MARGIN||bottom-top<ORDER_SUMMARY_MIN_FRAME.height/2){host.style.display='none';return;}
-    const used=contentBottom(found.frame,rect.top),start=used===undefined?undefined:Math.max(top,used+MARGIN);
-    // Directly under 用户信息 when the frame is readable and has room; otherwise docked to the panel bottom.
-    if(start!==undefined&&bottom-start>=MIN_FREE)Object.assign(host.style,{top:`${start}px`,bottom:'',maxHeight:`${bottom-start}px`});
-    else Object.assign(host.style,{top:'',bottom:`${view.innerHeight-bottom}px`,maxHeight:`${Math.max(ORDER_SUMMARY_MIN_FRAME.height/2,(bottom-top)*ORDER_SUMMARY_DOCKED_SHARE)}px`});
-    Object.assign(host.style,{left:`${left}px`,width:`${right-left}px`,display:'block'});
-    raise();
+    const measure=geometryDirty,checkStack=stackDirty;geometryDirty=false;stackDirty=false;
+    // No style writes occur until all requested geometry and stacking reads have completed.
+    const zIndex=checkStack?stacking():undefined;
+    let styles:PlacementStyles|undefined;
+    if(measure){
+      const found=target&&document.visibilityState!=='hidden'?locate():undefined;bindFrame(found?.frame);
+      styles={display:'none'};
+      if(found){
+        const {rect}=found,left=Math.max(rect.left,0)+MARGIN,right=Math.min(rect.right,view.innerWidth)-MARGIN,top=Math.max(rect.top,0)+MARGIN,bottom=Math.min(rect.bottom,view.innerHeight)-MARGIN;
+        if(right-left>=ORDER_SUMMARY_MIN_FRAME.width-2*MARGIN&&bottom-top>=ORDER_SUMMARY_MIN_FRAME.height/2){
+          const used=contentBottom(found.frame,rect.top),start=used===undefined?undefined:Math.max(top,used+MARGIN);
+          styles=start!==undefined&&bottom-start>=MIN_FREE?{top:`${start}px`,bottom:'',maxHeight:`${bottom-start}px`}:{top:'',bottom:`${view.innerHeight-bottom}px`,maxHeight:`${Math.max(ORDER_SUMMARY_MIN_FRAME.height/2,(bottom-top)*ORDER_SUMMARY_DOCKED_SHARE)}px`};
+          Object.assign(styles,{left:`${left}px`,width:`${right-left}px`,display:'block'});
+        }
+      }
+    }
+    if(measure&&!host.isConnected)(document.body??document.documentElement).append(host);
+    if(zIndex!==undefined)writeStyles({zIndex});
+    if(styles&&writeStyles(styles)&&styles.display==='block'){stackDirty=true;queue();}
   }
-  /** A vendor stacking context over the order panel would hide the card; vendor dialogs elsewhere stay on top. */
-  function raise(){
-    if(host.style.zIndex===Z_RAISED||typeof document.elementFromPoint!=='function')return;
-    const rect=host.getBoundingClientRect();if(!rect.width||!rect.height)return;
-    const hit=document.elementFromPoint(rect.left+Math.min(rect.width/2,48),rect.top+Math.min(rect.height/2,20));
-    if(hit&&hit!==host&&(hit===frame||!!hit.closest('.customer_info')))host.style.zIndex=Z_RAISED;
-  }
-  function schedule(){
+  function queue(){
     if(disposed||pending!==undefined)return;
     pending=typeof view.requestAnimationFrame==='function'?view.requestAnimationFrame(place):view.setTimeout(place,16);
   }
+  function schedule(){geometryDirty=true;stackDirty=true;queue();}
+  function reposition(){discoverFrame=true;discoverContent=true;schedule();}
+  /** Reuse the owner's mutation batch; only modal changes need another hit test. */
+  function invalidateStacking(mutations:readonly MutationRecord[]){
+    if(disposed)return false;
+    const collect=(element:Element)=>{
+      let found=false;
+      if(element.matches(MODAL_SELECTOR)&&!isOwned(element)){stackingSources.add(element);found=true;}
+      for(const modal of element.querySelectorAll(MODAL_SELECTOR))if(!isOwned(modal)){stackingSources.add(modal);found=true;}
+      return found;
+    };
+    let relevant=false;
+    for(const mutation of mutations){
+      const element=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;
+      if(!element||isOwned(element))continue;
+      const changed=mutation.type==='childList'?[...mutation.addedNodes,...mutation.removedNodes]:[];
+      if(changed.length&&changed.every(node=>node.nodeType===1&&isOwned(node as Element)))continue;
+      const modal=element.closest(MODAL_SELECTOR);
+      if(modal&&!isOwned(modal)){stackingSources.add(modal);relevant=true;}
+      if(mutation.type==='attributes'){
+        // Retain the previous modal identity through role/class removal and ancestor hiding.
+        if([...stackingSources].some(source=>source===element||element.contains(source)))relevant=true;
+        if(element.matches(MODAL_SELECTOR)){stackingSources.add(element);relevant=true;}
+      }
+      for(const node of changed)if(node.nodeType===1&&!isOwned(node as Element)){
+        const changedElement=node as Element;
+        if([...stackingSources].some(source=>source===changedElement||changedElement.contains(source)))relevant=true;
+        if(collect(changedElement))relevant=true;
+      }
+    }
+    for(const source of stackingSources)if(!source.isConnected||!source.matches(MODAL_SELECTOR)||isOwned(source))stackingSources.delete(source);
+    if(relevant&&target&&host.style.display!=='none'){stackDirty=true;queue();}
+    return relevant;
+  }
   const cancel=()=>{if(pending===undefined)return;if(typeof view.cancelAnimationFrame==='function')view.cancelAnimationFrame(pending);view.clearTimeout(pending);pending=undefined;};
   refresh.addEventListener('click',()=>load(true));
-  toggle.addEventListener('click',()=>{collapsed=!collapsed;render();schedule();});
-  const onResize=()=>schedule();view.addEventListener('resize',onResize);
+  toggle.addEventListener('click',()=>{collapsed=!collapsed;render();});
+  const onResize=()=>{discoverContent=true;schedule();};view.addEventListener('resize',onResize);
+  const onScroll=(event:Event)=>{
+    const source=event.target;
+    if(source===view||source===document){schedule();return;}
+    if(source&&(source as Node).nodeType===1){const element=source as Element;if(!isOwned(element)&&frame&&(element.contains(frame)||!!framePanel?.contains(element)))schedule();}
+  };view.addEventListener('scroll',onScroll,{passive:true,capture:true});
+  observer?.observe(card);
   const onVisibility=()=>schedule();document.addEventListener('visibilitychange',onVisibility);
   (document.body??document.documentElement).append(host);render();
-  return{update,reposition:schedule,host,dispose(){
+  return{update,reposition,invalidateStacking,host,dispose(){
     if(disposed)return;disposed=true;sequence++;cancel();view.clearTimeout(flashTimer);bindFrame(undefined);observer?.disconnect();
-    view.removeEventListener('resize',onResize);document.removeEventListener('visibilitychange',onVisibility);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();
+    frameCandidates=[];contentNodes=[];stackingSources.clear();view.removeEventListener('resize',onResize);view.removeEventListener('scroll',onScroll,true);document.removeEventListener('visibilitychange',onVisibility);CONTAINED.forEach(type=>host.removeEventListener(type,contain));host.remove();
   }};
 }

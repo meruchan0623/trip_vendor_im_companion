@@ -9,6 +9,7 @@ import {CompanionService} from '../electron/companion-service';
 import {OwnedPsimService} from '../host/owned-service';
 import {BrowserProfileSessionService} from '../electron/browser-profile-session';
 import {createOrderSummaryCard,esimTone,ORDER_SUMMARY_FAILURE_TEXT} from '../runtime/page/order-summary-card';
+import {startOrderObservation} from '../runtime/page/identifiers';
 import type {PsimIdentity} from '../src/shared/workbench';
 
 const ORDER='ORD-1';
@@ -441,4 +442,120 @@ test('Windows type is legible, near-black and dense; the scrollbar is a hairline
     assert.match(css,/.order{[^}]*white-space:nowrap;flex:none/);
     assert.match(css,/.body::-webkit-scrollbar{width:3px/);assert.equal(/scrollbar-(?:width|color)[^;]*;?[^}]*}/.test(css.match(/.body{[^}]*}/g)!.join('')),false);
   }finally{h.card.dispose();h.window.close();}
+});
+
+/** Deterministic scheduling/count checks only; jsdom cannot establish browser layout cost. */
+function geometryHarness(){
+  const env=page(),queued=new Map<number,FrameRequestCallback>();let serial=0,frameReads=0,hostReads=0,hits=0,sourceQueries=0;
+  const originalQuery=env.document.querySelectorAll.bind(env.document);
+  env.document.querySelectorAll=((selector:string)=>{if(selector.includes('iframe.customer_order-detail'))sourceQueries++;return originalQuery(selector);}) as never;
+  env.window.requestAnimationFrame=callback=>{const id=++serial;queued.set(id,callback);return id;};
+  env.window.cancelAnimationFrame=id=>{queued.delete(id);};
+  class ResizeFixture{
+    static current:ResizeFixture;observed=new Set<Element>();disconnected=false;
+    constructor(readonly callback:ResizeObserverCallback){ResizeFixture.current=this;}
+    observe(element:Element){this.observed.add(element);}
+    unobserve(element:Element){this.observed.delete(element);}
+    disconnect(){this.disconnected=true;this.observed.clear();}
+    fire(element:Element){this.callback([{target:element} as ResizeObserverEntry],this as unknown as ResizeObserver);}
+  }
+  Object.defineProperty(env.window,'ResizeObserver',{configurable:true,value:ResizeFixture});
+  const card=createOrderSummaryCard(env.document as unknown as Document,{load:()=>new Promise(()=>{}),openLogin:()=>{}});
+  const styles=new env.window.MutationObserver(()=>{});styles.observe(card.host,{attributes:true,attributeFilter:['style']});
+  const beforeRead=()=>assert.equal(styles.takeRecords().length,0,'a frame must finish all geometry reads before its first style write');
+  let top=100,hit:Element=env.frame,hitStack:Element[]|undefined;
+  env.frame.getBoundingClientRect=()=>{beforeRead();frameReads++;return rect(600,top,400,660);};
+  card.host.getBoundingClientRect=()=>{beforeRead();hostReads++;return rect(Number.parseFloat(card.host.style.left)||0,Number.parseFloat(card.host.style.top)||0,Number.parseFloat(card.host.style.width)||0,250);};
+  Object.defineProperty(env.document,'elementFromPoint',{configurable:true,value:()=>{beforeRead();hits++;return hit;}});
+  Object.defineProperty(env.document,'elementsFromPoint',{configurable:true,value:()=>{beforeRead();return hitStack??[hit];}});
+  const flush=()=>{const pending=[...queued.values()];queued.clear();styles.takeRecords();for(const callback of pending)callback(0);};
+  const drain=()=>{let rounds=0;while(queued.size){assert.ok(++rounds<=5,'placement settles without an rAF loop');flush();}};
+  return{...env,card,observer:ResizeFixture.current!,queued,flush,drain,styles,counts:()=>({frameReads,hostReads,hits,sourceQueries}),move:(next:number)=>{top=next;},hit:(next:Element)=>{hit=next;},hitStack:(next:Element[])=>{hitStack=next;},close:()=>{styles.disconnect();card.dispose();env.window.close();}};
+}
+
+test('unchanged summary input does not rerender or measure; geometry uses cached nodes and changed styles only',()=>{
+  const h=geometryHarness();
+  try{
+    h.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});h.drain();
+    assert.equal(h.card.host.style.zIndex,'2147482000');const initial=h.counts(),body=h.card.host.shadowRoot!.querySelector('.body')!,first=body.firstChild;
+    for(let index=0;index<20;index++)h.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});
+    assert.equal(body.firstChild,first);assert.equal(h.queued.size,0);assert.deepEqual(h.counts(),initial);
+    h.styles.takeRecords();h.card.reposition();h.flush();
+    assert.equal(h.styles.takeRecords().length,0,'identical geometry does not rewrite inline styles');assert.equal(h.queued.size,0);
+    const afterReposition=h.counts();
+    const unrelated=h.document.createElement('aside');h.document.body.append(unrelated);unrelated.dispatchEvent(new h.window.Event('scroll'));assert.equal(h.queued.size,0,'scrolling an unrelated chat region does not measure the order card');
+    h.move(120);h.window.dispatchEvent(new h.window.Event('scroll'));h.window.dispatchEvent(new h.window.Event('scroll'));
+    assert.equal(h.queued.size,1,'scroll bursts share the existing rAF');h.drain();
+    assert.equal(h.counts().frameReads,afterReposition.frameReads+1);assert.equal(h.counts().sourceQueries,afterReposition.sourceQueries,'scroll does not rediscover the frame');
+    assert.ok(h.observer.observed.has(h.frame));assert.ok(h.observer.observed.has(h.frame.contentDocument!.body));
+    const before=h.counts().frameReads;h.observer.fire(h.frame);h.observer.fire(h.card.host.shadowRoot!.querySelector('.card')!);h.drain();assert.equal(h.counts().frameReads,before+1);
+    const child=h.frame.contentDocument!;child.body.innerHTML='<ul class="im_info_basic_list"><li>User information</li></ul>';
+    const list=child.querySelector('ul')!;list.getClientRects=(()=>[rect(0,0,400,120)]) as never;list.getBoundingClientRect=()=>{assert.equal(h.styles.takeRecords().length,0);return rect(0,100,400,120);};
+    h.observer.fire(child.body);h.drain();assert.equal(h.card.host.style.top,'348px','body resize invalidates the cached content nodes');
+    h.window.dispatchEvent(new h.window.Event('resize'));h.drain();assert.equal(h.queued.size,0);
+  }finally{h.close();}
+});
+
+test('placement releases iframe scroll and resize bindings, keeps dialogs above it, and cancels pending work',()=>{
+  const h=geometryHarness();
+  try{
+    h.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});h.drain();const old=h.frame.contentDocument!,oldWindow=old.defaultView!;
+    const dialog=h.document.createElement('div');dialog.setAttribute('role','dialog');h.document.body.append(dialog);h.hit(dialog);h.card.reposition();h.drain();assert.equal(h.card.host.style.zIndex,'900','dialogs prevent a raised vendor-panel layer');
+    const other=new JSDOM('<body></body>',{pretendToBeVisual:true});
+    try{
+      Object.defineProperty(h.frame,'contentDocument',{configurable:true,get:()=>other.window.document});h.frame.dispatchEvent(new h.window.Event('load'));h.drain();
+      assert.equal(h.observer.observed.has(old.body),false);assert.equal(h.observer.observed.has(other.window.document.body as unknown as Element),true);
+      const before=h.counts();oldWindow.dispatchEvent(new h.window.Event('scroll'));assert.equal(h.queued.size,0,'old child scroll is detached');assert.deepEqual(h.counts(),before);
+      other.window.dispatchEvent(new other.window.Event('scroll'));assert.equal(h.queued.size,1);h.drain();
+      const panel=h.frame.closest('.customer_info')!;h.frame.remove();h.card.reposition();h.drain();assert.equal(h.observer.observed.has(panel),false);assert.equal(h.card.host.style.display,'none');assert.equal(h.observer.observed.has(h.frame),false);assert.equal(h.observer.observed.has(other.window.document.body as unknown as Element),false);
+      h.window.dispatchEvent(new h.window.Event('resize'));assert.equal(h.queued.size,1);h.card.dispose();assert.equal(h.queued.size,0);assert.equal(h.observer.disconnected,true);
+      h.window.dispatchEvent(new h.window.Event('scroll'));other.window.dispatchEvent(new other.window.Event('scroll'));h.frame.dispatchEvent(new h.window.Event('load'));assert.equal(h.queued.size,0);
+    }finally{other.window.close();}
+  }finally{h.close();}
+});
+
+
+test('modal mutation batches invalidate stacking without order discovery or placement measurements',()=>{
+  const h=geometryHarness(),mutations=new h.window.MutationObserver(()=>{});
+  mutations.observe(h.document.body,{subtree:true,childList:true,characterData:true,attributes:true});
+  const invalidate=()=>h.card.invalidateStacking(mutations.takeRecords() as unknown as MutationRecord[]);
+  try{
+    h.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});h.drain();mutations.takeRecords();
+    assert.equal(h.card.host.style.zIndex,'2147482000');const initial=h.counts();
+    const unrelated=h.document.createElement('aside');h.document.body.append(unrelated);unrelated.textContent='New chat content';unrelated.className='active';
+    assert.equal(invalidate(),false);assert.equal(h.queued.size,0);assert.deepEqual(h.counts(),initial);
+    const wrapper=h.document.createElement('section'),modal=h.document.createElement('div');modal.setAttribute('role','dialog');modal.style.zIndex='1000';wrapper.append(modal);h.document.body.append(wrapper);
+    // Once raised, the card can be the first hit while the ordinary vendor dialog lies underneath it.
+    h.hit(h.card.host);h.hitStack([h.card.host,modal,h.frame]);assert.equal(invalidate(),true);assert.equal(h.queued.size,1);
+    modal.style.opacity='1';assert.equal(invalidate(),true);assert.equal(h.queued.size,1,'modal mutation bursts share one stack-check frame');h.drain();
+    assert.equal(h.card.host.style.zIndex,'900');assert.equal(h.counts().frameReads,initial.frameReads);assert.equal(h.counts().sourceQueries,initial.sourceQueries);assert.equal(h.counts().hostReads,initial.hostReads+1);
+    mutations.takeRecords();wrapper.hidden=true;h.hit(h.frame);h.hitStack([h.frame]);assert.equal(invalidate(),true);h.drain();assert.equal(h.card.host.style.zIndex,'2147482000','hiding a modal ancestor permits the vendor-panel layer again');
+    mutations.takeRecords();wrapper.hidden=false;h.hit(h.card.host);h.hitStack([h.card.host,modal,h.frame]);assert.equal(invalidate(),true);h.drain();assert.equal(h.card.host.style.zIndex,'900');
+    mutations.takeRecords();modal.removeAttribute('role');h.hit(h.frame);h.hitStack([h.frame]);assert.equal(invalidate(),true,'the cached identity catches role removal');h.drain();assert.equal(h.card.host.style.zIndex,'2147482000');
+    mutations.takeRecords();modal.setAttribute('aria-modal','true');h.hit(h.card.host);h.hitStack([h.card.host,modal,h.frame]);assert.equal(invalidate(),true);h.drain();assert.equal(h.card.host.style.zIndex,'900');
+    mutations.takeRecords();wrapper.remove();h.hit(h.frame);h.hitStack([h.frame]);assert.equal(invalidate(),true);h.drain();assert.equal(h.card.host.style.zIndex,'2147482000');
+    assert.equal(h.counts().frameReads,initial.frameReads);assert.equal(h.counts().sourceQueries,initial.sourceQueries,'modal-only changes never rediscover order/layout nodes');
+    mutations.takeRecords();unrelated.textContent='Still unrelated';assert.equal(invalidate(),false);assert.equal(h.queued.size,0);
+    h.card.dispose();assert.equal(h.card.invalidateStacking([]),false);assert.equal(h.queued.size,0);
+  }finally{mutations.disconnect();h.close();}
+});
+
+
+test('a later vendor section repositions the connected summary even in a fixed-size child scroller',async()=>{
+  const h=geometryHarness(),child=new JSDOM('<body style="height:660px;overflow:hidden"><main style="height:240px;overflow:auto"><ul class="im_info_basic_list"><li><span class="im_info_basic_list_title">订单ID</span><span class="im_info_basic_list_content">12345678</span></li></ul></main></body>',{url:'https://vbooking.ctrip.com/tour/im/ex-area/b/imExtraInfo?groupid=g&sessionid=s&servicetype=t&status=open',pretendToBeVisual:true});
+  h.frame.src='https://vbooking.ctrip.com/tour/im/ex-area/b?groupid=g&sessionid=s&serviceType=t&status=open';
+  Object.defineProperty(h.frame,'contentDocument',{configurable:true,get:()=>child.window.document});
+  const list=child.window.document.querySelector('ul')!;
+  list.getClientRects=(()=>[rect(0,100,400,120)]) as never;list.getBoundingClientRect=()=>rect(0,100,400,120);
+  let published=0;
+  const observation=startOrderObservation(h.document as unknown as Document,identifier=>{published++;h.card.update({identifier,conversationKey:'conv',auth:'ready'});},undefined,()=>h.card.reposition());
+  try{
+    h.drain();assert.equal(h.card.host.style.top,'328px');assert.equal(published,1);
+    const section=child.window.document.createElement('section');section.textContent='More vendor information';section.getBoundingClientRect=()=>rect(0,250,400,90);
+    child.window.document.querySelector('main')!.append(section);await settle(15);
+    assert.equal(h.queued.size,1,'mutation invalidates layout without a resize notification');h.drain();
+    assert.equal(h.card.host.style.top,'448px','card follows the newly added vendor section');assert.equal(published,1,'the unchanged order is not published again');
+    section.getBoundingClientRect=()=>rect(0,550,400,80);section.style.height='80px';await settle(15);h.drain();assert.equal(h.card.host.style.top,'');assert.equal(h.card.host.style.bottom,'16px','growing later content switches safely to the docked placement');
+    section.remove();await settle(15);h.drain();assert.equal(h.card.host.style.top,'328px');assert.equal(published,1);
+  }finally{observation.dispose();h.close();child.window.close();}
 });

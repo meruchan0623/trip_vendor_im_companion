@@ -70,15 +70,16 @@ export function linkifyIdentifiers(document:Document,onOpen:(entry:QueryIdentifi
  * textContent would concatenate separate vendor rows into a synthetic identifier.
  * Multiple labelled orders, split identifiers, or extra identifier-only rows disable the chip.
  */
-export function readHeaderOrder(document:Document):string|undefined{
+export function readHeaderOrder(document:Document):string|undefined{return readHeaderOrderSources(document,createOrderVisibilityRead());}
+function readHeaderOrderSources(document:Document,visible:(element:Element)=>boolean):string|undefined{
   const candidates:string[]=[];let ambiguous=false;
   for(const header of document.querySelectorAll(HEADER_TEXT_SELECTOR)){
-    if(isOwned(header)||!isOrderSourceVisible(header))continue;
+    if(isOwned(header)||!visible(header))continue;
     const parts:string[]=[];
     const visit=(node:Node)=>{
       if(node.nodeType===3){for(const part of (node.textContent??'').split(/[\r\n]+/)){const text=part.trim();if(text)parts.push(text);}return;}
       if(node.nodeType!==1)return;const element=node as Element;
-      if(element.matches('script,style,template')||!isOrderSourceVisible(element))return;
+      if(element.matches('script,style,template')||!visible(element))return;
       if(isOwned(element)){
         // Our identifier wrapper is the original vendor value. Other plugin UI is never a source.
         if(element.matches(`.${IDENTIFIER_CLASS}[data-tsim-identifier]`)&&element.textContent===element.getAttribute('data-tsim-identifier'))parts.push(element.textContent??'');
@@ -100,13 +101,23 @@ export function readHeaderOrder(document:Document):string|undefined{
 /** Conservative admission limit, not a vendor length contract: reject long numeric strings
  * such as the observed 32-digit concatenation rather than guessing or truncating an order. */
 function isValidOrderValue(value:string){return /^[A-Za-z0-9_-]{6,50}$/.test(value)&&/\d/.test(value)&&(!/^\d+$/.test(value)||value.length<=20);}
-function isOrderSourceVisible(element:Element){
-  for(let current:Element|null=element;current;current=current.parentElement){
-    if(current.matches('[hidden],[aria-hidden="true"]'))return false;
-    const style=current.ownerDocument.defaultView?.getComputedStyle(current);
-    if(style?.display==='none'||style?.visibility==='hidden'||style?.visibility==='collapse')return false;
-  }
-  return true;
+/** The cache belongs to one read only: style changes never survive into the next scan. */
+function createOrderVisibilityRead(){
+  const cache=new Map<Element,boolean>();
+  const visible=(element:Element):boolean=>{
+    const known=cache.get(element);if(known!==undefined)return known;
+    const path:Element[]=[];let current:Element|null=element,result=true;
+    while(current){
+      const cached=cache.get(current);if(cached!==undefined){result=cached;break;}
+      path.push(current);
+      if(current.matches('[hidden],[aria-hidden="true"]')){result=false;break;}
+      const style=current.ownerDocument.defaultView?.getComputedStyle(current);
+      if(style?.display==='none'||style?.visibility==='hidden'||style?.visibility==='collapse'){result=false;break;}
+      current=current.parentElement;
+    }
+    for(const node of path)cache.set(node,result);return result;
+  };
+  return visible;
 }
 export const CURRENT_ORDER_FRAME_SELECTOR='.customer_info iframe.customer_order-detail';
 function isApprovedOrderUrl(value:string,base?:string){
@@ -125,71 +136,135 @@ function orderFrameDocument(frame:HTMLIFrameElement):Document|undefined{
   try{if(!isApprovedOrderUrl(frame.src,frame.ownerDocument.baseURI))return;const child=frame.contentDocument;if(child&&isApprovedOrderUrl(child.URL)){const source=orderConversation(frame.src);if(source&&source!==orderConversation(child.URL,true))return;return child;}}catch{/* Cross-origin navigation may revoke the vendor's existing read access. */}
 }
 /** Prefer the observed vendor order row. An existing unreadable/loading frame is not a header fallback. */
-export function readCurrentOrder(document:Document):string|undefined{
-  const frames=[...document.querySelectorAll<HTMLIFrameElement>(CURRENT_ORDER_FRAME_SELECTOR)].filter(frame=>!isOwned(frame));
-  if(!frames.length)return readHeaderOrder(document);
-  if(frames.length!==1||!isOrderSourceVisible(frames[0]))return;
+export function readCurrentOrder(document:Document):string|undefined{return readOrderSources(document);}
+function readOrderSources(document:Document,knownFrames?:readonly HTMLIFrameElement[],knownRows?:readonly Element[]):string|undefined{
+  const visible=createOrderVisibilityRead();
+  const frames=knownFrames??[...document.querySelectorAll<HTMLIFrameElement>(CURRENT_ORDER_FRAME_SELECTOR)].filter(frame=>!isOwned(frame));
+  if(!frames.length)return readHeaderOrderSources(document,visible);
+  if(frames.length!==1||!visible(frames[0]))return;
   const child=orderFrameDocument(frames[0]);if(!child)return;
   const values:string[]=[];
-  for(const row of child.querySelectorAll('.im_info_basic_list > li')){
-    if(isOwned(row)||!isOrderSourceVisible(row))continue;
-    const labels=[...row.children].filter(element=>element.matches('.im_info_basic_list_title')&&!isOwned(element)&&isOrderSourceVisible(element));
+  for(const row of knownRows??child.querySelectorAll('.im_info_basic_list > li')){
+    if(isOwned(row)||!visible(row))continue;
+    const labels=[...row.children].filter(element=>element.matches('.im_info_basic_list_title')&&!isOwned(element)&&visible(element));
     if(!labels.some(label=>label.textContent?.trim()==='订单ID'))continue;
-    const contents=[...row.children].filter(element=>element.matches('.im_info_basic_list_content')&&!isOwned(element)&&isOrderSourceVisible(element));
+    const contents=[...row.children].filter(element=>element.matches('.im_info_basic_list_content')&&!isOwned(element)&&visible(element));
     if(labels.length!==1||contents.length!==1)return;
     // Each leaf is a separate value; never concatenate adjacent vendor nodes into an identifier.
     const parts:string[]=[];
-    const visit=(node:Node)=>{if(node.nodeType===3){const text=node.textContent?.trim();if(text)parts.push(text);return;}if(node.nodeType!==1)return;const element=node as Element;if(isOwned(element)||!isOrderSourceVisible(element)||element.matches('script,style,template'))return;for(const next of element.childNodes)visit(next);};
+    const visit=(node:Node)=>{if(node.nodeType===3){const text=node.textContent?.trim();if(text)parts.push(text);return;}if(node.nodeType!==1)return;const element=node as Element;if(isOwned(element)||!visible(element)||element.matches('script,style,template'))return;for(const next of element.childNodes)visit(next);};
     visit(contents[0]);
     if(parts.length!==1||!/^\d{6,20}$/.test(parts[0]))return;
     values.push(parts[0]);
   }
   const unique=[...new Set(values)];return unique.length===1?unique[0]:undefined;
 }
-/** Parent mutations call refresh; frame loads and child-document changes are observed here. */
-export function startOrderObservation(document:Document,onOrder:(order:string|undefined)=>void,conversationKey?:string|null){
-  type Binding={frame:HTMLIFrameElement;src:string;child?:Document;observer?:MutationObserver;pending:boolean;load:()=>void;unload:()=>void;attributes:MutationObserver};
-  const bindings=new Map<HTMLIFrameElement,Binding>();let disposed=false;
-  const detachChild=(binding:Binding)=>{binding.observer?.disconnect();binding.child?.defaultView?.removeEventListener('pagehide',binding.unload);binding.child?.defaultView?.removeEventListener('unload',binding.unload);binding.observer=undefined;binding.child=undefined;};
+const ORDER_PARENT_SOURCE_SELECTOR=`${CURRENT_ORDER_FRAME_SELECTOR}, ${HEADER_TEXT_SELECTOR}`;
+const ORDER_CHILD_SOURCE_SELECTOR='.im_info_basic_list';
+/** Inspect only the changed subtree and cached source ancestors, never unrelated page descendants. */
+function affectsOrderSources(mutations:readonly MutationRecord[],sources:readonly Element[],selector:string){
+  const containsSource=(element:Element)=>sources.some(source=>source===element||element.contains(source))||element.matches(selector)||!!element.querySelector(selector);
+  return mutations.some(mutation=>{
+    const target=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;
+    if(!target||isOwned(target))return false;
+    const changed=mutation.type==='childList'?[...mutation.addedNodes,...mutation.removedNodes]:[];
+    if(changed.length&&changed.every(node=>node.nodeType===1&&isOwned(node as Element)))return false;
+    if(sources.some(source=>source===target||source.contains(target)))return true;
+    if(mutation.type==='attributes')return containsSource(target);
+    if(target.closest(selector))return true;
+    return changed.some(node=>node.nodeType===1&&!isOwned(node as Element)&&containsSource(node as Element));
+  });
+}
+/** Parent mutations invalidate cached sources; loads and relevant child changes are observed here. */
+export function startOrderObservation(document:Document,onOrder:(order:string|undefined)=>void,conversationKey?:string|null,onSourceChange?:()=>void){
+  type Binding={frame:HTMLIFrameElement;src:string;child?:Document;observer?:MutationObserver;sources:Element[];rows:Element[];sourcesDirty:boolean;layoutSources:Element[];layoutAncestors:Set<Element>;layoutDirty:boolean;pending:boolean;load:()=>void;unload:()=>void;attributes:MutationObserver};
+  const view=document.defaultView!,bindings=new Map<HTMLIFrameElement,Binding>();
+  let disposed=false,scheduled:number|undefined,pendingRead=false,discover=true,headers:Element[]=[],lastOrder:string|undefined,emitted=false;
+  const publish=(order:string|undefined)=>{if(!emitted||lastOrder!==order){emitted=true;lastOrder=order;onOrder(order);}};
+  const detachChild=(binding:Binding)=>{binding.observer?.disconnect();binding.child?.defaultView?.removeEventListener('pagehide',binding.unload);binding.child?.defaultView?.removeEventListener('unload',binding.unload);binding.observer=undefined;binding.child=undefined;binding.sources=[];binding.rows=[];binding.layoutSources=[];binding.layoutAncestors.clear();binding.layoutDirty=false;};
   const emit=()=>{
     if(disposed)return;
     const expected=expectedOrderConversation(conversationKey),frames=[...bindings.values()];
     const mismatched=conversationKey!==undefined&&frames.length>0&&(!expected||frames.some(binding=>orderConversation(binding.frame.src)!==expected||!binding.child||orderConversation(binding.child.URL,true)!==expected));
-    onOrder(mismatched||frames.some(binding=>binding.pending)?undefined:readCurrentOrder(document));
+    publish(mismatched||frames.some(binding=>binding.pending)?undefined:readOrderSources(document,frames.map(binding=>binding.frame),frames[0]?.rows));
   };
-  const refresh=()=>{
+  const refreshLayout=(binding:Binding)=>{
+    const nodes=new Set<Element>(),ancestors=new Set<Element>();
+    for(const source of binding.sources)for(let node:Element|null=source;node&&node!==binding.child?.body;node=node.parentElement){
+      nodes.add(node);if(node.parentElement)ancestors.add(node.parentElement);
+      for(let sibling=node.nextElementSibling;sibling;sibling=sibling.nextElementSibling)if(!isOwned(sibling))nodes.add(sibling);
+    }
+    binding.layoutSources=[...nodes];binding.layoutAncestors=ancestors;binding.layoutDirty=false;
+  };
+  const affectsLayout=(mutations:readonly MutationRecord[],binding:Binding)=>mutations.some(mutation=>{
+    const element=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;
+    if(!element||isOwned(element))return false;
+    const changed=mutation.type==='childList'?[...mutation.addedNodes,...mutation.removedNodes]:[];
+    if(changed.length&&changed.every(node=>node.nodeType===1&&isOwned(node as Element)))return false;
+    if(binding.layoutSources.some(source=>source===element||source.contains(element)))return true;
+    if(mutation.type==='attributes'&&binding.layoutSources.some(source=>element.contains(source)))return true;
+    return changed.length>0&&binding.layoutAncestors.has(element);
+  });
+  const schedule=(readOrder=true)=>{
+    if(disposed)return;pendingRead=pendingRead||readOrder;if(scheduled!==undefined)return;
+    scheduled=view.setTimeout(()=>{
+      scheduled=undefined;const read=pendingRead;pendingRead=false;
+      if(read)refresh(false);else for(const binding of bindings.values())if(binding.layoutDirty)refreshLayout(binding);
+      onSourceChange?.();
+    },0);
+  };
+  const refresh=(rediscover=true)=>{
     if(disposed)return;
-    const frames=[...document.querySelectorAll<HTMLIFrameElement>(CURRENT_ORDER_FRAME_SELECTOR)].filter(frame=>!isOwned(frame));
+    if(scheduled!==undefined){view.clearTimeout(scheduled);scheduled=undefined;pendingRead=false;}
+    if(rediscover)discover=true;
+    const frames=discover?[...document.querySelectorAll<HTMLIFrameElement>(CURRENT_ORDER_FRAME_SELECTOR)].filter(frame=>!isOwned(frame)):[...bindings.keys()].filter(frame=>frame.isConnected);
+    if(discover)headers=[...document.querySelectorAll(HEADER_TEXT_SELECTOR)].filter(header=>!isOwned(header));
+    discover=false;
     for(const [frame,binding] of bindings)if(!frames.includes(frame)){frame.removeEventListener('load',binding.load);binding.attributes.disconnect();detachChild(binding);bindings.delete(frame);}
     for(const frame of frames){
       let binding=bindings.get(frame);
       if(!binding){
-        binding={frame,src:frame.src,pending:false,load:()=>{},unload:()=>{},attributes:new document.defaultView!.MutationObserver(()=>refresh())};
+        binding={frame,src:frame.src,pending:false,sources:[],rows:[],sourcesDirty:false,layoutSources:[],layoutAncestors:new Set(),layoutDirty:false,load:()=>{},unload:()=>{},attributes:new view.MutationObserver(()=>{if(binding!.src!==frame.src){binding!.pending=true;detachChild(binding!);publish(undefined);}schedule();})};
         const current=binding;
-        current.load=()=>{current.pending=false;current.src=frame.src;detachChild(current);refresh();};
-        current.unload=()=>{current.pending=true;emit();};
+        current.load=()=>{current.pending=false;current.src=frame.src;detachChild(current);refresh(false);onSourceChange?.();};
+        current.unload=()=>{current.pending=true;detachChild(current);publish(undefined);onSourceChange?.();};
         frame.addEventListener('load',current.load);current.attributes.observe(frame,{attributes:true,attributeFilter:['src']});bindings.set(frame,current);
       }
       if(binding.src!==frame.src){binding.src=frame.src;binding.pending=true;detachChild(binding);}
-      const child=orderFrameDocument(frame);
+      const child=binding.pending?undefined:orderFrameDocument(frame);
       if(child!==binding.child){
         detachChild(binding);binding.child=child;
         if(child){
           const current=binding;
-          current.observer=new document.defaultView!.MutationObserver(mutations=>{
-            if(current.src!==frame.src){refresh();return;}
-            const relevant=mutations.some(mutation=>{const element=mutation.target.nodeType===1?mutation.target as Element:mutation.target.parentElement;return !!element&&(!!element.closest('.im_info_basic_list')||!!element.querySelector('.im_info_basic_list'));});
-            if(!relevant)return;
-            emit();
+          current.sourcesDirty=true;
+          current.observer=new view.MutationObserver(mutations=>{
+            if(disposed||!current.frame.isConnected)return;
+            if(current.src!==frame.src){current.pending=true;detachChild(current);publish(undefined);schedule();return;}
+            const orderChanged=affectsOrderSources(mutations,current.sources,ORDER_CHILD_SOURCE_SELECTOR);
+            if(!orderChanged&&!affectsLayout(mutations,current))return;
+            current.layoutDirty=true;
+            if(orderChanged&&mutations.some(mutation=>mutation.type==='childList'||mutation.type==='attributes'&&mutation.attributeName==='class'))current.sourcesDirty=true;
+            schedule(orderChanged);
           });
           current.observer.observe(child,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden']});child.defaultView?.addEventListener('pagehide',current.unload);child.defaultView?.addEventListener('unload',current.unload);
         }
       }
+      if(binding.child&&(rediscover||binding.sourcesDirty||binding.sources.some(source=>!source.isConnected)||binding.rows.some(row=>!row.isConnected))){binding.sources=[...binding.child.querySelectorAll(ORDER_CHILD_SOURCE_SELECTOR)];binding.rows=binding.sources.flatMap(source=>[...source.children].filter(node=>node.matches('li')));binding.sourcesDirty=false;binding.layoutDirty=true;}
+      if(binding.layoutDirty)refreshLayout(binding);
     }
     emit();
   };
   refresh();
-  return{refresh,setConversationKey(key:string|null){conversationKey=key;refresh();},dispose(){if(disposed)return;disposed=true;for(const binding of bindings.values()){binding.frame.removeEventListener('load',binding.load);binding.attributes.disconnect();detachChild(binding);}bindings.clear();}};
+  return{
+    refresh,
+    /** The owner batches relevant parent mutations; false means no order scan is needed. */
+    invalidate(mutations:readonly MutationRecord[]){
+      if(disposed||!affectsOrderSources(mutations,[...bindings.keys(),...headers],ORDER_PARENT_SOURCE_SELECTOR))return false;
+      discover=true;return true;
+    },
+    setConversationKey(key:string|null){if(disposed||conversationKey===key)return;conversationKey=key;publish(undefined);refresh();},
+    dispose(){if(disposed)return;disposed=true;view.clearTimeout(scheduled);for(const binding of bindings.values()){binding.frame.removeEventListener('load',binding.load);binding.attributes.disconnect();detachChild(binding);}bindings.clear();headers=[];},
+  };
 }
 export function unlinkifyIdentifiers(document:Document){for(const element of document.querySelectorAll<HTMLElement>(`.${IDENTIFIER_CLASS}[data-tsim-identifier]`)){element.replaceWith(document.createTextNode(element.getAttribute('data-tsim-identifier')??element.textContent??''));}}
 /** Debounced observer; ignores our own mutations and disconnects while scanning. */
