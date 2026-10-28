@@ -6,13 +6,13 @@ export const TSIM_OPERATOR_ORIGIN='https://csagent.tsim.tech';
 export const OPERATOR_FRAME_ID='tsim-operator-frame';
 export const OPERATOR_LOADING_ID='tsim-operator-loading';
 export const OPERATOR_VIEWPORT_ID='tsim-operator-viewport';
-/** Separate hidden frame that only opens a TLS connection in the iframe network partition. */
+/** Retained for integrations that identify legacy warm frames; no warm frame is created. */
 export const OPERATOR_WARM_ID='tsim-operator-warm';
-export const WARM_CONNECTION_PATH='/assets/__companion_warm__.txt';
-export const WARM_CONNECTION_INTERVAL_MS=30000,WARM_CONNECTION_TIMEOUT_MS=10000,STANDBY_READY_TIMEOUT_MS=8000;
-/** Standby boots that time out, reload or fall back to login; after this many prewarm stays off for the overlay's lifetime. */
-export const STANDBY_ATTEMPT_LIMIT=3;
-export const OPEN_TIMEOUT_MS=8000,FALLBACK_BOUNDS_DELAY_MS=1500,BOUNDS_POLL_INTERVAL_MS=500,BOUNDS_POLL_LIMIT=15,PREWARM_DELAY_MS=1200;
+/** @deprecated Automatic prewarming is disabled. */
+export const PREWARM_DELAY_MS=1200;
+export const OPEN_TIMEOUT_MS=8000,FALLBACK_BOUNDS_DELAY_MS=1500,BOUNDS_POLL_INTERVAL_MS=500,BOUNDS_POLL_LIMIT=15;
+/** Closed pages may run for at most this long before their iframe is destroyed. */
+export const CLOSED_FRAME_RETENTION_MS=60000;
 export const UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export interface OperatorRect {x:number;y:number;width:number;height:number}
 export interface OperatorRequest {identifier:string;identifierType?:OperatorIdentifierType;requestId:string}
@@ -48,10 +48,6 @@ export function clampOperatorRect(value:unknown,viewportWidth:number,viewportHei
   const left=Math.max(0,rect.x),top=Math.max(0,rect.y),right=Math.min(viewportWidth,rect.x+rect.width),bottom=Math.min(viewportHeight,rect.y+rect.height);
   return right>left&&bottom>top?{x:left,y:top,width:right-left,height:bottom-top}:null;
 }
-/** Host standby page: boots the SPA without a query and waits for SET_IDENTIFIER plus a session handoff. */
-export function operatorStandbyURL(origin=TSIM_OPERATOR_ORIGIN){
-  const url=new URL('/embed/operator',origin);url.searchParams.set('source','travel-merchant-companion');url.searchParams.set('mode','host');url.searchParams.set('session','handoff');return url.href;
-}
 export function operatorFrameURL(origin=TSIM_OPERATOR_ORIGIN,request?:OperatorRequest){
   const url=new URL('/embed/operator',origin);url.searchParams.set('source','travel-merchant-companion');
   if(!request){url.searchParams.set('mode','host');return url.href;}
@@ -73,9 +69,9 @@ export function standardOperatorRect(viewportWidth:number,viewportHeight:number)
  * own AgentWindow exactly like the agent workbench. A clipping viewport follows the reported window bounds so
  * only the window area is visible and receives input; the rest of the original page stays usable.
  *
- * Booting the TSim SPA is the expensive part (the vendor client shares one renderer, HTTP/1.1, no GPU), so closing
- * only hides the frame. The next query reuses it via TSIM_OPERATOR_SET_IDENTIFIER, but only after the companion
- * hands out the same bearer the frame adopted; any other answer, a login fallback or a reload rebuilds the frame.
+ * Only an explicit open boots the TSIM SPA. A closed frame is retained for at most 60 seconds.
+ * Reuse requires the same companion bearer and a fresh query response before the page becomes visible.
+ * Account, authorization and conversation changes must call reset() to release the page immediately.
  */
 export function createOperatorOverlay(document:Document,options:{origin?:string;prewarmDelayMs?:number;randomUUID?:()=>string;now?:()=>number;requestSession?:(request:OperatorRequest)=>Promise<OperatorSessionGrant>}={}):OperatorOverlay{
   const view=document.defaultView!,parsed=new URL(options.origin??TSIM_OPERATOR_ORIGIN),now=options.now??(()=>Date.now());
@@ -84,20 +80,21 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
   let frame:HTMLIFrameElement|null=null,clip:HTMLElement|null=null,active:OperatorRequest|null=null,visible=false,disposed=false,timer:number|undefined,revealTimer:number|undefined,status:HTMLElement|null=null,statusText:HTMLElement|null=null,reported:OperatorRect|null=null,bounds:OperatorRect|null=null;
   // Warm frame: the URL it booted with, the companion bearer it adopted (undefined: not handed over, null: refused),
   // whether it has rendered a query since, and whether it still shows the previous request.
-  let frameURL:string|null=null,frameGrant:string|null|undefined,reusable=false,pendingReveal=false,generation=0;
+  let frameURL:string|null=null,frameGrant:string|null|undefined,reusable=false,pendingReveal=false,generation=0,releaseTimer:number|undefined,releaseAt:number|undefined;
+  // Bound legacy identifier history: revisiting an identifier needs a new source to reject stale V1 events.
+  const frameIdentifiers=new Set<string>();
   // A reused frame is revealed only once the grant matched (`awaitingGrant` false) and the page answered the new request.
   let awaitingGrant=false,answered=false;
   // The active request's grant, started at click time; it never rejects (null: unavailable).
   let inflight:{request:OperatorRequest;grant:Promise<OperatorSessionGrant|null>}|null=null;
-  // Host standby frame (never adopted a bearer), whether this TSim lacks the hostSession capability, and failed standby boots.
-  let standby:'booting'|'ready'|null=null,standbyTimer:number|undefined,hostSessionUnsupported=false,standbyFailures=0;
-  let warmFrame:HTMLIFrameElement|null=null,warmTimer:number|undefined,warmAt=-Infinity;
+  const clearRelease=()=>{view.clearTimeout(releaseTimer);releaseTimer=undefined;releaseAt=undefined;};
   const clearTimer=()=>{view.clearTimeout(timer);timer=undefined;};
   const clearReveal=()=>{view.clearTimeout(revealTimer);revealTimer=undefined;};
   const message=(text:string)=>{if(statusText)statusText.textContent=text;};
   const post=(value:Record<string,unknown>)=>frame?.contentWindow?.postMessage(value,origin);
   const startGrant=(request:OperatorRequest)=>{
-    const pending=options.requestSession?options.requestSession({...request}):Promise.reject(new Error('SESSION_UNAVAILABLE'));
+    let pending:Promise<OperatorSessionGrant|null>;
+    try{pending=options.requestSession?options.requestSession({...request}):Promise.resolve(null);}catch{pending=Promise.resolve(null);}
     const grant=pending.then(value=>value&&typeof value.accessToken==='string'&&value.accessToken?value:null,()=>null);
     inflight={request,grant};return grant;
   };
@@ -115,14 +112,16 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
     // The window has its own close button once drawn; the host control stays for loading, login and failures.
     if(status)status.style.display=shown?'none':'flex';
   }
-  function destroyFrame(){clearReveal();view.clearTimeout(standbyTimer);standbyTimer=undefined;standby=null;frame?.remove();frame=null;frameURL=null;frameGrant=undefined;reusable=false;pendingReveal=false;awaitingGrant=false;answered=false;}
-  /** Hides the order window; the TSim page stays loaded for the next query. */
+  function destroyFrame(){clearRelease();clearReveal();frame?.remove();frame=null;frameURL=null;frameGrant=undefined;frameIdentifiers.clear();reusable=false;pendingReveal=false;awaitingGrant=false;answered=false;}
+  /** Retain a closed page briefly; hidden does not mean its remote scripts are suspended. */
   function close(){
     generation++;clearTimer();clearReveal();visible=false;active=null;inflight=null;reported=null;bounds=null;pendingReveal=false;awaitingGrant=false;answered=false;status?.remove();status=null;statusText=null;
     if(frame&&document.activeElement===frame)frame.blur();
     if(frame)frame.style.visibility='hidden';if(clip)clip.style.visibility='hidden';
+    // Repeated close notifications must not extend the original retention deadline.
+    if(frame&&releaseTimer===undefined){releaseAt=now()+CLOSED_FRAME_RETENTION_MS;releaseTimer=view.setTimeout(()=>{releaseTimer=undefined;destroyFrame();clip?.remove();clip=null;},CLOSED_FRAME_RETENTION_MS);}
   }
-  /** Drops the TSim page too (including a standby page): account or authorization changes must never reach a warm frame. */
+  /** Drops the TSIM page too (including a retained closed page): account or authorization changes must never reach a warm frame. */
   function reset(){close();destroyFrame();clip?.remove();clip=null;}
   const revealed=()=>{answered=true;if(!pendingReveal||awaitingGrant)return;pendingReveal=false;clearReveal();layout();};
   function ensureClip(){
@@ -135,7 +134,7 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
   }
   function boot(request:OperatorRequest){
     destroyFrame();if(!clip)return;
-    const ownFrame=createFrame(operatorFrameURL(origin,request));
+    const ownFrame=createFrame(operatorFrameURL(origin,request));frameIdentifiers.add(request.identifier);
     let loads=0;
     ownFrame.addEventListener('load',()=>{if(frame!==ownFrame)return;
       // A second load means the page navigated or reloaded itself; it no longer serves this request protocol.
@@ -144,41 +143,17 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
     ownFrame.addEventListener('error',()=>{if(frame!==ownFrame)return;reusable=false;if(!active)return;clearTimer();message('TSim 页面加载异常，请查看页面或关闭后重试。');});
     clip.append(ownFrame);layout();
   }
-  /** Old TSim builds without the host session protocol: never prewarm again during this overlay's lifetime. */
-  function standbyUnsupported(){hostSessionUnsupported=true;if(standby)destroyFrame();}
-  /** A slow, reloading or logged-out standby boot is dropped; prewarm may try again a bounded number of times. */
-  function standbyFailed(){standbyFailures++;if(standby)destroyFrame();}
-  function prewarm(){
-    if(disposed||document.visibilityState==='hidden')return;
-    warmConnection();
-    if(frame||active||hostSessionUnsupported||standbyFailures>=STANDBY_ATTEMPT_LIMIT||!options.requestSession)return;
-    const own=ensureClip(),ownFrame=createFrame(operatorStandbyURL(origin));standby='booting';
-    // Lay out at viewport size while invisible, so the SPA renders as it will when shown.
-    Object.assign(ownFrame.style,{visibility:'hidden',left:'0px',top:'0px',width:`${view.innerWidth}px`,height:`${view.innerHeight}px`});
-    let loads=0;
-    ownFrame.addEventListener('load',()=>{if(frame!==ownFrame||++loads<=1)return;reusable=false;
-      if(standby&&!active){standbyFailed();return;}
-      // The adopted standby reloaded itself (e.g. TSim chunk recovery): its new document is an empty standby that
-      // no longer knows the active request, so rebuild a handoff frame for it.
-      if(active)boot(active);});
-    ownFrame.addEventListener('error',()=>{if(frame===ownFrame&&standby&&!active)standbyFailed();});
-    standbyTimer=view.setTimeout(()=>{standbyTimer=undefined;if(frame===ownFrame&&standby==='booting')standbyFailed();},STANDBY_READY_TIMEOUT_MS);
-    own.append(ownFrame);
-  }
-  function warmConnection(){
-    if(disposed||document.visibilityState==='hidden'||warmFrame||!document.body)return;
-    const at=now();if(at-warmAt<WARM_CONNECTION_INTERVAL_MS)return;warmAt=at;
-    // No sandbox: an opaque-origin frame would use a different network partition than the operator frame.
-    const own=document.createElement('iframe');warmFrame=own;own.id=OPERATOR_WARM_ID;own.setAttribute('data-tsim-owned','1');own.setAttribute('aria-hidden','true');own.tabIndex=-1;own.referrerPolicy='no-referrer';own.style.display='none';
-    const done=()=>{if(warmFrame!==own)return;view.clearTimeout(warmTimer);warmTimer=undefined;own.remove();warmFrame=null;};
-    own.addEventListener('load',done);own.addEventListener('error',done);warmTimer=view.setTimeout(done,WARM_CONNECTION_TIMEOUT_MS);
-    own.src=new URL(WARM_CONNECTION_PATH,origin).href;document.body.append(own);
-  }
+  /** Compatibility hooks intentionally do nothing: no unmeasured background SPA or connection work. */
+  function prewarm(){}
+  function warmConnection(){}
   const setIdentifier=(request:OperatorRequest)=>post({type:'TSIM_OPERATOR_SET_IDENTIFIER',version:2,identifier:request.identifier,...(request.identifierType?{identifierType:request.identifierType}:{}),requestId:request.requestId});
   const open=(entry:QueryIdentifierEntry)=>{
     if(disposed||document.visibilityState==='hidden')return;
     const identifier=entry.identifier.trim();if(!/^[A-Za-z0-9_-]{1,100}$/.test(identifier))return;
-    close();const requestId=options.randomUUID?.()??view.crypto.randomUUID();if(!UUID_RE.test(requestId))return;
+    const requestId=options.randomUUID?.()??view.crypto.randomUUID();if(!UUID_RE.test(requestId))return;
+    // A suspended renderer may deliver its timer late; never reuse beyond the wall-clock deadline.
+    if(releaseAt!==undefined&&now()>=releaseAt)destroyFrame();
+    close();clearRelease();
     const request:OperatorRequest={identifier,identifierType:entry.identifierType,requestId},current=generation;active=request;visible=true;
     ensureClip();
     status=document.createElement('div');status.id=OPERATOR_LOADING_ID;status.setAttribute('data-tsim-owned','1');status.style.cssText='position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:2147483001;display:flex;align-items:center;gap:12px;padding:6px 12px;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);color:#333;font:13px sans-serif;max-width:calc(100vw - 32px)';
@@ -188,22 +163,19 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
     timer=view.setTimeout(()=>{if(active===request)message('TSim 页面仍在加载，请查看下方页面或关闭后重试。');},OPEN_TIMEOUT_MS);
     // The authorization gate starts at click time; the bearer itself is posted only in reply to this request's NEEDS_SESSION.
     const grant=startGrant(request);
-    if(frame&&standby==='ready'){
-      // A ready standby page shows no previous order: show it now and hand it the identifier.
-      standby=null;view.clearTimeout(standbyTimer);standbyTimer=undefined;layout();setIdentifier(request);return;
-    }
-    if(!frame||!reusable||!frameGrant||!options.requestSession){boot(request);return;}
+    // Legacy result messages have no requestId; reopening the same identifier needs a new source.
+    if(!frame||!reusable||!frameGrant||!options.requestSession||frameIdentifiers.has(identifier)||frameIdentifiers.size>=32){boot(request);return;}
     const warm=frame,adopted=frameGrant;pendingReveal=true;awaitingGrant=true;answered=false;layout();
     const stale=()=>disposed||generation!==current||active!==request||frame!==warm;
     // The old page still holds its adopted bearer: authorize before sending another order to it.
     revealTimer=view.setTimeout(()=>{if(!stale()&&pendingReveal)boot(request);},REUSE_REVEAL_TIMEOUT_MS);
     void grant.then(value=>{
       if(stale())return;const token=value?.accessToken??null;
-      // A refused grant is asked again by the rebuilt frame; a different bearer is reused for its handoff.
-      if(!token){if(inflight?.grant===grant)inflight=null;boot(request);return;}
+      // Rebuild before answering a refused or changed session; never hand the next order to the old bearer.
+      if(!token){boot(request);return;}
       if(token!==adopted||!reusable){boot(request);return;}
-      setIdentifier(request);
-      // Reopening the same identifier keeps the page's bounds bridge, which only republishes on request.
+      frameIdentifiers.add(identifier);setIdentifier(request);
+      // The retained bounds bridge only republishes when requested.
       post({type:'TSIM_OPERATOR_REQUEST_BOUNDS',version:1,identifier});
       awaitingGrant=false;if(answered)revealed();
     });
@@ -211,16 +183,12 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
   const onMessage=(event:MessageEvent)=>{
     if(disposed||!frame||event.origin!==origin||event.source!==frame.contentWindow)return;
     const type=(event.data as {type?:unknown}|null)?.type;
-    if(standby&&!active){
-      // The standby page proves the host session protocol before any query can use it.
-      if(type==='TSIM_OPERATOR_READY'&&standby==='booting'){const m=parseOperatorChildMessage(event.data,null);if(m?.type==='TSIM_OPERATOR_READY'&&m.capabilities?.includes('hostSession')){standby='ready';view.clearTimeout(standbyTimer);standbyTimer=undefined;}else standbyUnsupported();}
-      else if(type==='TSIM_OPERATOR_NEEDS_LOGIN')standbyFailed();
-      return;
-    }
     // A hidden frame that falls back to TSim's own login must never be reused: a manual login may be another account.
     if(!active){if(type==='TSIM_OPERATOR_NEEDS_LOGIN'){reusable=false;frameGrant=null;}return;}
     if(document.visibilityState==='hidden')return;
     const m=parseOperatorChildMessage(event.data,active);if(!m)return;
+    // Until authorization completes, the retained document still belongs to the previous query.
+    if(pendingReveal&&awaitingGrant&&m.type!=='TSIM_OPERATOR_NEEDS_LOGIN')return;
     switch(m.type){
       case 'TSIM_OPERATOR_CLOSE':close();break;
       case 'TSIM_OPERATOR_BOUNDS':if(clampOperatorRect(m.rect,view.innerWidth,view.innerHeight)){reported={...m.rect};reusable=true;revealed();layout();}break;
@@ -228,10 +196,11 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
         // The bearer is posted only to this request's frame and only to the fixed TSim origin.
         const request=active,ownFrame=frame,reply=(value:Record<string,unknown>)=>{if(frame===ownFrame&&active===request)ownFrame.contentWindow?.postMessage({version:2,identifier:request.identifier,requestId:request.requestId,...value},origin);};
         message('正在使用助手的 TSim 登录态打开订单…');
-        // The click already started this request's grant; a repeated request asks again.
-        const pending=inflight?.request===request?inflight.grant:startGrant(request);inflight=null;
+        // Repeated handshakes share the click's authorization result, including refusal.
+        const pending=inflight?.request===request?inflight.grant:startGrant(request);
         // Every outcome answers the frame: an unanswered request leaves TSim waiting for its own timeout.
         void pending.then(grant=>{
+          if(disposed||frame!==ownFrame||active!==request)return;
           if(!grant){if(frame===ownFrame)frameGrant=null;reply({type:'TSIM_OPERATOR_SESSION_UNAVAILABLE'});if(frame===ownFrame&&active===request)message('助手未能提供 TSim 登录态，请先在助手面板登录，或在下方页面登录。');return;}
           // A frame that already fell back to login or was refused (null) keeps no reusable grant.
           if(frame===ownFrame&&active===request&&frameGrant!==null)frameGrant=grant.accessToken;
@@ -247,6 +216,6 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
   const onVisibility=()=>{if(document.visibilityState==='hidden')close();};
   const onResize=()=>layout();
   const onKey=(event:KeyboardEvent)=>{if(event.key==='Escape'&&active){event.preventDefault();event.stopPropagation();close();}};
-  view.addEventListener('message',onMessage);view.addEventListener('keydown',onKey,true);view.addEventListener('resize',onResize);document.addEventListener('visibilitychange',onVisibility);
-  return{open,close,reset,prewarm,warmConnection,get frame(){return frame;},get frameURL(){return frameURL;},get visible(){return visible;},get active(){return active?{...active}:null;},get bounds(){return bounds?{...bounds}:null;},dispose(){if(disposed)return;disposed=true;reset();view.clearTimeout(warmTimer);warmFrame?.remove();warmFrame=null;view.removeEventListener('message',onMessage);view.removeEventListener('keydown',onKey,true);view.removeEventListener('resize',onResize);document.removeEventListener('visibilitychange',onVisibility);}};
+  view.addEventListener('message',onMessage);view.addEventListener('keydown',onKey,true);view.addEventListener('resize',onResize);document.addEventListener('visibilitychange',onVisibility);view.addEventListener('pagehide',reset);
+  return{open,close,reset,prewarm,warmConnection,get frame(){return frame;},get frameURL(){return frameURL;},get visible(){return visible;},get active(){return active?{...active}:null;},get bounds(){return bounds?{...bounds}:null;},dispose(){if(disposed)return;disposed=true;reset();view.removeEventListener('message',onMessage);view.removeEventListener('keydown',onKey,true);view.removeEventListener('resize',onResize);document.removeEventListener('visibilitychange',onVisibility);view.removeEventListener('pagehide',reset);}};
 }

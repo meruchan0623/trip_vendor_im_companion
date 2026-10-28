@@ -4,7 +4,7 @@ import {customerLanguageEvidence} from './language';
 import type {OperatorSessionGrant,OrderWindowIntent,PanelState} from '../../src/shared/workbench';
 import {resolveCustomerLanguage,sameCustomerLanguageResolution,unavailableCustomerLanguage,type CustomerLanguageResolution} from '../../src/shared/customer-language';
 import {startOrderObservation,isOwned,inferIdentifierType} from './identifiers';
-import {createOperatorOverlay,OPERATOR_FRAME_ID,PREWARM_DELAY_MS,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
+import {createOperatorOverlay,OPERATOR_FRAME_ID,TSIM_OPERATOR_ORIGIN,type OperatorOverlay} from './operator-overlay';
 import {createOutboundPanel,PANEL_HOST_ID,type OutboundPanel,type PanelBridge} from './outbound-panel';
 import {createOrderSummaryCard,ORDER_SUMMARY_HOST_ID,type OrderSummaryCard} from './order-summary-card';
 export {TSIM_OPERATOR_ORIGIN};
@@ -38,14 +38,8 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   let shownOrder:string|undefined;
   const syncSummary=()=>{if(!summary||disposed)return;const currentBound=bound();summary.update({identifier:currentBound?shownOrder:undefined,conversationKey:currentBound?state?.conversationKey:null,auth:state?.auth});summary.reposition();};
   let renderedBound:boolean|undefined;
-  // One prewarm attempt per ready authorization; an auth reset or a newly shown order chip allows the next attempt
-  // (the overlay ignores it while a frame exists and caps failed standby boots).
-  let prewarmTimer:number|undefined,prewarmed=false,warmedOrder:string|undefined;
-  const canPrewarm=()=>!disposed&&!!options.bridge&&state?.auth==='ready'&&document.visibilityState!=='hidden'&&bound();
-  const schedulePrewarm=()=>{if(prewarmed||prewarmTimer!==undefined||!canPrewarm())return;prewarmTimer=view.setTimeout(()=>{prewarmTimer=undefined;if(prewarmed||!canPrewarm())return;prewarmed=true;overlay.prewarm();},options.prewarmDelayMs??PREWARM_DELAY_MS);};
-  /** A newly shown order chip opens the TLS connection the order page will need. */
-  const showOrder=(order:string|undefined)=>{panel?.setOrder(order);shownOrder=order;syncSummary();if(!order){warmedOrder=undefined;return;}if(order!==warmedOrder&&bound()){warmedOrder=order;overlay.warmConnection();prewarmed=false;schedulePrewarm();}};
-  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready'){overlay.reset();prewarmed=false;}else if(!currentBound)overlay.close();schedulePrewarm();syncSummary();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});if(state.detectedOrder)showOrder(currentBound?state.detectedOrder.identifier??undefined:undefined);};
+  const showOrder=(order:string|undefined)=>{panel?.setOrder(order);shownOrder=order;syncSummary();};
+  const renderCurrent=(onlyBindingChange=false)=>{if(!state)return;const currentBound=bound();if(state.auth!=='ready'||!currentBound)overlay.reset();syncSummary();if(onlyBindingChange&&renderedBound===currentBound)return;renderedBound=currentBound;panel?.render(currentBound?state:{...state,conversationKey:null,draft:null,preview:null,error:null,status:'unavailable',target:state.fallbackTarget??'en',followCustomer:{lang:'unknown',following:true,manualEnabled:false,resolution:unavailableCustomerLanguage()},sendPending:false});if(state.detectedOrder)showOrder(currentBound?state.detectedOrder.identifier??undefined:undefined);};
   renderCurrent();
   /** Keep the visible order chip aligned with the vendor's current order-detail frame. */
   type CustomerReport={signature:string;key:string;lang:string;resolution:CustomerLanguageResolution;attempts:number;done:boolean;attempt:number};
@@ -98,8 +92,8 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   if(panel&&document.body){orderObserver.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','src']});syncOrder();}
   function update(next:PanelState){
     if(disposed)return;const previousLanguage=JSON.stringify(state?.followCustomer);state=next;
-    // Hide the order page on conversation change; the warm TSim page is reused only after a fresh authorization.
-    if(conversation!==undefined&&conversation!==next.conversationKey)overlay.close();
+    // Host keys include the account/generation: no previously authorized frame survives a changed key.
+    if(conversation!==undefined&&conversation!==next.conversationKey)overlay.reset();
     orderObservation?.setConversationKey(next.conversationKey);
     if(conversation!==next.conversationKey){conversation=next.conversationKey;originalsDeadline=Date.now()+CUSTOMER_ORIGINALS_LOAD_WINDOW_MS;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);customerTimer=undefined;scheduleCustomer();}
     else if(previousLanguage!==JSON.stringify(next.followCustomer)){
@@ -109,7 +103,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     }
     renderCurrent();
   }
-  const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;clearRetry();if(document.visibilityState!=='hidden'){renderCurrent(true);syncOrder();scheduleCustomer();}};document.addEventListener('visibilitychange',onVisibility);
+  const onVisibility=()=>{view.clearTimeout(orderTimer);orderTimer=undefined;clearRetry();if(document.visibilityState!=='hidden'){renderCurrent(true);syncOrder();scheduleCustomer();}else{overlay.close();view.clearTimeout(customerTimer);customerTimer=undefined;}};document.addEventListener('visibilitychange',onVisibility);
   if(state)update(state);
   return{update,overlay,panel,summary,
     boundary(){
@@ -132,6 +126,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;disposed=true;view.clearTimeout(prewarmTimer);clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();summary?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();summary?.dispose();overlay.dispose();},
   };
 }

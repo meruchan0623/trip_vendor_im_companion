@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createOperatorOverlay,REUSE_REVEAL_TIMEOUT_MS,OPERATOR_VIEWPORT_ID,OPERATOR_WARM_ID,STANDBY_ATTEMPT_LIMIT,STANDBY_READY_TIMEOUT_MS,WARM_CONNECTION_INTERVAL_MS,WARM_CONNECTION_TIMEOUT_MS} from '../runtime/page/operator-overlay';
+import {createOperatorOverlay,REUSE_REVEAL_TIMEOUT_MS,OPERATOR_VIEWPORT_ID,OPERATOR_WARM_ID,CLOSED_FRAME_RETENTION_MS} from '../runtime/page/operator-overlay';
 import type {OperatorSessionGrant} from '../src/shared/workbench';
 
 // Minimal platform-neutral DOM: just what the overlay touches, with manually advanced timers.
@@ -107,7 +107,6 @@ test('reset drops the warm frame entirely',async()=>{
 
 function deferred(){let resolve!:(value:OperatorSessionGrant|undefined)=>void;const promise=new Promise<OperatorSessionGrant|undefined>(r=>{resolve=r;});return{promise,resolve};}
 const tokens=(frame:FakeFrame)=>frame.outbox.filter(m=>'accessToken' in m.value);
-const READY_HOST={type:'TSIM_OPERATOR_READY',version:2,mode:'host',capabilities:['requestId','basicReady','queryTerminal','hostSession']};
 
 test('the cold path starts the grant at click time and answers the session request with it',async()=>{
   const env=setup();env.overlay.open({identifier:'ORDER1'});
@@ -183,74 +182,6 @@ test('a late warm grant cannot send an expired order after close, reset, timeout
   }
 });
 
-test('a host standby page never receives a bearer before a click and serves the next open',async()=>{
-  const env=setup();env.overlay.prewarm();
-  const standby=env.frame()!;
-  assert.equal(standby.src,`${ORIGIN}/embed/operator?source=travel-merchant-companion&mode=host&session=handoff`);
-  assert.equal(env.overlay.frameURL,standby.src);assert.equal(standby.isConnected,true);assert.equal(standby.style.visibility,'hidden');
-  env.child(standby,READY_HOST);
-  env.child(standby,{type:'TSIM_OPERATOR_NEEDS_SESSION',version:2,identifier:'ORDER1',requestId:'6f1c2f9e-3b1a-4c8d-9e2f-000000000001'});await settle();
-  assert.equal(env.sessions.length,0);assert.equal(standby.outbox.length,0,'no token to a standby page');
-  env.overlay.open({identifier:'ORDER1',identifierType:'order_number'});const request=env.overlay.active!;
-  assert.equal(env.frame(),standby,'the ready standby page is used');assert.equal(standby.style.visibility,'visible');assert.equal(env.sessions.length,1);
-  assert.deepEqual(standby.outbox.map(m=>m.value),[{type:'TSIM_OPERATOR_SET_IDENTIFIER',version:2,identifier:'ORDER1',identifierType:'order_number',requestId:request.requestId}]);
-  await settle();assert.equal(tokens(standby).length,0,'token only after the page asks');
-  env.child(standby,{type:'TSIM_OPERATOR_NEEDS_SESSION',version:2,identifier:'ORDER1',requestId:request.requestId});await settle();
-  assert.equal(env.sessions.length,1);assert.deepEqual(tokens(standby).map(m=>[m.value.accessToken,m.value.requestId,m.target]),[[TOKEN_A,request.requestId,ORIGIN]]);
-  env.child(standby,{type:'TSIM_OPERATOR_BOUNDS',version:2,identifier:'ORDER1',requestId:request.requestId,rect:{x:10,y:10,width:300,height:200}});env.overlay.close();
-  env.overlay.open({identifier:'ORDER2'});await settle();
-  assert.equal(env.frame(),standby,'afterwards it is a normal warm frame');assert.equal(standby.outbox.at(-2)?.value.type,'TSIM_OPERATOR_SET_IDENTIFIER');
-});
-
-test('a standby page without the host session capability is dropped and not retried',async()=>{
-  const env=setup();env.overlay.prewarm();const standby=env.frame()!;
-  env.child(standby,{...READY_HOST,capabilities:['requestId','basicReady']});
-  assert.equal(env.frame(),null);assert.equal(standby.isConnected,false);
-  env.overlay.prewarm();assert.equal(env.frame(),null,'no second standby');
-  env.overlay.open({identifier:'ORDER1'});assert.match(env.frame()!.src,/identifier=ORDER1/,'open still boots a handoff frame');
-  const booting=setup();booting.overlay.prewarm();const booted=booting.frame()!;booting.overlay.open({identifier:'ORDER1'});
-  assert.notEqual(booting.frame(),booted,'a still-booting booted is replaced');assert.equal(booted.isConnected,false);assert.equal(booted.outbox.length,0);
-  const reset=setup();reset.overlay.prewarm();const dropped=reset.frame()!;reset.child(dropped,READY_HOST);reset.overlay.reset();
-  assert.equal(reset.frame(),null);assert.equal(dropped.isConnected,false,'reset drops the standby page');
-});
-
-test('a slow, reloading or logged-out standby is dropped but prewarm retries a bounded number of times',()=>{
-  for(const fail of ['login','timeout','reload']){
-    const env=setup();
-    for(let attempt=0;attempt<STANDBY_ATTEMPT_LIMIT;attempt++){
-      env.overlay.prewarm();const standby=env.frame()!;assert.ok(standby,`${fail}: attempt ${attempt+1} boots a standby`);
-      if(fail==='login')env.child(standby,{type:'TSIM_OPERATOR_NEEDS_LOGIN'});
-      else if(fail==='timeout')env.view.advance(STANDBY_READY_TIMEOUT_MS);
-      else{standby.dispatch('load');standby.dispatch('load');}
-      assert.equal(env.frame(),null,fail);assert.equal(standby.isConnected,false,fail);assert.equal(standby.outbox.length,0,`${fail}: no token`);
-    }
-    env.overlay.prewarm();assert.equal(env.frame(),null,`${fail}: no standby after ${STANDBY_ATTEMPT_LIMIT} failures`);
-    env.overlay.open({identifier:'ORDER1'});assert.match(env.frame()!.src,/identifier=ORDER1/,'open still boots a handoff frame');
-  }
-  // A slow first boot does not prevent a later standby from becoming ready and serving the next open.
-  const env=setup();env.overlay.prewarm();env.view.advance(STANDBY_READY_TIMEOUT_MS);assert.equal(env.frame(),null);
-  env.overlay.prewarm();const standby=env.frame()!;env.child(standby,READY_HOST);env.overlay.open({identifier:'ORDER1'});
-  assert.equal(env.frame(),standby);assert.equal(standby.outbox[0]?.value.type,'TSIM_OPERATOR_SET_IDENTIFIER');
-});
-
-test('an adopted standby that reloads itself is rebuilt for the active request',async()=>{
-  const env=setup();env.overlay.prewarm();const standby=env.frame()!;standby.dispatch('load');env.child(standby,READY_HOST);
-  env.overlay.open({identifier:'ORDER1',identifierType:'order_number'});const request=env.overlay.active!;assert.equal(env.frame(),standby);
-  // TSim's chunk recovery reloads the document; the new page is an empty standby that drops the request.
-  standby.dispatch('load');env.child(standby,READY_HOST);
-  const rebuilt=env.frame()!;assert.notEqual(rebuilt,standby);assert.equal(standby.isConnected,false);
-  assert.match(rebuilt.src,/identifier=ORDER1/);assert.match(rebuilt.src,/session=handoff/);assert.match(rebuilt.src,new RegExp(`requestId=${request.requestId}`));
-  assert.equal(rebuilt.style.visibility,'visible');assert.equal(tokens(standby).length,0);
-  // The rebuilt frame is a normal cold frame: its first load is not a reload, and it gets the bearer only on request.
-  rebuilt.dispatch('load');assert.equal(env.frame(),rebuilt);await settle();assert.equal(tokens(rebuilt).length,0);
-  env.child(rebuilt,{type:'TSIM_OPERATOR_NEEDS_SESSION',version:2,identifier:'ORDER1',requestId:request.requestId});await settle();
-  assert.deepEqual(tokens(rebuilt).map(m=>m.value.accessToken),[TOKEN_A]);
-  // Once closed, a reload of a hidden frame only marks it non-reusable.
-  const idle=setup();idle.overlay.prewarm();const page=idle.frame()!;page.dispatch('load');idle.child(page,READY_HOST);idle.overlay.open({identifier:'ORDER1'});
-  idle.overlay.close();page.dispatch('load');assert.equal(idle.frame(),page);
-  idle.overlay.open({identifier:'ORDER2'});assert.notEqual(idle.frame(),page,'the reloaded page is not reused');
-});
-
 test('a frame that fell back to TSim login is never warm-reused, even after a manual login',async()=>{
   for(const hidden of [false,true]){
     const env=setup(),first=await coldOpen(env,'ORDER1'),label=hidden?'hidden':'visible';
@@ -273,15 +204,87 @@ test('a frame that fell back to TSim login is never warm-reused, even after a ma
   assert.notEqual(refused.frame(),first.frame);
 });
 
-test('the connection warm frame is short-lived and throttled',()=>{
-  const env=setup(),warm=()=>env.document.getElementById(OPERATOR_WARM_ID) as FakeFrame|null;
-  env.overlay.warmConnection();const first=warm()!;
-  assert.equal(first.src,`${ORIGIN}/assets/__companion_warm__.txt`);assert.equal(first.style.display,'none');assert.equal(first.referrerPolicy,'no-referrer');
-  assert.equal(env.overlay.frame,null,'separate from the operator frame');
-  first.dispatch('load');assert.equal(warm(),null);
-  env.overlay.warmConnection();assert.equal(warm(),null,'throttled');
-  env.view.advance(WARM_CONNECTION_INTERVAL_MS);env.overlay.warmConnection();assert.ok(warm());
-  env.view.advance(WARM_CONNECTION_TIMEOUT_MS);assert.equal(warm(),null,'removed after the timeout');
-  env.view.advance(WARM_CONNECTION_INTERVAL_MS);env.overlay.prewarm();assert.ok(warm(),'prewarm also warms the connection');
-  env.overlay.dispose();assert.equal(warm(),null);
+test('creation and legacy warm hooks never load a page or request authorization',()=>{
+  const env=setup();
+  for(let i=0;i<3;i++){
+    env.overlay.prewarm();env.overlay.warmConnection();env.view.advance(CLOSED_FRAME_RETENTION_MS);
+    assert.equal(env.overlay.frame,null);assert.equal(env.overlay.frameURL,null);
+    assert.equal(env.document.getElementById(OPERATOR_WARM_ID),null);
+    assert.equal(env.document.body.children.length,0);assert.equal(env.sessions.length,0);
+  }
+  env.overlay.open({identifier:'ORDER1'});
+  assert.ok(env.overlay.frame,'only opening creates the page');assert.equal(env.sessions.length,1);
+});
+
+test('closing retains a page for at most 60 seconds and repeated close cannot extend it',async()=>{
+  const env=setup(),first=await coldOpen(env,'ORDER1');env.overlay.close();
+  env.view.advance(CLOSED_FRAME_RETENTION_MS-1);assert.equal(env.frame(),first.frame);
+  env.overlay.close();env.view.advance(1);
+  assert.equal(env.frame(),null);assert.equal(env.overlay.frameURL,null);assert.equal(first.frame.isConnected,false);
+  assert.equal(env.document.getElementById(OPERATOR_VIEWPORT_ID),null);
+  env.overlay.open({identifier:'ORDER2'});assert.notEqual(env.frame(),first.frame);
+});
+
+test('reopening cancels the closed-page deadline and the next close receives its own deadline',async()=>{
+  const env=setup(),first=await coldOpen(env,'ORDER1');env.overlay.close();
+  env.view.advance(CLOSED_FRAME_RETENTION_MS-1);env.overlay.open({identifier:'ORDER2'});await settle();
+  const request=env.overlay.active!;
+  env.child(first.frame,{type:'TSIM_OPERATOR_LOADED',version:2,identifier:'ORDER2',requestId:request.requestId});
+  env.view.advance(CLOSED_FRAME_RETENTION_MS);assert.equal(env.frame(),first.frame);assert.equal(env.overlay.visible,true);
+  env.overlay.close();env.view.advance(CLOSED_FRAME_RETENTION_MS);assert.equal(env.frame(),null);
+});
+
+test('reset, disposal and page unload immediately remove frames and ignore pending grants',async()=>{
+  for(const action of ['reset','dispose','pagehide']){
+    const pending=deferred(),env=setup(()=>pending.promise);env.overlay.open({identifier:'ORDER1'});
+    const first=env.frame()!,request=env.overlay.active!;
+    env.child(first,{type:'TSIM_OPERATOR_NEEDS_SESSION',version:2,identifier:'ORDER1',requestId:request.requestId});
+    if(action==='pagehide')env.view.dispatch('pagehide');else env.overlay[action as 'reset'|'dispose']();
+    pending.resolve({accessToken:TOKEN_A,sessionRef:null});await settle();
+    assert.equal(first.isConnected,false,action);assert.equal(env.frame(),null,action);assert.equal(first.outbox.length,0,action);
+    assert.equal(env.document.body.children.length,0,action);
+    env.view.advance(CLOSED_FRAME_RETENTION_MS);env.overlay.open({identifier:'ORDER2'});
+    assert.equal(Boolean(env.frame()),action!=='dispose',action);
+  }
+});
+
+test('a delayed refusal for an earlier query cannot corrupt the current retained grant',async()=>{
+  const pending=deferred();let calls=0;
+  const env=setup(()=>++calls===1?Promise.resolve({accessToken:TOKEN_A,sessionRef:null}):pending.promise);
+  const first=await coldOpen(env,'ORDER1');env.overlay.close();env.overlay.open({identifier:'ORDER2'});
+  const expired=env.overlay.active!;
+  // No result from the retained old document may answer a query before its grant is accepted.
+  env.child(first.frame,{type:'TSIM_OPERATOR_LOADED',version:2,identifier:'ORDER2',requestId:expired.requestId});
+  assert.equal(first.frame.style.visibility,'hidden');
+  env.overlay.reset();env.overlay.open({identifier:'ORDER3'});const current=env.frame()!;
+  pending.resolve(undefined);await settle();
+  assert.equal(env.frame(),current);assert.equal(first.frame.isConnected,false);assert.equal(first.frame.outbox.length,1);
+});
+
+test('reopening an identical identifier uses a fresh source to reject legacy stale messages',async()=>{
+  const env=setup(),first=await coldOpen(env,'ORDER1');env.overlay.close();env.overlay.open({identifier:'ORDER1'});
+  const current=env.frame()!;assert.notEqual(current,first.frame);
+  env.child(first.frame,{type:'TSIM_OPERATOR_BOUNDS',version:1,identifier:'ORDER1',rect:{x:0,y:0,width:100,height:100}});
+  assert.equal(env.overlay.bounds?.x,60,'stale legacy result cannot replace the current loading bounds');
+});
+
+test('synchronous grant failures are answered and repeated handshakes share the click grant',async()=>{
+  const env=setup(()=>{throw new Error('SESSION_UNAVAILABLE');});env.overlay.open({identifier:'ORDER1'});
+  const first=env.frame()!,request=env.overlay.active!;
+  for(let i=0;i<2;i++)env.child(first,{type:'TSIM_OPERATOR_NEEDS_SESSION',version:2,identifier:'ORDER1',requestId:request.requestId});
+  await settle();assert.equal(env.sessions.length,1);assert.deepEqual(first.outbox.map(m=>m.value.type),['TSIM_OPERATOR_SESSION_UNAVAILABLE','TSIM_OPERATOR_SESSION_UNAVAILABLE']);
+});
+
+test('returning to an older identifier also rejects its legacy messages with a fresh frame',async()=>{
+  const env=setup(),first=await coldOpen(env,'ORDER1');env.overlay.close();env.overlay.open({identifier:'ORDER2'});await settle();
+  const request=env.overlay.active!;env.child(first.frame,{type:'TSIM_OPERATOR_LOADED',version:2,identifier:'ORDER2',requestId:request.requestId});
+  env.overlay.close();env.overlay.open({identifier:'ORDER1'});assert.notEqual(env.frame(),first.frame);
+  env.child(first.frame,{type:'TSIM_OPERATOR_BOUNDS',version:1,identifier:'ORDER1',rect:{x:0,y:0,width:100,height:100}});
+  assert.equal(env.overlay.bounds?.x,60);
+});
+
+test('a suspended release timer cannot extend reuse beyond its wall-clock deadline',async()=>{
+  const env=setup(),first=await coldOpen(env,'ORDER1');env.overlay.close();
+  env.view.now+=CLOSED_FRAME_RETENTION_MS; // Renderer suspended: the timer callback has not run yet.
+  env.overlay.open({identifier:'ORDER2'});assert.notEqual(env.frame(),first.frame);assert.equal(first.frame.isConnected,false);
 });
