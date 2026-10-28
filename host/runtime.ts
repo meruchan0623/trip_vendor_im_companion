@@ -2,7 +2,7 @@ import type { DesktopHostAPI, HostCommand, HostResponse, QueryRequest, QueryResu
 
 export interface SiteSession { authenticated: boolean; accountScope: string | null; sessionRef: string | null; permissions: string[] }
 export interface SiteBindings {
-  /** Existing tsim_cs API client: its interceptors retain bearer credentials inside HTTPS site. */
+  /** Existing TSIM API client: its interceptors retain bearer credentials inside HTTPS site. */
   post(path: '/agent/translate' | '/agent/translate/batch', body: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
   session(): SiteSession;
   subscribe(listener: () => void): () => void;
@@ -45,7 +45,7 @@ export function mountDesktopHost(root: HTMLElement, bindings: SiteBindings, brid
   if (window.location.protocol !== 'https:' || window.location.origin !== 'https://csagent.tsim.tech' || window.parent !== window) throw new Error('untrusted_host');
   root.replaceChildren();
   const status = document.createElement('p'); status.setAttribute('role', 'status');
-  const login = document.createElement('a'); login.href = '/login'; login.textContent = '在此独立会话登录 tsim_cs';
+  const login = document.createElement('a'); login.href = '/login'; login.textContent = '在此独立会话登录 TSIM';
   login.onclick = event => { event.preventDefault(); bindings.navigateLogin(); };
   const frames = document.createElement('div'); frames.style.cssText = 'width:100%;height:calc(100vh - 64px)';
   root.append(status, login, frames);
@@ -78,14 +78,14 @@ export function mountDesktopHost(root: HTMLElement, bindings: SiteBindings, brid
     if (key !== authKey) {
       authKey = key; validatedKey = null; validatingKey = null; authGeneration++; cancelAll();
       bridge.authChanged(session.authenticated ? session.accountScope : null);
-      login.hidden = session.authenticated; status.textContent = session.authenticated ? '正在核对客服身份…' : '需要在此会话登录 tsim_cs';
+      login.hidden = session.authenticated; status.textContent = session.authenticated ? '正在核对客服身份…' : '需要在此会话登录 TSIM';
     }
     if (session.authenticated && session.accountScope && validatedKey !== key && validatingKey !== key) {
       validatingKey = key;
       void bindings.validate().then(() => {
         if (disposed || sessionKey(bindings.session()) !== key) return;
-        validatedKey = key; status.textContent = 'tsim_cs 身份已确认';
-      }).catch(() => { if (!disposed && sessionKey(bindings.session()) === key) status.textContent = '身份暂不可验证，请收起后重新打开 tsim_cs 视图以重试'; })
+        validatedKey = key; status.textContent = 'TSIM 身份已确认';
+      }).catch(() => { if (!disposed && sessionKey(bindings.session()) === key) status.textContent = '身份暂不可验证，请收起后重新打开 TSIM 视图以重试'; })
         .finally(() => { if(validatingKey===key)validatingKey=null; });
     }
   };
@@ -95,7 +95,7 @@ export function mountDesktopHost(root: HTMLElement, bindings: SiteBindings, brid
     const capturedAuth = authGeneration;
     const respond = (result: Extract<HostResponse, { type: 'translation' }>['result']) => bridge!.respond({ type: 'translation', requestId: request.requestId, navigationGeneration: command.navigationGeneration, authGeneration: request.context.authGeneration, result });
     if (!validateTranslation(request)) { respond(failure('invalid_translation', '翻译请求格式无效')); return; }
-    if (!canUse(request.context)) { respond(failure('needs_login', '请在面板的 tsim_cs 会话中完成登录和身份核对')); return; }
+    if (!canUse(request.context)) { respond(failure('needs_login', '请在面板的 TSIM 会话中完成登录和身份核对')); return; }
     if (requests.has(request.requestId)) { respond(failure('duplicate_request', '请求已在进行')); return; }
     const controller = new AbortController(); requests.set(request.requestId, controller);
     const timeout = setTimeout(() => controller.abort(), 30_000);
@@ -122,12 +122,12 @@ export function mountDesktopHost(root: HTMLElement, bindings: SiteBindings, brid
   function query(command: Extract<HostCommand, { type: 'query' }>) {
     const request: QueryRequest = command.request;
     if (!request || !uuid.test(request.requestId) || request.confirmed !== true || typeof request.identifier !== 'string' || !request.identifier.trim() || request.identifier.length > 128 || !['order_number', 'iccid', 'eiccid'].includes(request.identifierType)) { queryResponse(command, failure('invalid_query', '请确认查询标识')); return; }
-    if (!canUse(request.context)) { queryResponse(command, failure('needs_login', '请先完成 tsim_cs 登录和身份核对')); return; }
+    if (!canUse(request.context)) { queryResponse(command, failure('needs_login', '请先完成 TSIM 登录和身份核对')); return; }
     const permissions = bindings.session().permissions;
     if (!bindings.operatorReadOnlyVerified || !permissions.includes('complaint_records') || permissions.includes('complaint_records_edit') || permissions.includes('complaint_records_manage')) { queryResponse(command, failure('query_authorization_unverified', '只读查询权限尚未通过部署验收')); return; }
     destroyFrame(); current = command; frameGeneration = command.frameGeneration;
     iframe = document.createElement('iframe');
-    iframe.title = 'TSim 只读查询'; iframe.style.cssText = 'width:100%;height:100%;border:0';
+    iframe.title = 'TSIM 只读查询'; iframe.style.cssText = 'width:100%;height:100%;border:0';
     // Each request gets a fresh WindowProxy, including retrying the same identifier.
     const url = new URL('/embed/operator', window.location.origin);
     url.searchParams.set('mode', 'host'); url.searchParams.set('parentOrigin', window.location.origin);

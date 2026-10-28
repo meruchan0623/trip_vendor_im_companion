@@ -1,7 +1,7 @@
 import type {OperatorIdentifierType,QueryIdentifierEntry} from './identifiers';
 import type {OperatorSessionGrant} from '../../src/shared/workbench';
-/** The first query boots the original TSim page; later queries reuse that page while the companion session is unchanged. */
-/** Configurable TSim base origin; messages from any other origin are ignored. */
+/** The first query boots the original TSIM page; later queries reuse that page while the companion session is unchanged. */
+/** Configurable TSIM base origin; messages from any other origin are ignored. */
 export const TSIM_OPERATOR_ORIGIN='https://csagent.tsim.tech';
 export const OPERATOR_FRAME_ID='tsim-operator-frame';
 export const OPERATOR_LOADING_ID='tsim-operator-loading';
@@ -52,11 +52,11 @@ export function operatorFrameURL(origin=TSIM_OPERATOR_ORIGIN,request?:OperatorRe
   const url=new URL('/embed/operator',origin);url.searchParams.set('source','travel-merchant-companion');
   if(!request){url.searchParams.set('mode','host');return url.href;}
   // Direct loading also works when a file:// parent cannot complete a postMessage handshake.
-  // `session=handoff`: the page asks this parent for the companion's verified TSim session before routing to login.
+  // `session=handoff`: the page asks this parent for the companion's verified TSIM session before routing to login.
   url.searchParams.set('session','handoff');url.searchParams.set('identifier',request.identifier);if(request.identifierType)url.searchParams.set('identifierType',request.identifierType);if(UUID_RE.test(request.requestId))url.searchParams.set('requestId',request.requestId);return url.href;
 }
 export interface OperatorOverlay {open(entry:QueryIdentifierEntry):void;close():void;reset():void;prewarm():void;warmConnection():void;dispose():void;readonly frame:HTMLIFrameElement|null;readonly frameURL:string|null;readonly visible:boolean;readonly active:OperatorRequest|null;readonly bounds:OperatorRect|null}
-/** Standard TSim query window: 90% of the viewport, centered (same as the agent workbench). */
+/** Standard TSIM query window: 90% of the viewport, centered (same as the agent workbench). */
 export const STANDARD_WINDOW_RATIO=0.9;
 /** A reused page that does not answer a new identifier within this window is rebuilt from scratch. */
 export const REUSE_REVEAL_TIMEOUT_MS=4000;
@@ -65,7 +65,7 @@ export function standardOperatorRect(viewportWidth:number,viewportHeight:number)
   return{x:Math.round((viewportWidth-width)/2),y:Math.round((viewportHeight-height)/2),width,height};
 }
 /**
- * The iframe always spans the whole BrowserView viewport, so the TSim page lays out, drags and resizes its
+ * The iframe always spans the whole BrowserView viewport, so the TSIM page lays out, drags and resizes its
  * own AgentWindow exactly like the agent workbench. A clipping viewport follows the reported window bounds so
  * only the window area is visible and receives input; the rest of the original page stays usable.
  *
@@ -129,7 +129,7 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
     return clip;
   }
   function createFrame(url:string){
-    const ownFrame=document.createElement('iframe');frame=ownFrame;ownFrame.id=OPERATOR_FRAME_ID;ownFrame.setAttribute('data-tsim-owned','1');ownFrame.title='TSim 订单查询';ownFrame.referrerPolicy='no-referrer';ownFrame.style.cssText='position:absolute;display:block;margin:0;padding:0;border:0;background:transparent;color-scheme:normal';ownFrame.src=url;frameURL=ownFrame.src;
+    const ownFrame=document.createElement('iframe');frame=ownFrame;ownFrame.id=OPERATOR_FRAME_ID;ownFrame.setAttribute('data-tsim-owned','1');ownFrame.title='TSIM 订单查询';ownFrame.referrerPolicy='no-referrer';ownFrame.style.cssText='position:absolute;display:block;margin:0;padding:0;border:0;background:transparent;color-scheme:normal';ownFrame.src=url;frameURL=ownFrame.src;
     return ownFrame;
   }
   function boot(request:OperatorRequest){
@@ -139,8 +139,8 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
     ownFrame.addEventListener('load',()=>{if(frame!==ownFrame)return;
       // A second load means the page navigated or reloaded itself; it no longer serves this request protocol.
       if(++loads>1){reusable=false;return;}
-      if(!active)return;clearTimer();message('TSim 页面已打开；登录和查询结果以页面显示为准。');});
-    ownFrame.addEventListener('error',()=>{if(frame!==ownFrame)return;reusable=false;if(!active)return;clearTimer();message('TSim 页面加载异常，请查看页面或关闭后重试。');});
+      if(!active)return;clearTimer();message('TSIM 页面已打开；登录和查询结果以页面显示为准。');});
+    ownFrame.addEventListener('error',()=>{if(frame!==ownFrame)return;reusable=false;if(!active)return;clearTimer();message('TSIM 页面加载异常，请查看页面或关闭后重试。');});
     clip.append(ownFrame);layout();
   }
   /** Compatibility hooks intentionally do nothing: no unmeasured background SPA or connection work. */
@@ -159,8 +159,8 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
     status=document.createElement('div');status.id=OPERATOR_LOADING_ID;status.setAttribute('data-tsim-owned','1');status.style.cssText='position:fixed;left:50%;top:8px;transform:translateX(-50%);z-index:2147483001;display:flex;align-items:center;gap:12px;padding:6px 12px;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.12);color:#333;font:13px sans-serif;max-width:calc(100vw - 32px)';
     statusText=document.createElement('span');statusText.setAttribute('role','status');const closeButton=document.createElement('button');closeButton.type='button';closeButton.textContent='关闭订单';closeButton.addEventListener('click',close);status.append(statusText,closeButton);
     for(const type of ['click','keydown','keyup','mousedown','pointerdown'])status.addEventListener(type,e=>e.stopPropagation());
-    message('正在打开 TSim 订单页，请在页面内查看加载、登录和查询结果。');document.body.append(status);
-    timer=view.setTimeout(()=>{if(active===request)message('TSim 页面仍在加载，请查看下方页面或关闭后重试。');},OPEN_TIMEOUT_MS);
+    message('正在打开 TSIM 订单页，请在页面内查看加载、登录和查询结果。');document.body.append(status);
+    timer=view.setTimeout(()=>{if(active===request)message('TSIM 页面仍在加载，请查看下方页面或关闭后重试。');},OPEN_TIMEOUT_MS);
     // The authorization gate starts at click time; the bearer itself is posted only in reply to this request's NEEDS_SESSION.
     const grant=startGrant(request);
     // Legacy result messages have no requestId; reopening the same identifier needs a new source.
@@ -183,7 +183,7 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
   const onMessage=(event:MessageEvent)=>{
     if(disposed||!frame||event.origin!==origin||event.source!==frame.contentWindow)return;
     const type=(event.data as {type?:unknown}|null)?.type;
-    // A hidden frame that falls back to TSim's own login must never be reused: a manual login may be another account.
+    // A hidden frame that falls back to TSIM's own login must never be reused: a manual login may be another account.
     if(!active){if(type==='TSIM_OPERATOR_NEEDS_LOGIN'){reusable=false;frameGrant=null;}return;}
     if(document.visibilityState==='hidden')return;
     const m=parseOperatorChildMessage(event.data,active);if(!m)return;
@@ -193,24 +193,24 @@ export function createOperatorOverlay(document:Document,options:{origin?:string;
       case 'TSIM_OPERATOR_CLOSE':close();break;
       case 'TSIM_OPERATOR_BOUNDS':if(clampOperatorRect(m.rect,view.innerWidth,view.innerHeight)){reported={...m.rect};reusable=true;revealed();layout();}break;
       case 'TSIM_OPERATOR_NEEDS_SESSION':{
-        // The bearer is posted only to this request's frame and only to the fixed TSim origin.
+        // The bearer is posted only to this request's frame and only to the fixed TSIM origin.
         const request=active,ownFrame=frame,reply=(value:Record<string,unknown>)=>{if(frame===ownFrame&&active===request)ownFrame.contentWindow?.postMessage({version:2,identifier:request.identifier,requestId:request.requestId,...value},origin);};
-        message('正在使用助手的 TSim 登录态打开订单…');
+        message('正在使用助手的 TSIM 登录态打开订单…');
         // Repeated handshakes share the click's authorization result, including refusal.
         const pending=inflight?.request===request?inflight.grant:startGrant(request);
-        // Every outcome answers the frame: an unanswered request leaves TSim waiting for its own timeout.
+        // Every outcome answers the frame: an unanswered request leaves TSIM waiting for its own timeout.
         void pending.then(grant=>{
           if(disposed||frame!==ownFrame||active!==request)return;
-          if(!grant){if(frame===ownFrame)frameGrant=null;reply({type:'TSIM_OPERATOR_SESSION_UNAVAILABLE'});if(frame===ownFrame&&active===request)message('助手未能提供 TSim 登录态，请先在助手面板登录，或在下方页面登录。');return;}
+          if(!grant){if(frame===ownFrame)frameGrant=null;reply({type:'TSIM_OPERATOR_SESSION_UNAVAILABLE'});if(frame===ownFrame&&active===request)message('助手未能提供 TSIM 登录态，请先在助手面板登录，或在下方页面登录。');return;}
           // A frame that already fell back to login or was refused (null) keeps no reusable grant.
           if(frame===ownFrame&&active===request&&frameGrant!==null)frameGrant=grant.accessToken;
           reply({type:'TSIM_OPERATOR_SESSION',accessToken:grant.accessToken,sessionRef:typeof grant.sessionRef==='string'?grant.sessionRef:null});
         });
         break;
       }
-      case 'TSIM_OPERATOR_NEEDS_LOGIN':clearTimer();reusable=false;frameGrant=null;reported=null;revealed();layout();message('请在下方 TSim 页面完成登录。');break;
-      case 'TSIM_OPERATOR_BASIC_READY':case 'TSIM_OPERATOR_LOADED':clearTimer();reusable=true;revealed();message('请在下方 TSim 页面查看订单详情。');break;
-      case 'TSIM_OPERATOR_QUERY_TERMINAL':clearTimer();reusable=true;revealed();message('订单查询未完成，请查看下方 TSim 页面的提示。');break;
+      case 'TSIM_OPERATOR_NEEDS_LOGIN':clearTimer();reusable=false;frameGrant=null;reported=null;revealed();layout();message('请在下方 TSIM 页面完成登录。');break;
+      case 'TSIM_OPERATOR_BASIC_READY':case 'TSIM_OPERATOR_LOADED':clearTimer();reusable=true;revealed();message('请在下方 TSIM 页面查看订单详情。');break;
+      case 'TSIM_OPERATOR_QUERY_TERMINAL':clearTimer();reusable=true;revealed();message('订单查询未完成，请查看下方 TSIM 页面的提示。');break;
     }
   };
   const onVisibility=()=>{if(document.visibilityState==='hidden')close();};

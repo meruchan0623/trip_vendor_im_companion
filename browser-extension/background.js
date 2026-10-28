@@ -4,7 +4,7 @@ const orders=new Set(),closedOrders=new Set(),openingOrders=new Map(),createdOrd
 let bridgeStatus={state:'disconnected',error:null};
 function status(state,error=null){
   bridgeStatus={state,error};
-  const title=state==='ready'?'TSim 会话桥：已连接助手':state==='connecting'?'TSim 会话桥：等待本机助手':`TSim 会话桥未连接${error?`：${error}`:''}`;
+  const title=state==='ready'?'TSIM 会话桥：已连接助手':state==='connecting'?'TSIM 会话桥：等待本机助手':`TSIM 会话桥未连接${error?`：${String(error).replace(/^PSIM_/,'TSIM_')}`:''}`;
   void chrome.action.setTitle?.({title});void chrome.action.setBadgeText?.({text:state==='disconnected'?'!':state==='connecting'?'…':''});
   if(state==='disconnected')void chrome.action.setBadgeBackgroundColor?.({color:'#b42318'});
 }
@@ -124,7 +124,7 @@ function connect(){
     if(exact(message,['type','id'])&&message.type==='cancel'&&uuid(message.id)){const tab=active.get(message.id);if(tab!=null)void inject(tab,'cancel',null,null,message.id).catch(()=>{});const opening=openingOrders.get(message.id);if(opening)opening.cancelled=true;const created=createdOrders.get(message.id);if(created!=null&&orders.has(created))void chrome.windows.remove(created).catch(()=>{}).finally(()=>removedOwnedWindow(created));return;}
     void execute(message).then(value=>{if(port===current)current.postMessage({type:'response',id:message.id,ok:true,value});},error=>{if(port===current&&uuid(message?.id))current.postMessage({type:'response',id:message.id,ok:false,error:/^[A-Z][A-Z0-9_]{1,80}$/.test(error?.message)?error.message:'BROWSER_BRIDGE_UNAVAILABLE'});});
   });
-  current.onDisconnect.addListener(()=>{const error=chrome.runtime.lastError?.message?.slice(0,500)??'本机助手连接已断开';status('disconnected',error);console.warn('[TSim browser bridge] Native messaging disconnected:',error);port=null;selected=null;for(const opening of openingOrders.values())opening.cancelled=true;for(const [id,tab] of active)void inject(tab,'cancel',null,null,id).catch(()=>{});active.clear();for(const windowId of orders)void chrome.windows.remove(windowId).catch(()=>{});orders.clear();closedOrders.clear();createdOrders.clear();});
+  current.onDisconnect.addListener(()=>{const error=chrome.runtime.lastError?.message?.slice(0,500)??'本机助手连接已断开';status('disconnected',error);console.warn('[TSIM browser bridge] Native messaging disconnected:',error);port=null;selected=null;for(const opening of openingOrders.values())opening.cancelled=true;for(const [id,tab] of active)void inject(tab,'cancel',null,null,id).catch(()=>{});active.clear();for(const windowId of orders)void chrome.windows.remove(windowId).catch(()=>{});orders.clear();closedOrders.clear();createdOrders.clear();});
 }
 chrome.runtime.onMessage?.addListener((message,sender,sendResponse)=>{
   if(sender.id!==chrome.runtime.id||sender.url!==chrome.runtime.getURL('status.html')||!exact(message,['action']))return;

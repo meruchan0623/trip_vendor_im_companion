@@ -113,9 +113,9 @@ kbd{font:500 11px/18px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padd
 export interface PanelBridge {invoke(action:string,args?:unknown[]):Promise<unknown>}
 export interface OutboundPanel {render(state:PanelState):void;setOrder(order:string|undefined):void;attach():boolean;readonly host:HTMLElement;readonly anchor:HTMLElement|undefined;readonly editor:HTMLElement|undefined;dispose():void}
 type Popover='languages'|'query'|'menu';
-/** `openOrder` opens the TSim operator window: the detected order chip opens directly, the search button queries any other identifier. */
+/** `openOrder` opens the TSIM operator window: the detected order chip opens directly, the search button queries any other identifier. */
 export function createOutboundPanel(document:Document,bridge:PanelBridge,initial:PanelState,hooks:{openOrder?(order:string,identifierType?:OperatorIdentifierType):void;orderUnavailableReason?:string}={}):OutboundPanel{
-  const unavailableReason=hooks.orderUnavailableReason??(!hooks.openOrder?'订单查询不可用：尚未连接 TSim 内嵌页面':undefined);
+  const unavailableReason=hooks.orderUnavailableReason??(!hooks.openOrder?'订单查询不可用：尚未连接 TSIM 内嵌页面':undefined);
   const view=document.defaultView!;let state=initial,shown:PanelDensity|undefined,shownConversation:string|null|undefined,collapseTimer:number|undefined,disposed=false,composing=false,editor:HTMLElement|undefined,anchor:HTMLElement|undefined,timer:number|undefined,notice='',noticeTimer:number|undefined,open:Popover|null=null,orderValue:string|undefined;
   const host=document.createElement('div');host.id=PANEL_HOST_ID;host.setAttribute('data-tsim-owned','1');host.setAttribute('aria-label','出站翻译');
   const contain=(event:Event)=>event.stopPropagation();CONTAINED.forEach(type=>host.addEventListener(type,contain));
@@ -134,7 +134,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   bar.append(toggle,title,lang,badge,idle,make('span','spacer'),find,order,more);
   // Body: one card that shows either the preview, a skeleton or a callout; folded away while idle.
   const body=make('div','body'),card=make('div','card'),preview=make('div','preview'),skeleton=make('div','skeleton');preview.setAttribute('aria-live','polite');skeleton.append(make('i'),make('i'));
-  const callout=make('div','callout'),calloutIcon=make('span'),calloutText=make('p'),login=button('solid login','登录 TSim'),resume=button('outline','恢复翻译'),retryFailed=button('outline','重试'),chooseFallback=button('outline fallback-action','修改兜底语言');calloutIcon.style.display='contents';callout.append(calloutIcon,calloutText,login,resume,retryFailed,chooseFallback);
+  const callout=make('div','callout'),calloutIcon=make('span'),calloutText=make('p'),login=button('solid login','登录 TSIM'),resume=button('outline','恢复翻译'),retryFailed=button('outline','重试'),chooseFallback=button('outline fallback-action','修改兜底语言');calloutIcon.style.display='contents';callout.append(calloutIcon,calloutText,login,resume,retryFailed,chooseFallback);
   const foot=make('div','foot'),meta=make('span','meta'),source=make('span'),hint=make('span','hint',PANEL_HINT),buttons=make('div','buttons');meta.append(source,hint);
   const retry=button('icon','','重新翻译'),copy=button('icon','','复制译文'),replace=button('primary');retry.append(icon('retry'));copy.append(icon('copy'));retry.setAttribute('aria-label','重试');copy.setAttribute('aria-label','复制译文');
   const mac=/Mac|iPhone|iPad|iPod/i.test(view.navigator.platform||view.navigator.userAgent);
@@ -152,7 +152,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   const query=make('div','pop query'),queryForm=make('form','field'),queryInput=make('input'),queryButton=button('','查询'),queryNote=make('div','note');queryButton.type='submit';query.setAttribute('role','dialog');query.setAttribute('aria-label','查询其他订单');
   queryInput.type='text';queryInput.placeholder='输入订单 ID 或其他标识';queryInput.setAttribute('aria-label','明确输入或选择要查询的标识');queryInput.maxLength=100;queryInput.autocomplete='off';queryForm.append(queryInput,queryButton);query.append(make('h5','','查询其他订单'),queryForm,queryNote);
   const menu=make('div','pop menu'),pause=button('option'),pauseIcon=make('span'),pauseText=make('span'),disable=button('option');menu.setAttribute('role','menu');pauseIcon.style.display='contents';pause.append(pauseIcon,pauseText);disable.append(icon('power'),'关闭出站翻译');const modeLabel=make('div','label','Enter 键行为'),modes=([['send','Enter 直接发送','未出译文时等待译文后发送'],['replace','替换模式','Enter 保持原样，译文需手动替换']] as const).map(([mode,label,detail])=>{const option=button('option mode');option.setAttribute('role','menuitemradio');option.dataset.mode=mode;const text=make('span');text.append(make('span','',label),make('small','',detail));option.append(text);return option;});
-  const accountLogin=button('option account-login','打开浏览器 TSim_CS'),accountLogout=button('option account-logout','断开助手会话');accountLogin.setAttribute('role','menuitem');accountLogout.setAttribute('role','menuitem');
+  const accountLogin=button('option account-login','打开浏览器 TSIM_CS'),accountLogout=button('option account-logout','断开助手会话');accountLogin.setAttribute('role','menuitem');accountLogout.setAttribute('role','menuitem');
   const logs=button('option runtime-logs','查看运行日志');logs.setAttribute('role','menuitem');
   const logDialog=createRuntimeLogDialog(document,()=>bridge.invoke('getRuntimeLogs',[]));
   menu.append(pause,disable,make('div','separator'),modeLabel,...modes,make('div','separator'),accountLogin,accountLogout,make('div','separator'),logs,...(INJECTOR_VERSION?[make('div','separator'),make('div','label version',`注入版本 ${INJECTOR_VERSION}`)]:[]));
@@ -177,9 +177,9 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     if(value.id===dismissedLoginId)return;
     if(loginPresentation?.id===value.id){if(loginPresentation.url!==value.url)removeLogin(true);else placeLogin();return;}
     removeLogin();setOpen(null);loginPresentation={...value};
-    loginCard=make('div','pop login-popover');loginCard.setAttribute('role','dialog');loginCard.setAttribute('aria-label','TSim 账户登录');
-    const top=make('div','login-top','TSim 账户'),close=button('icon login-close','×');close.setAttribute('aria-label','关闭 TSim 登录');close.addEventListener('click',()=>removeLogin(true));top.append(close);
-    loginFrame=make('iframe','login-frame');loginFrame.title='TSim 账户登录';loginFrame.setAttribute('sandbox','allow-scripts allow-forms');loginFrame.referrerPolicy='no-referrer';loginFrame.src=value.url;
+    loginCard=make('div','pop login-popover');loginCard.setAttribute('role','dialog');loginCard.setAttribute('aria-label','TSIM 账户登录');
+    const top=make('div','login-top','TSIM 账户'),close=button('icon login-close','×');close.setAttribute('aria-label','关闭 TSIM 登录');close.addEventListener('click',()=>removeLogin(true));top.append(close);
+    loginFrame=make('iframe','login-frame');loginFrame.title='TSIM 账户登录';loginFrame.setAttribute('sandbox','allow-scripts allow-forms');loginFrame.referrerPolicy='no-referrer';loginFrame.src=value.url;
     loginCard.append(top,loginFrame);shadow.append(loginCard);placeLogin();
   }
   const onLoginMessage=(event:MessageEvent)=>{
@@ -201,7 +201,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     if(disposed)return;if(next)removeLogin(true);open=next;
     for(const [key,[pop,trigger]] of Object.entries(popovers) as [Popover,[HTMLElement,HTMLButtonElement]][]){const on=key===next;pop.hidden=!on;trigger.setAttribute('aria-expanded',String(on));if(on)place(pop,trigger);}
     if(next==='languages'){searchInput.value='';filterLanguages();searchInput.focus();}
-    if(next==='query'){queryNote.classList.remove('error');queryNote.textContent=unavailableReason??(orderValue?'在 TSim 订单窗口中打开，Esc 关闭':'未识别到唯一订单 ID，可手动输入查询');queryInput.focus();}
+    if(next==='query'){queryNote.classList.remove('error');queryNote.textContent=unavailableReason??(orderValue?'在 TSIM 订单窗口中打开，Esc 关闭':'未识别到唯一订单 ID，可手动输入查询');queryInput.focus();}
   }
   const toggleOpen=(key:Popover)=>setOpen(open===key?null:key);
   function filterLanguages(){const term=searchInput.value.trim().toLowerCase();for(const option of options){const target=option.dataset.lang!;option.hidden=!!term&&![target,TARGET_LABELS[target as typeof PANEL_TARGETS[number]].toLowerCase(),LANGUAGE_NAMES[target]??''].some(text=>text.includes(term));}}
@@ -239,7 +239,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
   document.addEventListener('pointerdown',onOutside,true);view.addEventListener('resize',onResize);
   const onCompositionStart=()=>{composing=true;render(state);};const onCompositionEnd=()=>{composing=false;render(state);};
   function bindEditor(next:HTMLElement|undefined){if(next===editor)return;editor?.removeEventListener('compositionstart',onCompositionStart);editor?.removeEventListener('compositionend',onCompositionEnd);editor=next;composing=false;editor?.addEventListener('compositionstart',onCompositionStart);editor?.addEventListener('compositionend',onCompositionEnd);}
-  function setOrder(next:string|undefined){if(next===orderValue)return;orderValue=next;order.hidden=!next;order.replaceChildren(...(next?[icon('receipt'),orderNumber]:[]));orderNumber.textContent=next??'';order.title=unavailableReason??(next?`在 TSim 中查看订单 ${next}`:'');order.setAttribute('aria-label',next?`查看订单 ${next}`:'');order.disabled=!!unavailableReason;}
+  function setOrder(next:string|undefined){if(next===orderValue)return;orderValue=next;order.hidden=!next;order.replaceChildren(...(next?[icon('receipt'),orderNumber]:[]));orderNumber.textContent=next??'';order.title=unavailableReason??(next?`在 TSIM 中查看订单 ${next}`:'');order.setAttribute('aria-label',next?`查看订单 ${next}`:'');order.disabled=!!unavailableReason;}
   /** Keep the host directly above .chat_area-input; the vendor may re-render either side at any time. */
   function attach(){
     if(disposed||document.visibilityState==='hidden')return false;const area=document.querySelector(CHAT_AREA_SELECTOR),input=area?.querySelector<HTMLElement>(INPUT_SELECTOR);
@@ -275,7 +275,7 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     follow.setAttribute('aria-selected',String(following));followLang.textContent=`当前识别：${customerName}${customer==='zh'?'（无需翻译）':''}${fallback?'；使用配置的兜底语言':''}`;
     for(const option of options)option.setAttribute('aria-selected',String(!following&&option.dataset.lang===state.target));
     pauseIcon.replaceChildren(icon(paused?'play':'pause'));pauseText.textContent=paused?'恢复翻译':'暂停翻译';pause.disabled=!on||state.auth==='connecting';
-    accountLogin.textContent=state.sessionMode==='owned'?'在应用内登录 TSim':'打开浏览器 TSim_CS';accountLogout.textContent=state.sessionMode==='owned'?'退出 TSim 账号':'断开助手会话';accountLogout.disabled=state.auth==='needs_login'||state.auth==='connecting';
+    accountLogin.textContent=state.sessionMode==='owned'?'在应用内登录 TSIM':'打开浏览器 TSIM_CS';accountLogout.textContent=state.sessionMode==='owned'?'退出 TSIM 账号':'断开助手会话';accountLogout.disabled=state.auth==='needs_login'||state.auth==='connecting';
     const mode=state.outboundMode??'send';for(const option of modes)option.setAttribute('aria-checked',String(option.dataset.mode===mode));hint.textContent=mode==='send'?SEND_HINT:PANEL_HINT;
     // Status badge.
     const status:[string,Tone]|null=notice?[notice,noticeTone]:!on?null:state.auth==='connecting'?['正在连接…','busy']:state.auth==='needs_login'?['需登录','warn']:state.auth==='failed'?['连接失败','bad']:paused?['翻译已暂停','warn']:state.sendPending?['译文生成后自动发送','busy']:STATUS[state.status];
@@ -287,8 +287,8 @@ export function createOutboundPanel(document:Document,bridge:PanelBridge,initial
     const text=state.preview??'',stale=!!text&&(state.status==='stale'||state.status==='translating');
     callout.hidden=true;preview.hidden=skeleton.hidden=foot.hidden=true;meta.classList.remove('stale');
     const automaticHint=following&&!text&&!fallback?(customer==='zh'?'客户使用中文，无需翻译；如需翻译，请在左上角手动选择语言':collecting?'正在采集客户原文，完成后自动确定目标或使用配置的兜底语言':!customer||customer==='unknown'?'当前服务未提供语言识别状态，请手动选择目标语言':!supported?`客户语言（${customerName}）暂不支持自动翻译，请手动选择目标语言`:''):'';
-    if(state.auth==='connecting'){skeleton.hidden=foot.hidden=false;source.textContent='正在连接 TSim 登录服务，请稍候';}
-    else if(state.auth==='needs_login')showCallout('info','lock',state.sessionMode==='owned'?'请在助手内登录 TSim 账号，登录后即可翻译与查询订单':'请先登录 TSim_CS 的 Edge / Chrome 页面，助手自动复用登录，无需重复输入密码',login);
+    if(state.auth==='connecting'){skeleton.hidden=foot.hidden=false;source.textContent='正在连接 TSIM 登录服务，请稍候';}
+    else if(state.auth==='needs_login')showCallout('info','lock',state.sessionMode==='owned'?'请在助手内登录 TSIM 账号，登录后即可翻译与查询订单':'请先登录 TSIM_CS 的 Edge / Chrome 页面，助手自动复用登录，无需重复输入密码',login);
     else if(state.auth==='failed')showCallout('bad','alert',state.error||'登录服务连接失败，请稍后重试');
     else if(paused)showCallout('warn','pause','翻译已暂停，草稿不会发送到翻译服务',resume);
     else if(state.error?.includes('兜底语言'))showCallout('bad','alert',state.error,chooseFallback);

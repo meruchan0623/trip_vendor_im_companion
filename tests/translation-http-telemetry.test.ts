@@ -11,7 +11,7 @@ import {OwnedPsimService} from '../host/owned-service';
 import {createTelemetry,runWithTelemetry,currentTelemetry,setTelemetry,finishTelemetry,TELEMETRY_RUN_ID,startHttpTelemetry} from '../electron/translation-telemetry';
 import {sanitizeTelemetry,formatTelemetry} from '../src/shared/runtime-telemetry';
 import {projectTranslationDiagnostics,translationDiagnosticsFromResponse} from '../src/shared/translation-response-diagnostics';
-import {translationHttpError,TranslationHttpError,serviceErrorMessage} from '../src/shared/translation-http-error';
+import {translationHttpError,TranslationHttpError,serviceErrorMessage,normalizeTsimDisplay} from '../src/shared/translation-http-error';
 import type {OutboundBody} from '../src/shared/workbench';
 const body:OutboundBody={text:'正文不能进入日志',source_lang:'zh',target_lang:'en',purpose:'outbound',draft_request_id:'fixture-translation',composer_content_version:'fixture-version'};
 const result=(translated_text='Private translated text',extra:Record<string,unknown>={})=>({success:true,data:{translated_text,draft_request_id:body.draft_request_id,composer_content_version:body.composer_content_version,...extra}});
@@ -87,6 +87,7 @@ test('HTTP status display distinguishes authentication, permission, refusal, thr
   for(const [status,phrase] of [[401,'登录已失效'],[403,'没有此操作权限'],[423,'账号已锁定'],[429,'过于频繁'],[500,'服务暂时不可用'],[502,'服务暂时不可用']] as const){
     const message=serviceErrorMessage(new TranslationHttpError(status))!;assert.match(message,new RegExp(phrase));assert.match(message,new RegExp(`HTTP ${status}`));assert.doesNotMatch(message,/网络/);
   }
+  assert.equal(normalizeTsimDisplay('TSim_CS / PSIM_HTTP_422 / tsim / TSIM'),'TSIM / TSIM_HTTP_422 / TSIM / TSIM');
 });
 
 test('explicit cancellation stops a stalled error-body read and never causes a second request',async()=>{
@@ -283,7 +284,7 @@ test('owned HTTP preserves backend diagnostics before business projection withou
   let requests=0;const service=await owned(async()=>{requests++;return json({...result(undefined,metadata),diagnostics});});
   try{const trace=createTelemetry('translate');await runWithTelemetry(trace,()=>service.translate(body,service.identity()!,new AbortController().signal));finishTelemetry(trace,'shown');assert.equal(requests,1);
     assert.equal(logs[0].providerMs,30);assert.equal(logs[0].serverMs,42.5);assert.equal(logs[0].inputTokens,314);assert.equal(logs[0].outputTokens,23);assert.equal(logs[0].cacheWriteTokens,null);assert.equal(logs[0].reasoningTokens,0);assert.equal(logs[0].upstreamCalls,1);assert.equal(logs[0].usageAttribution,'request_owned_calls');assert.equal(logs[0].cacheSource,'upstream');
-    const readable=formatTelemetry(logs[0]);assert.match(readable,/上游传输耗时合计：30 ms/);assert.match(readable,/TSim处理耗时：42.5 ms/);assert.match(readable,/上游输入Token合计：314/);assert.match(readable,/上游缓存写入Token：未提供/);assert.match(readable,/用量归属：仅本请求新建调用/);assert.match(readable,/结果来源：新建上游调用/);
+    const readable=formatTelemetry(logs[0]);assert.match(readable,/上游传输耗时合计：30 ms/);assert.match(readable,/TSIM处理耗时：42.5 ms/);assert.match(readable,/上游输入Token合计：314/);assert.match(readable,/上游缓存写入Token：未提供/);assert.match(readable,/用量归属：仅本请求新建调用/);assert.match(readable,/结果来源：新建上游调用/);
   }finally{service.dispose();}
 }));
 

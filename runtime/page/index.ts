@@ -16,10 +16,10 @@ export const CUSTOMER_REPORT_RECOVERY_MS=30000;
 export const CUSTOMER_ORIGINALS_LOAD_WINDOW_MS=1500;
 export interface PageGeometry {x:number;y:number;width:number;height:number;viewportWidth:number;viewportHeight:number;devicePixelRatio:number}
 export interface PageFeatures {update(state:PanelState):void;boundary():true;geometry():PageGeometry;dispose():void;readonly overlay:OperatorOverlay;readonly panel:OutboundPanel|undefined;readonly summary:OrderSummaryCard|undefined}
-/** Production workbench: explicit order queries open the original TSim page inside the merchant client. */
+/** Production workbench: explicit order queries open the original TSIM page inside the merchant client. */
 export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge;state?:PanelState;origin?:string;prewarmDelayMs?:number}={}):PageFeatures{
   const view=document.defaultView!;let disposed=false,state=options.state,conversation:string|null|undefined,originalsDeadline=0;
-  // Both platforms: the original TSim operator inside this page, signed in with the companion's verified session.
+  // Both platforms: the original TSIM operator inside this page, signed in with the companion's verified session.
   const overlay=createOperatorOverlay(document,{origin:options.origin,prewarmDelayMs:options.prewarmDelayMs,requestSession:request=>{
     const conversationKey=state?.conversationKey;
     if(!options.bridge||!conversationKey||state?.auth!=='ready'||!bound())return Promise.reject(new Error('SESSION_UNAVAILABLE'));
@@ -29,7 +29,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   const bound=()=>!!state&&matchesPageConversation(document,state.conversationKey);
   const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>{
     if(!bound()){overlay.close();return;}
-    // The operator needs the companion's account; sign in first instead of showing TSim's own login.
+    // The operator needs the companion's account; sign in first instead of showing TSIM's own login.
     if(state!.auth!=='ready'){void options.bridge!.invoke('openLogin',[]).catch(()=>{});return;}
     overlay.open({identifier,identifierType});
   }}):undefined;

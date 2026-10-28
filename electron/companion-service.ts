@@ -1,4 +1,4 @@
-import {serviceErrorMessage} from '../src/shared/translation-http-error';
+import {normalizeTsimDisplay,serviceErrorMessage} from '../src/shared/translation-http-error';
 import {ownedLoginURL,isLoginPopoverId,type LoginPopover} from '../src/shared/owned-login';
 import { randomUUID, createHash } from 'node:crypto';
 import { BrowserProfileSessionService, type BrowserProfileSessionOptions } from './browser-profile-session';
@@ -21,14 +21,14 @@ import {createTelemetry,runWithTelemetry,currentTelemetry,setTelemetry,timeTelem
 
 type Captured = {source:'uia';snapshot:NativeDraftSnapshot} | {source:'verified-editor';snapshot:VerifiedComposerSnapshot;currentOrderHint?:StandaloneState['currentOrderHint'];orderEntries:OrderEntry[];orderViewport:StandaloneState['orderViewport'];messageSurface:StandaloneState['messageSurface']};
 const same=(a:Captured,b:Captured)=>a.source===b.source&&(a.source==='uia'?JSON.stringify(a.snapshot)===JSON.stringify(b.snapshot):sameVerifiedDraft(a.snapshot,b.snapshot as VerifiedComposerSnapshot));
-const ORDER_FAILURES:Record<string,string>={PSIM_LOGIN_REQUIRED:'请先登录 TSim 账号后查询订单。',AUTH_CHANGED:'登录状态已变化，请重新登录后查询。',ORDER_PERMISSION_REQUIRED:'当前 TSim 账号没有订单查询权限。',INVALID_ORDER_IDENTIFIER:'请输入有效的订单 ID（字母、数字、下划线或横线）。',ORDER_QUERY_FAILED:'订单服务暂时不可用，请稍后重试。',ORDER_LIST_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_DETAIL_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',INVALID_READ_IDENTIFIER:'订单服务返回了无法识别的结果，请稍后重试。',SERVICE_RESPONSE_TOO_LARGE:'订单结果过大，无法在助手内显示。'};
+const ORDER_FAILURES:Record<string,string>={PSIM_LOGIN_REQUIRED:'请先登录 TSIM 账号后查询订单。',AUTH_CHANGED:'登录状态已变化，请重新登录后查询。',ORDER_PERMISSION_REQUIRED:'当前 TSIM 账号没有订单查询权限。',INVALID_ORDER_IDENTIFIER:'请输入有效的订单 ID（字母、数字、下划线或横线）。',ORDER_QUERY_FAILED:'订单服务暂时不可用，请稍后重试。',ORDER_LIST_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_DETAIL_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',ORDER_RESPONSE_INVALID:'订单服务返回了无法识别的结果，请稍后重试。',INVALID_READ_IDENTIFIER:'订单服务返回了无法识别的结果，请稍后重试。',SERVICE_RESPONSE_TOO_LARGE:'订单结果过大，无法在助手内显示。'};
 const messages:Record<string,string>={
   TRANSLATION_OPTIONS_READ_FAILED:'无法读取兜底语言设置，请重新选择并保存。',
   TRANSLATION_OPTIONS_INVALID:'兜底语言设置无效，请重新选择并保存。',
   TRANSLATION_OPTIONS_SAVE_FAILED:'兜底语言保存失败，仍保留原设置，请重试。',
   MESSAGE_PAGE_INACTIVE:'请先切换到旅游商家的“消息”页面并打开客户会话。',
   CONVERSATION_SOURCE_UNVERIFIED:'客户会话正在切换，请稍后重新查询。',
-  PSIM_LOGIN_REQUIRED:process.platform==='darwin'?'请先在助手内登录 TSim 账号，再使用翻译与订单查询。':'请先在 Edge 或 Chrome 登录 TSim_CS，助手将自动复用浏览器会话。',
+  PSIM_LOGIN_REQUIRED:process.platform==='darwin'?'请先在助手内登录 TSIM 账号，再使用翻译与订单查询。':'请先在 Edge 或 Chrome 登录 TSIM，助手将自动复用浏览器会话。',
   SESSION_STORAGE_ENCRYPTION_UNAVAILABLE:'系统安全存储不可用，请解锁系统钥匙串后重试。',
   SESSION_STORAGE_CORRUPT:'保存的登录态无法解密，请在账户设置中重新登录。',
   SESSION_STORAGE_INVALID:'保存的登录态无效，请在账户设置中重新登录。',
@@ -38,7 +38,7 @@ const messages:Record<string,string>={
   PSIM_SESSION_LOAD_FAILED:'无法读取已保存的登录态，请重试或重新登录。',
   PSIM_SESSION_SAVE_FAILED:'登录态保存失败，请检查本机存储后重试。',
   PSIM_SESSION_CLEAR_FAILED:'登录态清除失败，请检查本机存储后重试。',
-  BROWSER_BRIDGE_UNAVAILABLE:'未读取到浏览器 TSim 会话，请确认已在 Edge 或 Chrome 登录。',
+  BROWSER_BRIDGE_UNAVAILABLE:'未读取到浏览器 TSIM 会话，请确认已在 Edge 或 Chrome 登录。',
   BROWSER_SESSION_ACCESS_DENIED:'系统阻止读取浏览器登录态。请检查浏览器数据的访问权限，再重试。',
   SERVICE_UNAVAILABLE:'暂时无法连接 TSIM 服务，请检查网络后重试。',
   SERVICE_TIMEOUT:'TSIM 服务请求超时，请稍后重试。',
@@ -46,9 +46,9 @@ const messages:Record<string,string>={
   ORDER_PERMISSION_REQUIRED:'当前 TSIM 账号没有订单查询权限。',
   RATE_LIMITED:'TSIM 请求过于频繁，请稍后重试。',
   BROWSER_SESSION_STORAGE_INVALID:'浏览器会话数据暂不可读，请稍后重试。',
-  BROWSER_SESSION_TIMEOUT:'TSim 会话核验超时，请稍后重试。',
-  BROWSER_LOGIN_OPEN_FAILED:'TSim 登录页未能打开，请检查 Edge 或 Chrome 后重试。',
-  BROWSER_BRIDGE_TIMEOUT:'浏览器 TSim 会话响应超时，请检查浏览器连接后重试。',
+  BROWSER_SESSION_TIMEOUT:'TSIM 会话核验超时，请稍后重试。',
+  BROWSER_LOGIN_OPEN_FAILED:'TSIM 登录页未能打开，请检查 Edge 或 Chrome 后重试。',
+  BROWSER_BRIDGE_TIMEOUT:'浏览器 TSIM 会话响应超时，请检查浏览器连接后重试。',
   EXISTING_CLIENT_DEBUG_PORT_REQUIRED:'此客户端未开放编辑器连接。请使用辅助启动入口启动客户端后再连接。',
   COMPOSER_UNAVAILABLE:'未找到可读取的回复文本框，请先打开客户会话。',
   DRAFT_CHANGED:'草稿或客户会话已改变，请重新翻译。',
@@ -59,7 +59,7 @@ const messages:Record<string,string>={
   BROWSER_CLEANUP_UNCONFIRMED:'订单浮层关闭状态暂未确认，请检查浏览器窗口。',
   BROWSER_PLACEMENT_FAILED:'订单浮层未能显示，请重新点击订单号。',
   browser_accessibility_required:'请在 macOS 系统设置 → 隐私与安全性 → 辅助功能中允许旅游商家助手或 TravelMerchant.WindowHelper 控制订单窗口，然后重新查询。',
-  BROWSER_PROFILE_REQUIRED:'请先在已绑定的 Edge 或 Chrome 中登录 TSim_CS，再查询订单。',
+  BROWSER_PROFILE_REQUIRED:'请先在已绑定的 Edge 或 Chrome 中登录 TSIM，再查询订单。',
   ORDER_CONTEXT_CHANGED:'客户会话或登录态已变化，请重新点击订单号。',
   BROWSER_SPACE_TOO_SMALL:'订单查询空间不足，请先放大商家窗口，再打开订单。',
   NATIVE_SEND_FAILED:'未能自动发送，请确认输入框内容后再按 Enter。',
@@ -328,7 +328,7 @@ export class CompanionService {
     },{...sessionOptions,openExternal:openLoginURL,backgroundPolling:false,onStatus:(status,code)=>{
       if(this.closed)return;
       this.state.auth=status;
-      if(status==='failed'){this.sessionError=serviceErrorMessage(code)??messages[code??'SERVICE_UNAVAILABLE']??messages.BROWSER_SESSION_STORAGE_INVALID;this.state.error=this.sessionError;this.state.phase='failed';}
+      if(status==='failed'){this.sessionError=normalizeTsimDisplay(serviceErrorMessage(code)??messages[code??'SERVICE_UNAVAILABLE']??messages.BROWSER_SESSION_STORAGE_INVALID);this.state.error=this.sessionError;this.state.phase='failed';}
       else if(status==='ready'||status==='needs_login'){if(this.sessionError&&this.state.error===this.sessionError){this.state.error=null;if(this.state.phase==='failed')this.state.phase='idle';}this.sessionError=null;}
       sessionOptions.onStatus?.(status,code);this.schedule();this.publish();
     }});
@@ -400,7 +400,7 @@ export class CompanionService {
     else if(!keepFailure){this.state.phase='idle';this.state.error=null;}
     this.publish();
   }
-  private fail(error:unknown,sourceFailure=false){this.telemetryFailure(error);const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:serviceErrorMessage(error)??messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请联系支持。`;this.state.phase='failed';this.publish();}
+  private fail(error:unknown,sourceFailure=false){this.telemetryFailure(error);const code=error instanceof Error?error.message:'SERVICE_UNAVAILABLE';if(code==='MESSAGE_PAGE_INACTIVE'){this.waitForMessagePage();return;}this.clearPendingSend();this.sourceFailure=sourceFailure&&code!=='DRAFT_CHANGED'&&code!=='AUTH_CHANGED';if(this.sourceFailure||['MESSAGE_PAGE_INACTIVE','COMPOSER_UNAVAILABLE','WRITE_UNAVAILABLE','INPUT_COMPOSING'].includes(code)){this.attempted=undefined;this.invalidate();}const locations=error instanceof Error?error.stack?.split('\n').slice(1,5).flatMap(line=>{const match=/([\w.-]+\.(?:c?js|ts):\d+:\d+)/.exec(line);return match?[match[1]]:[];}):[];console.log(JSON.stringify({event:'companion-service-failed',code:/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'UNCLASSIFIED',errorType:error instanceof Error&&/^[A-Za-z]+$/.test(error.name)?error.name:'Unknown',locations}));if(this.sourceFailure||code==='MESSAGE_PAGE_INACTIVE'||code==='COMPOSER_UNAVAILABLE'){this.attempted=undefined;this.invalidate();this.captured=undefined;this.state.draft=null;this.state.orderEntries=[];this.state.currentOrderHint=null;this.state.orderViewport=null;this.state.messageSurface={active:false,composerRect:null,toolbarRect:null};this.state.composerSource='unavailable';this.clearOrder();this.onContextChanged();}this.state.error=this.state.auth==='failed'&&this.sessionError?this.sessionError:normalizeTsimDisplay(serviceErrorMessage(error)??messages[code]??`操作未完成（${/^[A-Z][A-Z0-9_]{1,80}$/.test(code)?code:'SERVICE_UNAVAILABLE'}），请联系支持。`);this.state.phase='failed';this.publish();}
   private async capture():Promise<Captured>{
     const id=this.state.targetInstanceId;if(!id)throw new Error('TARGET_REQUIRED');
     if(this.external){
@@ -804,7 +804,7 @@ export class CompanionService {
       await this.acquireEditor();
       try{const capture=await this.capture();if(!current())return;this.adopt(capture);this.publish();if(!current())return;}finally{this.setBusy(false);}
       this.order={identifier:result.identifier,status:result.found?'ready':'empty',fields:result.fields,error:null};this.publish();
-    }catch(error){if(current()){const code=error instanceof Error?error.message:'';this.order={identifier,status:'failed',fields:[],error:serviceErrorMessage(error)??ORDER_FAILURES[code]??'订单查询未完成，请稍后重试。'};this.publish();}}
+    }catch(error){if(current()){const code=error instanceof Error?error.message:'';this.order={identifier,status:'failed',fields:[],error:normalizeTsimDisplay(serviceErrorMessage(error)??ORDER_FAILURES[code]??'订单查询未完成，请稍后重试。')};this.publish();}}
     finally{if(this.orderRequest===request)this.orderRequest=undefined;}
   }
   private orderSummaries=new Map<string,OrderSummaryEntry>();

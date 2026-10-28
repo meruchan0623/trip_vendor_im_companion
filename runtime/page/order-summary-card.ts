@@ -4,7 +4,7 @@ import {isOwned} from './identifiers';
 import {RUNTIME_PLATFORM} from '../build-manifest';
 /**
  * Read-only plan card in the free space under the vendor's 用户信息. The order-detail frame may be out of process,
- * so the card is a fixed overlay on the main document anchored to the frame's rect; text only, Node owns every TSim read.
+ * so the card is a fixed overlay on the main document anchored to the frame's rect; text only, Node owns every TSIM read.
  */
 export const ORDER_SUMMARY_HOST_ID='tsim-order-summary';
 export const ORDER_SUMMARY_FRAME_SELECTOR='.customer_info:not(.close) iframe.customer_order-detail';
@@ -15,7 +15,7 @@ export const ORDER_SUMMARY_DOCKED_SHARE=0.6;
 /** A settled card for the same order and conversation is shown again without a new read inside this window. */
 export const ORDER_SUMMARY_REUSE_MS=60_000;
 export const ORDER_SUMMARY_FAILURE_TEXT:Record<OrderSummaryFailure,string>={
-  login:'TSim 登录已失效，请重新登录后查询',permission:'当前 TSim 账号没有订单查询权限',rate_limited:'查询过于频繁，请稍后再试',
+  login:'TSIM 登录已失效，请重新登录后查询',permission:'当前 TSIM 账号没有订单查询权限',rate_limited:'查询过于频繁，请稍后再试',
   context:'会话已切换，请在当前会话中重试',unavailable:'暂时无法获取套餐信息，请稍后重试',
 };
 const ORDER_RE=/^[A-Za-z0-9_-]{1,100}$/;
@@ -182,7 +182,7 @@ export function createOrderSummaryCard(document:Document,hooks:OrderSummaryCardH
   const tile=(label:string,text:string|null,className='')=>{const node=make('div',`tile ${className}`.trim()),number=make('b',text?'':'none',text??'—');node.append(make('small','',label),number);return node;};
   function skeleton(){const node=make('div','skeleton'),tiles=make('div','tiles');tiles.append(make('i'),make('i'),make('i'));node.append(make('i'),make('i'),tiles,make('i'));node.setAttribute('aria-label','正在查询套餐信息');return node;}
   function callout(tone:'info'|'warn'|'bad',name:keyof typeof ICONS,text:string,action?:HTMLButtonElement){const node=make('div','callout'),content=make('div');node.dataset.tone=tone;content.append(make('p','',text));if(action)content.append(action);node.append(icon(name),content);return node;}
-  const loginButton=()=>{const node=button('solid','登录 TSim');node.addEventListener('click',()=>{if(!disposed)hooks.openLogin();});return node;};
+  const loginButton=()=>{const node=button('solid','登录 TSIM');node.addEventListener('click',()=>{if(!disposed)hooks.openLogin();});return node;};
   const retryButton=()=>{const node=button('outline','重试');node.addEventListener('click',()=>load(false));return node;};
   function usage(plan:OrderSummaryPlan){
     const status=make('div','status');status.append(make('span','label','套餐状态'),plan.status?pill(plan.status.label,plan.status.tone,plan.status.code):pill('未返回','muted'));
@@ -236,7 +236,7 @@ export function createOrderSummaryCard(document:Document,hooks:OrderSummaryCardH
     let content:Node[]=[];
     if(!target)content=[];
     else if(!auth||auth==='connecting')content=[skeleton()];
-    else if(auth!=='ready')content=[callout('info','lock',auth==='failed'?'TSim 登录服务连接失败，重新登录后自动查询本订单套餐':'登录 TSim 后自动查询本订单的套餐信息',loginButton())];
+    else if(auth!=='ready')content=[callout('info','lock',auth==='failed'?'TSIM 登录服务连接失败，重新登录后自动查询本订单套餐':'登录 TSIM 后自动查询本订单的套餐信息',loginButton())];
     else if(!result)content=[skeleton()];
     else if(result.status==='empty')content=[callout('info','info','未查询到该订单的套餐')];
     else if(result.status==='failed')content=[callout(result.reason==='permission'||result.reason==='rate_limited'?'warn':'bad','alert',ORDER_SUMMARY_FAILURE_TEXT[result.reason],result.reason==='login'?loginButton():result.reason==='permission'?undefined:retryButton())];
@@ -245,7 +245,7 @@ export function createOrderSummaryCard(document:Document,hooks:OrderSummaryCardH
   }
   function renderFoot(){
     if(disposed)return;const at=result?.status==='ready'&&auth==='ready'?result.fetchedAt:undefined;
-    updated.textContent=loading&&result?'正在刷新':at!==undefined?`更新于 ${clock(at)} · TSim`:'';flashText.textContent=flash;
+    updated.textContent=loading&&result?'正在刷新':at!==undefined?`更新于 ${clock(at)} · TSIM`:'';flashText.textContent=flash;
     foot.hidden=!updated.textContent&&!flash;
   }
   // Reads.

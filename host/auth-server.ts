@@ -17,11 +17,11 @@ function loginFailureCode(error:unknown){
 }
 function page(csrf:string,nonce:string,authenticated:boolean,persistent:boolean,embedded:boolean,origin:string){
   const success=persistent?'登录态已加密保存，下次启动会自动恢复。可直接关闭此页面，关闭不会退出登录。':'可直接关闭此页面，关闭不会退出当前登录。';
-  return`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TSim 助手登录</title><style nonce="${nonce}">
+  return`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TSIM 助手登录</title><style nonce="${nonce}">
 *{box-sizing:border-box}body{font:14px system-ui;background:${embedded?'#fff':'#f5f7fb'};color:#172b4d;margin:0 auto;max-width:420px;padding:${embedded?'16px':'24px'}}h1{font-size:21px;letter-spacing:-.4px;margin:0 0 10px}form{display:grid;gap:12px;margin-top:16px}label{display:grid;gap:7px;font-size:13px;font-weight:600}[hidden]{display:none!important}input,button{width:100%;font:inherit;padding:11px 12px;border:1px solid #ccd7e8;border-radius:9px}input{background:#fff;color:#172b4d;outline:none}input:focus{border-color:#3a5bd9;box-shadow:0 0 0 3px #3a5bd918}button{background:#3a5bd9;color:white;cursor:pointer;font-weight:600}button:disabled{opacity:.6;cursor:wait}p{line-height:1.7;color:#64748b;margin:0}#status{min-height:24px;margin-top:14px;font-size:13px}.secondary{background:transparent;color:#344563;margin-top:10px}
-</style><h1 id="heading">${authenticated?'切换 TSim 账号':'登录 TSim 账号'}</h1>
+</style><h1 id="heading">${authenticated?'切换 TSIM 账号':'登录 TSIM 账号'}</h1>
 <p id="intro">登录用于助手翻译与订单查询。${persistent?'登录态加密保存，下次启动自动恢复；':''}不会保存密码。</p>
-<form><label>TSim 账号<input name="username" autocomplete="username" autofocus required maxlength="200"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="4096"></label><button type="submit">登录并返回客户端</button></form>
+<form><label>TSIM 账号<input name="username" autocomplete="username" autofocus required maxlength="200"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="4096"></label><button type="submit">登录并返回客户端</button></form>
 <p role="status" aria-live="polite" id="status"></p><button type="button" class="secondary" id="switch-account" hidden>切换账号</button>
 <script nonce="${nonce}">
 const form=document.querySelector('form'),status=document.getElementById('status'),heading=document.getElementById('heading'),intro=document.getElementById('intro'),switchAccount=document.getElementById('switch-account');
@@ -29,7 +29,7 @@ const csrf=${JSON.stringify(csrf)},embedded=${embedded},endpoint=${JSON.stringif
 const notify=type=>{if(embedded)parent.postMessage({type},'*');};
 const failureMessage=code=>{
   const messages={LOGIN_REQUEST_REJECTED:'登录页面已失效或安全隔离不可用，请重启客户端后重试。',LOGIN_REQUEST_BUSY:'正在处理登录，请稍候再试。',INVALID_AUTH_REQUEST:'登录请求格式无效，请重新打开登录页。',INVALID_LOGIN:'请输入有效的账号和密码。',PSIM_HTTP_400:'账号或密码未通过核验，请重新输入。',PSIM_HTTP_401:'账号或密码未通过核验，请重新输入。',PSIM_HTTP_403:'当前账号无法登录，请核对账号权限。',PSIM_HTTP_423:'当前账号已停用或锁定，请联系管理员。',PSIM_HTTP_429:'登录尝试过于频繁，请稍后重试。',LOGIN_SESSION_STORAGE_FAILED:'登录态无法加密保存，请检查本机权限后重试。',PROFILE_UNVERIFIED:'账号状态未通过核验，请联系管理员。',LOGIN_RESPONSE_INVALID:'登录服务返回异常，请稍后重试。'};
-  return Object.prototype.hasOwnProperty.call(messages,code)?messages[code]+'（'+code+'）':'登录服务暂不可用，请稍后重试。（LOGIN_SERVICE_UNAVAILABLE）';
+  return Object.prototype.hasOwnProperty.call(messages,code)?messages[code]+'（'+code.replace(/^PSIM_/,'TSIM_')+'）':'登录服务暂不可用，请稍后重试。（LOGIN_SERVICE_UNAVAILABLE）';
 };
 document.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();form.elements.password.value='';notify('TSIM_LOGIN_CLOSE');}});
 form.addEventListener('submit',async event=>{
@@ -42,7 +42,7 @@ form.addEventListener('submit',async event=>{
   }catch{status.textContent='无法连接登录服务，请检查连接后重试。（LOGIN_NETWORK_UNAVAILABLE）';}
   finally{form.elements.password.value='';submit.disabled=false;form.setAttribute('aria-busy','false');}
 });
-switchAccount.addEventListener('click',()=>{form.hidden=false;intro.hidden=false;switchAccount.hidden=true;heading.textContent='切换 TSim 账号';status.textContent='';form.elements.username.focus();});
+switchAccount.addEventListener('click',()=>{form.hidden=false;intro.hidden=false;switchAccount.hidden=true;heading.textContent='切换 TSIM 账号';status.textContent='';form.elements.username.focus();});
 </script></html>`;
 }
 /** Random loopback capability; only the isolated login document handles credentials. */

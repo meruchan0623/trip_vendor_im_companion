@@ -40,7 +40,7 @@ test('dispose clears a pending load timeout and ignores late completion',async()
 test('backend measurements are readable and survive raw toggle with unknown tokens kept null',async()=>{
  const f=fixture();try{
   f.setRows([{...record,providerMs:125,serverMs:180,providerQueueMs:12,diagnosticsVersion:1,usageAttribution:'request_owned_calls',inputTokens:314,outputTokens:23,cachedInputTokens:128,cacheWriteTokens:null,reasoningTokens:0,upstreamCalls:1,upstreamCallsCompleted:1,usageComplete:true,cacheSource:'upstream',token:'TOKEN_SECRET'}]);
-  await flush();await f.tick();assert.match(f.area.value,/上游传输耗时合计：125 ms/);assert.match(f.area.value,/TSim处理耗时：180 ms/);assert.match(f.area.value,/上游输入Token合计：314/);assert.match(f.area.value,/上游缓存写入Token：未提供/);assert.match(f.area.value,/结果来源：新建上游调用/);
+  await flush();await f.tick();assert.match(f.area.value,/上游传输耗时合计：125 ms/);assert.match(f.area.value,/TSIM处理耗时：180 ms/);assert.match(f.area.value,/上游输入Token合计：314/);assert.match(f.area.value,/上游缓存写入Token：未提供/);assert.match(f.area.value,/结果来源：新建上游调用/);
   f.raw.checked=true;f.raw.dispatchEvent(new f.w.Event('change'));const row=JSON.parse(f.area.value);assert.equal(row.inputTokens,314);assert.equal(row.outputTokens,23);assert.equal(row.cacheWriteTokens,null);assert.equal(row.usageAttribution,'request_owned_calls');assert.equal(row.diagnosticsVersion,1);assert.equal(row.token,undefined);
  }finally{f.close();}
 });

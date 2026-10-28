@@ -35,7 +35,7 @@ const EXPECTED:OrderSummary={identifier:ORDER,total:2,plans:[
     {time:'10-01 00:00',region:'France',operator:null,usage:'0 MB',plmn:null},
   ]},
 ]};
-/** Fixture TSim package-query routes keyed by path and query; an Error value fails that request. */
+/** Fixture TSIM package-query routes keyed by path and query; an Error value fails that request. */
 function api(overrides:Record<string,unknown>={}){
   const routes:Record<string,unknown>={
     '/agent/package-query/perform':{code:1,result:{query_id:'q-1'}},
@@ -294,7 +294,7 @@ test('card renders the projected plan as text in the requested order',{timeout:1
     assert.deepEqual(h.texts('.cdr .where span'),['Tokyo · SoftBank','Japan · NTT Docomo','Korea']);
     assert.equal(h.root.textContent!.includes('…'),false);
     assert.deepEqual(h.texts('.cdr .where small'),['PLMN 440-20','PLMN 440-10']);assert.deepEqual(h.texts('.cdr b'),['300 MB','2 MB','0.5 MB']);
-    assert.match(h.root.querySelector('.foot')!.textContent!,/^更新于 \d{2}:\d{2}:\d{2} · TSim$/);
+    assert.match(h.root.querySelector('.foot')!.textContent!,/^更新于 \d{2}:\d{2}:\d{2} · TSIM$/);
     // Second plan: missing fields read as an em dash and optional rows disappear.
     const tabs=[...h.root.querySelectorAll<HTMLButtonElement>('.tab')];
     assert.deepEqual(tabs.map(tab=>tab.textContent),['套餐 1','套餐 2']);assert.equal(tabs[0].getAttribute('aria-selected'),'true');
@@ -332,7 +332,7 @@ test('card shows login, failure and retry states and ignores stale or mismatched
   const h=harness();
   try{
     h.card.update({identifier:ORDER,conversationKey:'conv',auth:'needs_login'});
-    assert.equal(h.loads.length,0);assert.equal(h.root.querySelector('.callout p')!.textContent,'登录 TSim 后自动查询本订单的套餐信息');
+    assert.equal(h.loads.length,0);assert.equal(h.root.querySelector('.callout p')!.textContent,'登录 TSIM 后自动查询本订单的套餐信息');
     h.root.querySelector<HTMLButtonElement>('.solid')!.click();assert.equal(h.logins(),1);
     h.card.update({identifier:ORDER,conversationKey:'conv',auth:'failed'});assert.match(h.root.querySelector('.callout p')!.textContent!,/连接失败/);
     h.card.update({identifier:ORDER,conversationKey:'conv',auth:'connecting'});assert.ok(h.root.querySelector('.skeleton'));assert.equal(h.loads.length,0);
@@ -344,7 +344,7 @@ test('card shows login, failure and retry states and ignores stale or mismatched
     assert.equal(h.root.querySelector('.callout p')!.textContent,ORDER_SUMMARY_FAILURE_TEXT.unavailable,'a reply for another order is never shown');
     h.root.querySelector<HTMLButtonElement>('.outline')!.click();assert.equal(h.loads.length,3);assert.equal(h.loads[2].intent.refresh,false);
     const replies:[unknown,string,string|null][]=[
-      [{status:'failed',identifier:'ORD-2',reason:'login'},ORDER_SUMMARY_FAILURE_TEXT.login,'登录 TSim'],
+      [{status:'failed',identifier:'ORD-2',reason:'login'},ORDER_SUMMARY_FAILURE_TEXT.login,'登录 TSIM'],
       [{status:'failed',identifier:'ORD-2',reason:'permission'},ORDER_SUMMARY_FAILURE_TEXT.permission,null],
       [{status:'failed',identifier:'ORD-2',reason:'rate_limited'},ORDER_SUMMARY_FAILURE_TEXT.rate_limited,'重试'],
       [{status:'empty',identifier:'ORD-2'},'未查询到该订单的套餐',null],
