@@ -87,13 +87,15 @@ npm run package:windows:injector
 
 ### macOS 一次性注入安装器
 
+0.7.4 候选版合入翻译旧协议兼容、TSIM 错误提示及页面性能修复：订单工作台仅点击时加载，关闭后最多保留 60 秒；稳定心跳不重复刷新摘要，订单观察和语言识别按相关变化更新。已生成 `release/旅游商家助手-0.7.4-macOS一次性注入安装器-arm64.zip`，完整打包流程 191 项 TAP 测试及隔离安装事务、官方样本检查通过；未安装到用户客户端。官方页面自身的秒级长任务及旧 Electron 运行时仍需实机复测，不能据此宣称全部卡顿已解决。见 [修复计划](docs/2026-10-28-tsim-client-performance-and-translation-fix-plan.md) 和 [验收记录、校验和与限制](docs/2026-10-28-tsim-injector-0.7.4-validation.md)。
+
 用户自行重装官方客户端以清除旧的客户端修改。Codex 后续只修改本仓库并生成安装器，不直接操作已安装客户端组件。旧的 IM 启动节流和 BrowserView 重挂载修补已移除，仅保留助手入口集成。
 
 需要 Apple Silicon 构建主机及受支持的官方原件（当前为 1.2.12 / ares 1.2.15）。运行时支持已核验的内置页面及当前用户目录中的 1.2.15 / 1.2.16 页面，未知版本或文件变化会停止连接：
 
 ```sh
 node scripts/inject-macos-official.mjs --official work/mac-arm64/official-apple.dmg
-npm run package:mac:injector
+npm run package:mac:injector -- --official work/mac-arm64/official-apple.dmg --version 0.7.4
 ```
 
 构建仅写入工作目录及发行目录。打开生成的一次性安装器，核对 `/Applications/旅游商家桌面版.app`，完全退出客户端后手动安装；之后从原客户端入口启动。更新及卸载也由用户在安装器内操作。安装器核验目标、保留原版备份，拒绝用旧备份覆盖已被官方升级或改动的客户端。原命令的 `--install` / `--install-built` 直接安装入口已停用。

@@ -15,7 +15,7 @@ import {injectorTreeDigest} from './lib/mac-installer-package.mjs';
 import {validateMacRuntimeManifest, macRendererName, assertMacRendererContract} from '../runtime/macos-page-compatibility.mjs';
 
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('APPLE_SILICON_BUILD_HOST_REQUIRED');
-const options = {official: [], output: 'release', version: '0.7.0'};
+const options = {official: [], output: 'release', version: '0.7.4'};
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
   const key = args[i].replace(/^--/, '');
@@ -38,7 +38,7 @@ function run(command, commandArgs, env = process.env) {
 const plist = (app, key) => run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(app, 'Contents/Info.plist')]);
 const APP = '旅游商家助手安装器.app', HELPER = '旅游商家助手.app';
 // The packaged components need the same platform-specific acceptance gates.
-for (const suite of ['outbound-wait-controller', 'macos-page-selection', 'macos-owned-session', 'macos-runtime-order', 'macos-native-parity', 'operator-overlay', 'macos-launcher-recovery', 'macos-dynamic-runtime', 'translation-http-telemetry', 'translation-service-telemetry', 'runtime-diagnostics', 'telemetry-log-viewer', 'transport-recovery', 'native-recovery', 'vendor-window-defaults', 'macos-window-defaults', 'order-summary', 'macos-injector-transaction']) {
+for (const suite of ['outbound-wait-controller', 'macos-page-selection', 'macos-owned-session', 'macos-runtime-order', 'macos-native-parity', 'operator-overlay', 'macos-launcher-recovery', 'translation-http-telemetry', 'translation-service-telemetry', 'runtime-diagnostics', 'telemetry-log-viewer', 'transport-recovery', 'native-recovery', 'vendor-window-defaults', 'macos-window-defaults', 'order-summary', 'order-observation', 'page-performance', 'macos-injector-transaction']) {
   run(process.execPath, [`tests/run-${suite}.mjs`]);
 }
 await mkdir(work, {recursive: true}); await mkdir(output, {recursive: true});
@@ -104,6 +104,9 @@ try {
         version: runtime.executableVersion === plist(official, 'CFBundleVersion') && report.version === plist(official, 'CFBundleShortVersionString'),
       };
       assertMacRendererContract(await readFile(join(dist, 'js', page.rendererName), 'utf8'), await readFile(join(dist, 'js', page.navigationRendererName), 'utf8'));
+      // This suite's real-page probe requires a concrete official sample. Run
+      // after dry-run adaptation so packaging never silently skips that probe.
+      run(process.execPath, ['tests/run-macos-dynamic-runtime.mjs'], {...process.env, TMC_OFFICIAL_APP: stage});
       run('/usr/bin/codesign', ['--verify', '--deep', '--strict', stage]);
       if (Object.values(checks).some(value => !value)) throw new Error('DRY_RUN_ACCEPTANCE_FAILED ' + JSON.stringify({source, checks}));
       accepted.push({source, version: report.version, build: report.build, electron: report.electron, chromiumMajor: report.chromiumMajor, aresVersion: page.aresVersion, stageSha256: report.digest});
