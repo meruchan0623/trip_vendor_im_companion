@@ -1,4 +1,5 @@
 import {matchesPageConversation} from './conversation';
+import {createConversationScroll} from './conversation-scroll';
 import {RUNTIME_PLATFORM} from '../build-manifest';
 import {createCustomerLanguageReader,affectsCustomerLanguage} from './language';
 import type {OperatorSessionGrant,OrderWindowIntent,PanelState} from '../../src/shared/workbench';
@@ -27,6 +28,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
     return options.bridge.invoke('operatorSession',[intent]) as Promise<OperatorSessionGrant>;
   }});
   const bound=()=>!!state&&matchesPageConversation(document,state.conversationKey);
+  const conversationScroll=createConversationScroll(document);
   const panel=options.bridge&&state?createOutboundPanel(document,options.bridge,state,{openOrder:(identifier,identifierType)=>{
     if(!bound()){overlay.close();return;}
     // The operator needs the companion's account; sign in first instead of showing TSIM's own login.
@@ -41,6 +43,7 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
   const showOrder=(order:string|undefined)=>{if(shownOrder===order)return;panel?.setOrder(order);shownOrder=order;syncSummary();};
   const renderCurrent=(onlyBindingChange=false)=>{
     if(!state)return;const currentBound=bound();
+    conversationScroll.update(state.conversationKey,currentBound);
     // Heartbeats still verify the binding, but a stable binding cannot schedule
     // rendering or layout. Relevant DOM changes invalidate geometry separately.
     if(onlyBindingChange&&renderedBound===currentBound)return;
@@ -156,6 +159,6 @@ export function mountPageFeatures(document:Document,options:{bridge?:PanelBridge
       return true;
     },
     geometry(){const rect=panel?.host.isConnected?panel.host.getBoundingClientRect():{x:0,y:0,width:0,height:0};return{x:rect.x,y:rect.y,width:rect.width,height:rect.height,viewportWidth:view.innerWidth,viewportHeight:view.innerHeight,devicePixelRatio:view.devicePixelRatio||1};},
-    dispose(){if(disposed)return;disposed=true;clearRetry();customerReport=undefined;customerReader.reset();view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('compositionstart',onCompositionStart,true);document.removeEventListener('compositionend',onCompositionEnd,true);document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();summary?.dispose();overlay.dispose();},
+    dispose(){if(disposed)return;disposed=true;conversationScroll.dispose();clearRetry();customerReport=undefined;customerReader.reset();view.clearTimeout(customerTimer);view.clearTimeout(orderTimer);orderObserver.disconnect();orderObservation?.dispose();document.removeEventListener('compositionstart',onCompositionStart,true);document.removeEventListener('compositionend',onCompositionEnd,true);document.removeEventListener('visibilitychange',onVisibility);panel?.dispose();summary?.dispose();overlay.dispose();},
   };
 }
