@@ -4,13 +4,13 @@
  * the page. ICCID and the business serial (`topup_id`) are shown on request of the support team. The page re-validates the shape before rendering it as text.
  */
 export const ORDER_SUMMARY_PLAN_LIMIT=5;
-export const ORDER_SUMMARY_CDR_LIMIT=3;
+export const ORDER_SUMMARY_CDR_LIMIT=10;
 export type OrderSummaryTone='ok'|'warn'|'bad'|'muted';
 export type OrderRemainingTone='ok'|'warn'|'over';
 export interface OrderSummaryStatus {code:string;label:string;tone:OrderSummaryTone}
 /** Remaining quota of the whole plan (`total`) or of today's daily allowance (`daily`). */
 export interface OrderSummaryRemaining {text:string;quota:string;scope:'total'|'daily';percent:number;tone:OrderRemainingTone}
-export interface OrderSummaryCdr {time:string|null;region:string|null;operator:string|null;usage:string|null;plmn:string|null}
+export interface OrderSummaryCdr {time:string|null;region:string|null;operator:string|null;usage:string|null}
 /** `null` means the server did not return the field. */
 export interface OrderSummaryPlan {
   serialNumber:string|null;iccid:string|null;
@@ -32,7 +32,7 @@ const IDENTIFIER=/^[A-Za-z0-9_-]{1,100}$/;
 const keys=(...names:string[])=>names.sort().join(',');
 const exact=(value:unknown,expected:string):value is Record<string,unknown>=>!!value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===expected;
 const PLAN_KEYS=keys('serialNumber','iccid','supplier','apn','channelPlanName','sourcePlanName','status','totalUsage','todayUsage','remaining','unlimited','esimStatus','eid','deviceModel','cdrs');
-const CDR_KEYS=keys('time','region','operator','usage','plmn');
+const CDR_KEYS=keys('time','region','operator','usage');
 const STATUS_KEYS=keys('code','label','tone');
 const REMAINING_KEYS=keys('text','quota','scope','percent','tone');
 const FAILURES:readonly OrderSummaryFailure[]=['login','permission','rate_limited','context','unavailable'];
@@ -45,7 +45,7 @@ const text=(value:unknown,max:number):value is string=>typeof value==='string'&&
 const optional=(value:unknown,max:number)=>value===null||text(value,max);
 function validStatus(value:unknown){return value===null||exact(value,STATUS_KEYS)&&text(value.code,40)&&text(value.label,20)&&['ok','warn','bad','muted'].includes(String(value.tone));}
 function validRemaining(value:unknown){return value===null||exact(value,REMAINING_KEYS)&&text(value.text,24)&&text(value.quota,24)&&(value.scope==='total'||value.scope==='daily')&&Number.isInteger(value.percent)&&(value.percent as number)>=0&&(value.percent as number)<=100&&['ok','warn','over'].includes(String(value.tone));}
-function validCdr(value:unknown){return exact(value,CDR_KEYS)&&optional(value.time,16)&&optional(value.region,40)&&optional(value.operator,40)&&optional(value.usage,24)&&optional(value.plmn,8);}
+function validCdr(value:unknown){return exact(value,CDR_KEYS)&&optional(value.time,16)&&optional(value.region,40)&&optional(value.operator,40)&&optional(value.usage,24);}
 function validPlan(value:unknown){
   return exact(value,PLAN_KEYS)&&optional(value.serialNumber,64)&&(value.iccid===null||text(value.iccid,24)&&/^[0-9A-Fa-f]{18,22}$/.test(value.iccid))&&optional(value.supplier,120)&&optional(value.apn,100)&&optional(value.channelPlanName,200)&&optional(value.sourcePlanName,200)&&validStatus(value.status)&&optional(value.totalUsage,24)&&optional(value.todayUsage,24)&&validRemaining(value.remaining)&&typeof value.unlimited==='boolean'&&optional(value.esimStatus,32)&&optional(value.eid,64)&&optional(value.deviceModel,80)&&Array.isArray(value.cdrs)&&value.cdrs.length<=ORDER_SUMMARY_CDR_LIMIT&&value.cdrs.every(validCdr);
 }

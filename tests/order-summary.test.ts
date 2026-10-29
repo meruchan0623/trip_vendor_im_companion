@@ -27,12 +27,13 @@ const MORE_101={code:1,result:{list:[
 const DETAIL_102={code:1,result:{supplier_name:'-',channel_dataplan_name:'Global 3GB 30天',dataplan_name:'Global 3GB',status:'inactive',operate:{allow_cdr:0,allow_activation_callback:0},data_usage:'0',cdr_list:[{update_datetime:'2026-10-01 00:00:00',country:'France',total_usage_kb:0}]}};
 const EXPECTED:OrderSummary={identifier:ORDER,total:2,plans:[
   {serialNumber:'202610250931813371519835',iccid:SECRETS.iccid,supplier:'Supplier A',apn:'ctnet',channelPlanName:'日本 每日1GB 5天',sourcePlanName:'JP Daily 1GB',status:{code:'using',label:'使用中',tone:'ok'},totalUsage:'2 GB',todayUsage:'850 MB',remaining:{text:'174 MB',quota:'1 GB',scope:'daily',percent:17,tone:'warn'},unlimited:false,esimStatus:'Enabled',eid:'89049032000000000000000000000001',deviceModel:'iPhone 15 Pro',cdrs:[
-    {time:'10-26 09:30',region:'Tokyo',operator:'SoftBank',usage:'300 MB',plmn:'440-20'},
-    {time:'10-25 08:10',region:'Japan',operator:'NTT Docomo',usage:'2 MB',plmn:'440-10'},
-    {time:'2026-10-24',region:'Korea',operator:null,usage:'0.5 MB',plmn:null},
+    {time:'10-26 09:30',region:'Tokyo',operator:'SoftBank',usage:'300 MB'},
+    {time:'10-25 08:10',region:'Japan',operator:'NTT Docomo',usage:'2 MB'},
+    {time:'2026-10-24',region:'Korea',operator:null,usage:'0.5 MB'},
+    {time:'10-20 10:00',region:'Old Row',operator:null,usage:'0 MB'},
   ]},
   {serialNumber:null,iccid:null,supplier:null,apn:null,channelPlanName:'Global 3GB 30天',sourcePlanName:'Global 3GB',status:{code:'inactive',label:'不支持自动同步',tone:'muted'},totalUsage:'0 MB',todayUsage:null,remaining:{text:'3 GB',quota:'3 GB',scope:'total',percent:100,tone:'ok'},unlimited:false,esimStatus:null,eid:null,deviceModel:null,cdrs:[
-    {time:'10-01 00:00',region:'France',operator:null,usage:'0 MB',plmn:null},
+    {time:'10-01 00:00',region:'France',operator:null,usage:'0 MB'},
   ]},
 ]};
 /** Fixture TSIM package-query routes keyed by path and query; an Error value fails that request. */
@@ -99,11 +100,13 @@ test('amounts, quotas, statuses and eSIM codes follow the operator panel rules',
   assert.equal(esimTone('Enabled'),'ok');assert.equal(esimTone('disabled'),'warn');assert.equal(esimTone('Not_Installed'),'warn');assert.equal(esimTone('Deleted'),'bad');assert.equal(esimTone('Unknown'),'muted');
 });
 
-test('CDRs are newest first, at most three, and keep only time, place, operator, usage and PLMN',()=>{
+test('CDRs are newest first, at most ten, and keep only time, place, operator and usage',()=>{
   const rows=latestCdrs(MORE_101.result.list);
   assert.deepEqual(rows,EXPECTED.plans[0].cdrs);noSecrets(rows);
-  for(const row of rows)assert.deepEqual(Object.keys(row).sort(),['operator','plmn','region','time','usage']);
+  for(const row of rows)assert.deepEqual(Object.keys(row).sort(),['operator','region','time','usage']);
   assert.deepEqual(latestCdrs([{update_time:'not-a-time',country:'A'},{update_time:1e20,country:'B'}]).map(row=>row.time),[null,null]);
+  const many=Array.from({length:12},(_,day)=>({update_datetime:`2026-10-${String(day+1).padStart(2,'0')} 08:00:00`,country:`Day ${day+1}`,mcc:'440',mnc:'10'}));
+  assert.deepEqual(latestCdrs(many).map(row=>row.region),Array.from({length:10},(_,index)=>`Day ${12-index}`));
 });
 
 test('collection reads perform, list and each plan in order and projects allowlisted fields only',async()=>{
@@ -267,7 +270,8 @@ function harness(markup?:string){
   const card=createOrderSummaryCard(env.document as unknown as Document,{load:intent=>{const reply=deferred<unknown>();loads.push({intent,reply});return reply.promise;},openLogin:()=>{logins++;}});
   const root=card.host.shadowRoot!;
   const texts=(selector:string)=>[...root.querySelectorAll(selector)].map(node=>node.textContent);
-  const field=(label:string)=>[...root.querySelectorAll('dt')].find(node=>node.textContent===label)?.nextElementSibling?.textContent;
+  /** The value beside an identifier label or inside a 供应商/APN/eSIM cell. */
+  const field=(label:string)=>[...root.querySelectorAll('dt,.spec small')].find(node=>node.textContent===label)?.nextElementSibling?.textContent;
   return{...env,card,root,loads,texts,field,logins:()=>logins,outside:()=>outside,ready:(summary:OrderSummary=EXPECTED)=>({status:'ready',summary,fetchedAt:Date.now()})};
 }
 const at=(document:Document,selector:string)=>document.querySelector<HTMLElement>(selector)!;
@@ -277,32 +281,43 @@ test('card renders the projected plan as text in the requested order',{timeout:1
   try{
     h.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});
     assert.deepEqual(h.loads.map(load=>load.intent),[{identifier:ORDER,conversationKey:'conv',refresh:false}]);
-    assert.ok(h.root.querySelector('.skeleton'));assert.equal(h.root.querySelector('.order')!.textContent,ORDER);
+    assert.ok(h.root.querySelector('.skeleton'));assert.match(h.root.querySelector('.tg')!.getAttribute('title')!,new RegExp(`订单 ${ORDER}$`));
     h.loads[0].reply.resolve(h.ready());await settle();
-    assert.deepEqual(h.texts('dt'),['业务流水号','ICCID','供应商','APN','渠道套餐','源套餐','eSIM 状态','EID','设备型号']);
-    assert.deepEqual(h.texts('dd'),['202610250931813371519835',SECRETS.iccid,'Supplier A','ctnet','日本 每日1GB 5天','JP Daily 1GB','Enabled','89049032000000000000000000000001','iPhone 15 Pro']);
-    const sections=[...h.root.querySelectorAll('section')].map(node=>node.textContent??'');
-    assert.equal(sections.length,6);
-    ['业务流水号','供应商','渠道套餐','套餐状态','eSIM 状态','最近 3 条 CDR'].forEach((label,index)=>assert.ok(sections[index].includes(label),label));
-    assert.equal(h.root.querySelector('.pill')!.textContent,'使用中 using');
-    assert.deepEqual(h.texts('.tile small'),['总用量','当日用量','今日剩余']);assert.deepEqual(h.texts('.tile b'),['2 GB','850 MB','174 MB']);
-    assert.equal(at(h.root as never,'.tile.remain').dataset.tone,'warn');
-    const meter=at(h.root as never,'.meter');assert.equal(meter.getAttribute('aria-valuenow'),'17');assert.equal((meter.firstElementChild as HTMLElement).style.width,'17%');
-    assert.deepEqual(h.texts('.caption span'),['剩余 17%','每日流量 1 GB']);
-    assert.equal(at(h.root as never,'.code').dataset.tone,'ok');
-    assert.deepEqual(h.texts('.cdr time'),['10-26 09:30','10-25 08:10','2026-10-24']);
-    assert.deepEqual(h.texts('.cdr .where span'),['Tokyo · SoftBank','Japan · NTT Docomo','Korea']);
-    assert.equal(h.root.textContent!.includes('…'),false);
-    assert.deepEqual(h.texts('.cdr .where small'),['PLMN 440-20','PLMN 440-10']);assert.deepEqual(h.texts('.cdr b'),['300 MB','2 MB','0.5 MB']);
-    assert.match(h.root.querySelector('.foot')!.textContent!,/^更新于 \d{2}:\d{2}:\d{2} · TSIM$/);
-    // Second plan: missing fields read as an em dash and optional rows disappear.
+    assert.equal(h.root.querySelector('.count')!.textContent,'2 个套餐');
+    assert.deepEqual([...h.root.querySelectorAll('section')].map(node=>node.className),['row hero','row names','row identifiers','row records']);
+    // Remaining quota: ring, status beside the figure, total and today's usage underneath.
+    const ring=at(h.root as never,'.ring');
+    assert.equal(ring.dataset.tone,'warn');assert.equal(ring.getAttribute('aria-valuenow'),'17');assert.equal(h.root.querySelector('.ring b')!.textContent,'17%');
+    assert.equal(h.root.querySelector('.ring .fg')!.getAttribute('stroke-dasharray'),`${(2*Math.PI*18*0.17).toFixed(1)} ${(2*Math.PI*18).toFixed(1)}`);
+    const status=at(h.root as never,'.pill');assert.equal(status.textContent,'使用中');assert.equal(status.title,'using');assert.equal(status.dataset.tone,'ok');
+    assert.deepEqual(h.texts('.lab span'),['使用中','今日剩余']);assert.deepEqual(h.texts('.num > *'),['174 MB','/ 1 GB']);
+    assert.equal(h.root.querySelector('.sub')!.textContent,'总用量 2 GB当日 850 MB');
+    assert.deepEqual(h.texts('.ch,.src'),['日本 每日1GB 5天','JP Daily 1GB']);
+    assert.deepEqual(h.texts('.spec small'),['供应商','APN','eSIM']);assert.deepEqual(h.texts('.spec b'),['Supplier A','ctnet','Enabled']);
+    assert.equal(at(h.root as never,'.spec b[data-tone]').dataset.tone,'ok');
+    // Identifiers read in groups of four.
+    const group=(text:string)=>text.replace(/(.{4})(?=.)/g,'$1 ');
+    assert.deepEqual(h.texts('dt'),['流水号','ICCID','EID','设备']);
+    assert.deepEqual(h.texts('dd'),[group('202610250931813371519835'),group(SECRETS.iccid),group('89049032000000000000000000000001'),'iPhone 15 Pro']);
+    assert.deepEqual([...h.root.querySelectorAll('.copy')].map(node=>node.getAttribute('aria-label')),['复制 业务流水号','复制 ICCID','复制 EID']);
+    // Mixed regions stay on each row; the bar is the usage relative to the largest record.
+    assert.deepEqual(h.texts('.heading > *'),['最近 4 条 CDR','302.5 MB 合计']);
+    assert.deepEqual(h.texts('.cdr time'),['10-26 09:30','10-25 08:10','2026-10-24','10-20 10:00']);
+    assert.deepEqual(h.texts('.cdr .op'),['Tokyo · SoftBank','Japan · NTT Docomo','Korea','Old Row']);
+    assert.deepEqual([...h.root.querySelectorAll<HTMLElement>('.cdr .bar')].map(bar=>bar.style.width),['100%','4%','4%','4%']);
+    assert.equal(h.root.textContent!.includes('…'),false);assert.equal(h.root.textContent!.includes('PLMN'),false);
+    assert.deepEqual(h.texts('.cdr b'),['300 MB','2 MB','0.5 MB','0 MB']);
+    assert.equal(h.root.querySelector('.cdrs')!.getAttribute('tabindex'),'0');
+    assert.deepEqual(h.texts('.foot > span'),['刚刚更新','· TSIM · 60 秒内复用','']);assert.match(h.root.querySelector('.foot .rel')!.getAttribute('title')!,/^更新于 \d{2}:\d{2}:\d{2}$/);
+    // Second plan: missing fields read as 未返回 or an em dash, and one shared region moves to the heading.
     const tabs=[...h.root.querySelectorAll<HTMLButtonElement>('.tab')];
-    assert.deepEqual(tabs.map(tab=>tab.textContent),['套餐 1','套餐 2']);assert.equal(tabs[0].getAttribute('aria-selected'),'true');
+    assert.deepEqual(tabs.map(tab=>tab.textContent),['套餐 1使用中','套餐 2不支持自动同步']);assert.equal(tabs[0].getAttribute('aria-selected'),'true');
     tabs[1].click();
-    assert.deepEqual(h.texts('dt'),['业务流水号','ICCID','供应商','APN','渠道套餐','源套餐','eSIM 状态']);
-    assert.deepEqual(h.texts('dd'),['—','—','—','—','Global 3GB 30天','Global 3GB','—']);
-    assert.equal(h.root.querySelector('.pill')!.textContent,'不支持自动同步 inactive');
-    assert.deepEqual(h.texts('.tile small'),['总用量','套餐剩余']);assert.deepEqual(h.texts('.cdr .where span'),['France']);
+    assert.deepEqual(h.texts('dd'),['未返回','未返回','实体卡或未返回','未返回']);assert.equal(h.root.querySelector('.copy'),null);
+    assert.deepEqual(h.texts('.spec b'),['—','—','未返回']);
+    assert.equal(h.root.querySelector('.pill')!.textContent,'不支持自动同步');assert.deepEqual(h.texts('.lab span'),['不支持自动同步','套餐剩余']);
+    assert.equal(h.root.querySelector('.ring')!.hasAttribute('data-tone'),false);assert.equal(h.root.querySelector('.ring b')!.textContent,'100%');
+    assert.deepEqual(h.texts('.heading > *'),['最近 1 条 CDR · France','0 MB 合计']);assert.deepEqual(h.texts('.cdr .op'),['—']);
     assert.equal(h.outside(),0,'clicks inside the card never reach the vendor page');
   }finally{h.card.dispose();h.window.close();}
 });
@@ -314,17 +329,33 @@ test('card treats server text as text and notes plans beyond the shown ones',{ti
     h.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});
     const hostile='<img src=x onerror=alert(1)>';
     h.loads[0].reply.resolve(h.ready(single({...PLAN,supplier:hostile,deviceModel:'<script>alert(1)</script>',unlimited:false,remaining:null,todayUsage:null}, 9)));await settle();
-    assert.equal(h.root.querySelector('img,script'),null);assert.equal(h.field('供应商'),hostile);
-    assert.equal(h.root.querySelector('.note')!.textContent,'该订单共 9 个套餐，这里显示前 1 个');assert.equal(h.root.querySelector('.tabs'),null);
-    assert.deepEqual(h.texts('.tile b'),['2 GB','—']);assert.equal(h.root.querySelector('.meter'),null);
-    h.root.querySelector<HTMLButtonElement>('[aria-label="复制 EID"]')!.click();await settle();
-    assert.equal(copied,PLAN.eid);assert.equal(h.root.querySelector('.flash')!.textContent,'已复制 EID');
+    assert.equal(h.root.querySelector('img,script'),null);assert.equal(h.field('供应商'),hostile);assert.equal(h.field('设备'),'<script>alert(1)</script>');
+    const more=at(h.root as never,'.tabs .more');assert.equal(more.textContent,'+8');assert.equal(more.title,'该订单共 9 个套餐，这里显示前 1 个；其余请在 TSIM 中查看');
+    assert.equal(h.root.querySelector('.count')!.textContent,'9 个套餐');
+    assert.deepEqual(h.texts('.num > *'),['—']);assert.equal(h.root.querySelector('.ring')!.hasAttribute('role'),false);
+    assert.equal(at(h.root as never,'.ring').dataset.tone,'muted');assert.deepEqual(h.texts('.lab span'),['使用中','无用量数据']);assert.equal(h.root.querySelector('.sub')!.textContent,'总用量 2 GB');
+    const copyEid=h.root.querySelector<HTMLButtonElement>('[aria-label="复制 EID"]')!;copyEid.click();await settle();
+    assert.equal(copied,PLAN.eid);assert.equal(h.root.querySelector('.flash')!.textContent,'已复制 EID');assert.ok(copyEid.classList.contains('done'),'the copied button turns into a check');
     const unlimited=harness();
     try{
+      const today=new Date(Date.now()+8*3600_000).toISOString().slice(5,10);
       unlimited.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});
-      unlimited.loads[0].reply.resolve(unlimited.ready(single({...PLAN,remaining:null,unlimited:true})));await settle();
-      assert.deepEqual(unlimited.texts('.tile b'),['2 GB','850 MB','不限量']);
+      unlimited.loads[0].reply.resolve(unlimited.ready(single({...PLAN,remaining:null,unlimited:true,cdrs:[{time:`${today} 09:15`,region:'Japan',operator:'KDDI',usage:'1.5 GB'},{time:'2026-01-01',region:'Japan',operator:null,usage:null}]})));await settle();
+      assert.deepEqual(unlimited.texts('.num > *'),['不限量']);assert.equal(unlimited.root.querySelector('.ring b')!.textContent,'∞');assert.deepEqual(unlimited.texts('.lab span'),['使用中','不限量套餐']);
+      assert.deepEqual(unlimited.texts('.heading > *'),['最近 2 条 CDR · Japan','1.5 GB 合计']);
+      assert.deepEqual(unlimited.texts('.cdr time'),['今天 09:15','2026-01-01']);assert.deepEqual(unlimited.texts('.cdr time.today'),['今天 09:15']);
+      assert.deepEqual(unlimited.texts('.cdr .op'),['KDDI','—']);assert.deepEqual(unlimited.texts('.cdr b'),['1.5 GB','—']);
+      // Collapsed: status, remaining and the plan name stay visible.
+      assert.equal(at(unlimited.root as never,'.sum').hidden,true);
+      unlimited.root.querySelector<HTMLElement>('.tg')!.click();
+      assert.equal(at(unlimited.root as never,'.sum').hidden,false);assert.deepEqual(unlimited.texts('.sum > :not(.mini)'),['使用中','不限量','套餐 1 · 日本 每日1GB 5天']);
+      unlimited.root.querySelector<HTMLElement>('.tg')!.click();assert.equal(at(unlimited.root as never,'.sum').hidden,true);
     }finally{unlimited.card.dispose();unlimited.window.close();}
+    const empty=harness();
+    try{
+      empty.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});empty.loads[0].reply.resolve(empty.ready(single({...PLAN,cdrs:[]})));await settle();
+      assert.deepEqual(empty.texts('.heading > *'),['CDR']);assert.equal(empty.root.querySelector('.empty')!.textContent,'暂无 CDR 记录');assert.equal(empty.root.querySelector('.cdrs'),null);
+    }finally{empty.card.dispose();empty.window.close();}
   }finally{h.card.dispose();h.window.close();}
 });
 
@@ -379,8 +410,14 @@ test('card reuses a settled snapshot briefly, refreshes in place and forgets it 
     assert.equal(h.field('供应商'),'Refreshed');assert.equal(refresh.disabled,false);
     const toggle=h.root.querySelector<HTMLButtonElement>('.toggle')!;toggle.click();
     assert.ok(h.root.querySelector('.card')!.classList.contains('collapsed'));assert.equal(toggle.getAttribute('aria-expanded'),'false');toggle.click();
+    assert.equal(h.root.querySelector('.card')!.classList.contains('collapsed'),false,'the toggle button flips once, not again through the title bar');
+    h.root.querySelector<HTMLElement>('.title')!.click();
+    assert.ok(h.root.querySelector('.card')!.classList.contains('collapsed'),'clicking 套餐速览 collapses the card');assert.equal(toggle.getAttribute('aria-expanded'),'false');
+    h.root.querySelector<HTMLElement>('.head')!.click();assert.equal(h.root.querySelector('.card')!.classList.contains('collapsed'),false,'clicking the title bar expands it again');
+    refresh.click();assert.equal(h.root.querySelector('.card')!.classList.contains('collapsed'),false,'refresh never toggles');assert.equal(h.loads.length,4);
+    h.loads[3].reply.resolve(h.ready());await settle();
     h.card.update({identifier:ORDER,conversationKey:'conv-other',auth:'needs_login'});assert.equal(h.root.querySelector('dd'),null);
-    h.card.update({identifier:ORDER,conversationKey:'conv-other',auth:'ready'});assert.equal(h.loads.length,4,'nothing read under an earlier sign-in is shown again');
+    h.card.update({identifier:ORDER,conversationKey:'conv-other',auth:'ready'});assert.equal(h.loads.length,5,'nothing read under an earlier sign-in is shown again');
     assert.ok(h.root.querySelector('.skeleton'));
     const key=new h.window.KeyboardEvent('keydown',{bubbles:true,composed:true,key:'Enter'});refresh.dispatchEvent(key);assert.equal(h.outside(),0);
   }finally{h.card.dispose();h.window.close();}
@@ -429,18 +466,19 @@ test('Windows type is legible, near-black and dense; the scrollbar is a hairline
     h.card.update({identifier:ORDER,conversationKey:'conv',auth:'ready'});
     const css=h.root.querySelector('style')!.textContent!;
     // Every font size goes through the scale, so the Windows layer reaches all of them.
-    assert.equal(/font(?:-size)?:[^;{}]*d+(?:.d+)?px/.test(css.replace(/--fs-[a-z]+:[d.]+px/g,'')),false);
+    assert.equal(/font(?:-size)?:[^;{}]*\d+(?:\.\d+)?px/.test(css.replace(/--fs-[a-z]+:[\d.]+px/g,'')),false);
     const windows=css.slice(css.lastIndexOf(':host{'));
     assert.match(windows,/'Microsoft YaHei UI'/);assert.match(windows,/'Cascadia Mono',Consolas/);
-    for(const [,size] of windows.matchAll(/--fs-[a-z]+:([d.]+)px/g))assert.ok(Number(size)>=12&&Number(size)<=15,size);
+    // Text sizes stay between 12 and 15px; only the remaining-quota figure is larger.
+    for(const [,name,size] of windows.matchAll(/--fs-([a-z]+):([\d.]+)px/g))assert.ok(name==='hero'?Number(size)>=18:Number(size)>=12&&Number(size)<=15,`${name} ${size}`);
     for(const [,hex] of windows.matchAll(/--ink(?:-[23])?:#([0-9a-f]{6})/g)){
       const [r,g,b]=[0,2,4].map(i=>parseInt(hex.slice(i,i+2),16));assert.ok(Math.max(r,g,b)<=0x60,hex);
     }
     // No text is ever elided: values wrap instead.
     assert.equal(/ellipsis/.test(css),false);
-    // The order number stays whole on one line.
-    assert.match(css,/.order{[^}]*white-space:nowrap;flex:none/);
-    assert.match(css,/.body::-webkit-scrollbar{width:3px/);assert.equal(/scrollbar-(?:width|color)[^;]*;?[^}]*}/.test(css.match(/.body{[^}]*}/g)!.join('')),false);
+    // CDR times stay whole on one line.
+    assert.match(css,/\.cdr time\{[^}]*white-space:nowrap/);
+    assert.match(css,/\.body::-webkit-scrollbar\{width:3px/);assert.equal(/scrollbar-(?:width|color)[^;]*;?[^}]*}/.test(css.match(/\.body\{[^}]*}/g)!.join('')),false);
   }finally{h.card.dispose();h.window.close();}
 });
 

@@ -128,17 +128,15 @@ function cdrClock(row:Row):string|null{
   if(seconds!==null){const local=new Date(seconds*1000+8*3600_000).toISOString();return `${local.slice(5,10)} ${local.slice(11,16)}`;}
   return typeof row.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(row.date)?row.date:null;
 }
-/** Projects only time, place, operator, usage and PLMN; ICCID/IMSI/MSISDN on the row are never read. */
+/** Projects only time, place, operator and usage; ICCID/IMSI/MSISDN on the row are never read. */
 export function projectCdr(row:Row):OrderSummaryCdr{
   const kb=typeof row.total_usage_kb==='number'||typeof row.total_usage_kb==='string'?parseAmountMb(String(row.total_usage_kb)):null;
   const mb=kb!==null?kb/1024:parseAmountMb(row.total_usage);
-  const mcc=displayText(row.mcc,3),mnc=displayText(row.mnc,3);
   return{
     time:cdrClock(row),
     region:first(40,row.country,row.region),
     operator:first(40,row.operator),
     usage:mb===null?null:formatMb(mb),
-    plmn:mcc&&mnc&&/^\d{3}$/.test(mcc)&&/^\d{2,3}$/.test(mnc)?`${mcc}-${mnc}`:null,
   };
 }
 export function latestCdrs(rows:unknown[]):OrderSummaryCdr[]{
